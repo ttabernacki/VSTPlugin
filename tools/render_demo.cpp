@@ -135,9 +135,10 @@ int main (int argc, char** argv)
     std::vector<char> blob ((std::istreambuf_iterator<char> (f)), {});
     const std::string dir = argv[2];
 
-    auto base = [] (float az, float el, float dist, float focus = 0.8f, float room = 0.15f) {
+    auto base = [] (float az, float el, float dist, float focus = 0.8f, float room = 0.15f, float rear = 0.6f) {
         SpatParams p;
         p.azimuthDeg = az; p.elevationDeg = el; p.distance = dist; p.room = room; p.decay = 0.35f; p.focus = focus;
+        p.rear = rear;
         return p;
     };
 
@@ -187,6 +188,29 @@ int main (int argc, char** argv)
         renderSegments (sp, segs, src, l, r);
         writeWav16 (dir + "/demo_3_focus_ab.wav", l, r);
         std::printf ("wrote demo_3_focus_ab.wav (%.0f s)\n", total);
+    }
+
+    // ---- demo 4: back cue A/B. Focus 1.0; Rear 0, 0.5, 1.0. front/back/front/back + 135/-135 deg ----
+    {
+        std::vector<Segment> segs;
+        const float azs[] = { 0, 180, 0, 180, 135, 0, -135, 180 };
+        for (float rear : { 0.0f, 0.5f, 1.0f })
+        {
+            for (float az : azs)
+                segs.push_back ({ 1.5f, [=] (float) { return base (az, 0, 0.25f, 1.0f, 0.1f, rear); } });
+            segs.push_back ({ 1.5f, [=] (float) { return base (0, 0, 0.25f, 1.0f, 0.1f, rear); } });
+        }
+        // then a slow lap so you can hear the image pass behind you
+        segs.push_back ({ 12.0f, [=] (float t) { return base (360.0f * t, 0, 0.25f, 1.0f, 0.1f, 1.0f); } });
+        float total = 0;
+        for (auto& s : segs) total += s.seconds;
+        const auto src = pulsedPink (total);
+        Spatializer sp;
+        sp.prepare (kFs, 64, blob.data(), blob.size());
+        std::vector<float> l, r;
+        renderSegments (sp, segs, src, l, r);
+        writeWav16 (dir + "/demo_4_rear_ab.wav", l, r);
+        std::printf ("wrote demo_4_rear_ab.wav (%.0f s)\n", total);
     }
 
     // ---- demo 2: electric piano moving through space ---------------------------

@@ -30,6 +30,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout OrbitPanAudioProcessor::crea
     p.push_back (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "focus", 1 }, "Focus", Range (0.0f, 1.0f, 0.001f), 0.7f));
     p.push_back (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { "rear", 1 }, "Rear", Range (0.0f, 1.0f, 0.001f), 0.5f));
+    p.push_back (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "room", 1 }, "Room", Range (0.0f, 1.0f, 0.001f), 0.2f));
     p.push_back (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "decay", 1 }, "Decay", Range (0.0f, 1.0f, 0.001f), 0.4f));
@@ -49,6 +51,7 @@ OrbitPanAudioProcessor::OrbitPanAudioProcessor()
     pElevation = apvts.getRawParameterValue ("elevation");
     pDistance = apvts.getRawParameterValue ("distance");
     pFocus = apvts.getRawParameterValue ("focus");
+    pRear = apvts.getRawParameterValue ("rear");
     pRoom = apvts.getRawParameterValue ("room");
     pDecay = apvts.getRawParameterValue ("decay");
     pOrbit = apvts.getRawParameterValue ("orbit");
@@ -88,6 +91,7 @@ void OrbitPanAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     p.elevationDeg = pElevation->load();
     p.distance = pDistance->load();
     p.focus = pFocus->load();
+    p.rear = pRear->load();
     p.room = pRoom->load();
     p.decay = pDecay->load();
     p.orbitHz = pOrbit->load();

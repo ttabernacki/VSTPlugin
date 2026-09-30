@@ -20,6 +20,7 @@ struct SpatParams
     float decay = 0.4f;        // 0..1 reverb RT60, 0.25 s .. 2 s
     float orbitHz = 0.0f;      // cycles per second added to azimuth (+ = clockwise from above)
     float focus = 0.7f;        // 0..1 how strongly front/back and up/down cues are exaggerated
+    float rear = 0.5f;         // 0..1 extra 'behind' cues: HF shadow, 1 kHz band, less direct / more room
 };
 
 // Binaural source positioner: measured HRIRs (min-phase + fractional ITD), distance
@@ -60,6 +61,8 @@ public:
             d.fill (0.0f);
         writePos = 0;
         lp = 0.0f;
+        rearShelf.clear();
+        rearPeak.clear();
         room.reset();
         initialised = false;
     }
@@ -95,6 +98,44 @@ private:
             s0 += a[i] * b[i];
         return ((s0 + s1) + (s2 + s3)) + ((s4 + s5) + (s6 + s7));
     }
+
+    // RBJ biquad, transposed direct form II, one state pair per ear
+    struct Biquad
+    {
+        float b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+        float z1[2] = { 0, 0 }, z2[2] = { 0, 0 };
+        float process (int ch, float x)
+        {
+            const float y = b0 * x + z1[ch];
+            z1[ch] = b1 * x - a1 * y + z2[ch];
+            z2[ch] = b2 * x - a2 * y;
+            return y;
+        }
+        void clear() { z1[0] = z1[1] = z2[0] = z2[1] = 0.0f; }
+        void setHighShelf (double fs, double f0, double gainDb)
+        {
+            const double A = std::pow (10.0, gainDb / 40.0), w = 2.0 * 3.14159265358979 * f0 / fs;
+            const double cw = std::cos (w), alpha = std::sin (w) / 2.0 * std::sqrt (2.0); // S = 1
+            const double sq = 2.0 * std::sqrt (A) * alpha;
+            const double a0 = (A + 1) - (A - 1) * cw + sq;
+            b0 = (float) (A * ((A + 1) + (A - 1) * cw + sq) / a0);
+            b1 = (float) (-2 * A * ((A - 1) + (A + 1) * cw) / a0);
+            b2 = (float) (A * ((A + 1) + (A - 1) * cw - sq) / a0);
+            a1 = (float) (2 * ((A - 1) - (A + 1) * cw) / a0);
+            a2 = (float) (((A + 1) - (A - 1) * cw - sq) / a0);
+        }
+        void setPeak (double fs, double f0, double q, double gainDb)
+        {
+            const double A = std::pow (10.0, gainDb / 40.0), w = 2.0 * 3.14159265358979 * f0 / fs;
+            const double cw = std::cos (w), alpha = std::sin (w) / (2.0 * q);
+            const double a0 = 1 + alpha / A;
+            b0 = (float) ((1 + alpha * A) / a0);
+            b1 = (float) (-2 * cw / a0);
+            b2 = (float) ((1 - alpha * A) / a0);
+            a1 = b1;
+            a2 = (float) ((1 - alpha / A) / a0);
+        }
+    };
 
     static constexpr int kDelayMask = 1023;
 
@@ -154,12 +195,24 @@ private:
                 distSm += scalarA * (p.distance - distSm);
                 roomSm += scalarA * (p.room - roomSm);
                 focusSm += scalarA * (p.focus - focusSm);
+                rearSm += scalarA * (p.rear - rearSm);
             }
             const float len = std::sqrt (sx * sx + sy * sy + sz * sz);
             if (len > 1e-4f)
             {
                 curAz = std::atan2 (sx, sy) / deg2rad;
                 curEl = std::asin (std::clamp (sz / len, -1.0f, 1.0f)) / deg2rad;
+            }
+
+            // how far behind the listener the source is (0 front/sides .. 1 directly behind)
+            float behind = len > 1e-4f ? std::clamp (-sy / len, 0.0f, 1.0f) : 0.0f;
+            behind = behind * behind * (3.0f - 2.0f * behind);
+            const float rearAmt = behind * std::clamp (rearSm, 0.0f, 1.0f);
+            if (std::abs (rearAmt - lastRearAmt) > 1e-3f || ! initialised)
+            {
+                rearShelf.setHighShelf (fs, 4000.0, -10.0 * rearAmt); // pinna shadow above ~4 kHz
+                rearPeak.setPeak (fs, 1200.0, 1.0, 3.5 * rearAmt);    // Blauert 'behind' band
+                lastRearAmt = rearAmt;
             }
 
             float itdNew = 0.0f;
@@ -175,7 +228,7 @@ private:
             const float dNewR = kBaseDelay + std::max (0.0f, -itdNew);
 
             const float dMetres = distanceMetres (distSm);
-            const float gEnd = distanceGain (dMetres);
+            const float gEnd = distanceGain (dMetres) * (1.0f - 0.25f * rearAmt); // behind: less direct
             const float fc = std::clamp (20000.0f / (1.0f + 0.15f * dMetres), 1500.0f, 0.45f * (float) fs);
             const float lpA = 1.0f - std::exp (-2.0f * pi * fc / (float) fs);
 
@@ -185,7 +238,7 @@ private:
                 room.setDecay (rt60);
                 lastRt60 = rt60;
             }
-            const float wet = roomSm * 0.8f;
+            const float wet = roomSm * 0.8f * (1.0f + 0.8f * rearAmt);            // behind: more diffuse
             initialised = true;
 
             // ---- pre-process input: distance filter + gain, feed the room ----------
@@ -215,6 +268,12 @@ private:
                     yl = t * yl + (1.0f - t) * dot (hOldL.data(), win, T);
                     yr = t * yr + (1.0f - t) * dot (hOldR.data(), win, T);
                 }
+                if (lastRearAmt > 1e-3f || rearActive)
+                {
+                    yl = rearPeak.process (0, rearShelf.process (0, yl));
+                    yr = rearPeak.process (1, rearShelf.process (1, yr));
+                    rearActive = lastRearAmt > 1e-3f;
+                }
                 delayBuf[0][(size_t) (writePos & kDelayMask)] = yl;
                 delayBuf[1][(size_t) (writePos & kDelayMask)] = yr;
                 const float t = (float) (i + 1) / mf;
@@ -242,6 +301,9 @@ private:
     static float distanceGain (float metres) { return 1.0f / (0.5f + 0.5f * metres); }
 
     HrtfTable table;
+    Biquad rearShelf, rearPeak;
+    float rearSm = 0.5f, lastRearAmt = 0.0f;
+    bool rearActive = false;
     RoomFdn room;
     double fs = 48000.0;
     int maxBlock = 512, taps = 0;

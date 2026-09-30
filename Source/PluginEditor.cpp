@@ -201,6 +201,7 @@ OrbitPanEditor::OrbitPanEditor (OrbitPanAudioProcessor& p)
     addKnob (elev, "elevation", "Elevation");
     addKnob (distance, "distance", "Distance");
     addKnob (focus, "focus", "Focus");
+    addKnob (rear, "rear", "Rear");
     addKnob (room, "room", "Room");
     addKnob (decay, "decay", "Decay");
     addKnob (orbit, "orbit", "Orbit");
@@ -227,8 +228,8 @@ void OrbitPanEditor::resized()
     top.removeFromLeft (10);
     elevation.setBounds (top.removeFromLeft (110));
 
-    const int w = knobs.getWidth() / 7;
-    for (auto* k : { &azimuth, &elev, &distance, &focus, &room, &decay, &orbit })
+    const int w = knobs.getWidth() / 8;
+    for (auto* k : { &azimuth, &elev, &distance, &focus, &rear, &room, &decay, &orbit })
     {
         auto cell = knobs.removeFromLeft (w);
         k->label.setBounds (cell.removeFromTop (16));

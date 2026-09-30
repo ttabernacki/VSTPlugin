@@ -11,6 +11,10 @@ where the sound sits around your head: azimuth, elevation and distance.
 - **Focus** - crossfades between the measured filters and a set whose front/back and up/down
   spectral differences are exaggerated (ITD/ILD untouched). Generic HRTFs give weak
   elevation and front/back cues; this trades some naturalness for clarity. 0.7 by default.
+- **Rear** - explicit 'behind' cues scaled by how far behind you the source is (front and sides
+  are untouched): a -10 dB high shelf above 4 kHz (pinna shadow), a +3.5 dB band at 1.2 kHz
+  (Blauert's 'behind' band), a slightly quieter direct path and more diffuse room. At Rear 1.0
+  the front/back spectral distance goes from about 4.5 dB to 12 dB in the DSP tests.
 - **Distance** - level, air-absorption low-pass, and a constant-level decorrelated 8-line FDN
   room, so the direct-to-reverberant ratio falls as the source moves away (this is also what
   keeps sounds outside the head).
@@ -22,6 +26,7 @@ where the sound sits around your head: azimuth, elevation and distance.
 | Elevation | -90..90 deg | +90 straight up |
 | Distance | 0..1 | 0.3 m .. 15 m, exponential |
 | Focus | 0..1 | direction-cue exaggeration |
+| Rear | 0..1 | extra cues when the source is behind you |
 | Room / Decay | 0..1 | room level / RT60 0.25-2 s |
 | Orbit | -2..2 Hz | |
 

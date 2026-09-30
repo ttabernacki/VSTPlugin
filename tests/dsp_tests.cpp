@@ -204,6 +204,42 @@ int main (int argc, char** argv)
         CHECK (std::abs (lagOf (r0.l, r0.r) - lagOf (r1.l, r1.r)) < 2.0, "ITD unchanged by focus");
     }
 
+    std::printf ("Rear cues\n");
+    {
+        auto withRear = [] (float az, float el, float rear) {
+            SpatParams p = dry (az, el);
+            p.rear = rear;
+            return p;
+        };
+        const auto bk0 = run (x, withRear (180, 0, 0.0f)), bk1 = run (x, withRear (180, 0, 1.0f));
+        const auto fr0 = run (x, withRear (0, 0, 0.0f)), fr1 = run (x, withRear (0, 0, 1.0f));
+        const auto rt0 = run (x, withRear (90, 0, 0.0f)), rt1 = run (x, withRear (90, 0, 1.0f));
+        const double dHf = 10 * std::log10 (highShare (bk0.l) / highShare (bk1.l));
+        CHECK (dHf > 3.0, "directly behind: HF share drops %.1f dB with Rear 0 -> 1", dHf);
+        CHECK (spectralDistance (fr0.l, fr1.l) < 0.05, "front unaffected by Rear (%.3f dB)", spectralDistance (fr0.l, fr1.l));
+        CHECK (spectralDistance (rt0.l, rt1.l) < 0.05 && spectralDistance (rt0.r, rt1.r) < 0.05, "sides unaffected by Rear");
+        const double fbGap0 = spectralDistance (fr0.l, bk0.l), fbGap1 = spectralDistance (fr1.l, bk1.l);
+        CHECK (fbGap1 > fbGap0 + 2.0, "front/back spectral distance Rear 0 -> 1: %.1f -> %.1f dB", fbGap0, fbGap1);
+        CHECK (rms (bk1.l, 2000) < rms (bk0.l, 2000), "behind is slightly less direct (%.2f dB)",
+               20 * std::log10 (rms (bk1.l, 2000) / rms (bk0.l, 2000)));
+        // sweep through the back with rear on: no clicks from coefficient updates
+        Spatializer s;
+        s.prepare (48000.0, 64, blob.data(), blob.size());
+        std::vector<float> sine (96000), ol (96000), orr (96000);
+        for (size_t i = 0; i < sine.size(); ++i)
+            sine[i] = 0.5f * std::sin (2.0f * 3.14159265f * 700.0f * (float) i / 48000.0f);
+        for (size_t i = 0; i < sine.size(); i += 64)
+        {
+            SpatParams p = withRear (0, 0, 1.0f);
+            p.orbitHz = 1.0f;
+            s.process (sine.data() + i, nullptr, ol.data() + i, orr.data() + i, 64, p);
+        }
+        float maxStep = 0;
+        for (size_t i = 20000; i < ol.size(); ++i)
+            maxStep = std::max (maxStep, std::abs (ol[i] - ol[i - 1]));
+        CHECK (maxStep < 0.2f, "orbit through the back is click-free (max step %.3f)", maxStep);
+    }
+
     std::printf ("Distance\n");
     {
         const auto near_ = run (x, dry (0, 0, 0.05f)), far_ = run (x, dry (0, 0, 0.9f));
