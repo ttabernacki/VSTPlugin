@@ -67,6 +67,6 @@ private:
     OrbitPanAudioProcessor& proc;
     RadarPad radar;
     ElevationPad elevation;
-    Knob azimuth, elev, distance, focus, rear, room, decay, orbit;
+    Knob azimuth, elev, distance, depth, focus, rear, room, decay, orbit;
     juce::Label title;
 };

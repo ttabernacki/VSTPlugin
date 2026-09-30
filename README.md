@@ -15,6 +15,10 @@ where the sound sits around your head: azimuth, elevation and distance.
   are untouched): a -10 dB high shelf above 4 kHz (pinna shadow), a +3.5 dB band at 1.2 kHz
   (Blauert's 'behind' band), a slightly quieter direct path and more diffuse room. At Rear 1.0
   the front/back spectral distance goes from about 4.5 dB to 12 dB in the DSP tests.
+- **Depth** - bipolar, heavily exaggerated push/pull on top of Distance (0 = neutral, bit-identical to
+  before). Close: +4 dB, +10 dB proximity bass at 250 Hz, +4 dB presence shelf at 6 kHz, dry signal,
+  and near-field ILD (near ear +2 dB, far ear -9 dB for a lateral source). Far: -20 dB, a 12 dB/oct
+  low-pass down to ~2 kHz, and room up to 4.5x (direct-to-reverberant ratio falls by ~44 dB).
 - **Distance** - level, air-absorption low-pass, and a constant-level decorrelated 8-line FDN
   room, so the direct-to-reverberant ratio falls as the source moves away (this is also what
   keeps sounds outside the head).
@@ -27,6 +31,7 @@ where the sound sits around your head: azimuth, elevation and distance.
 | Distance | 0..1 | 0.3 m .. 15 m, exponential |
 | Focus | 0..1 | direction-cue exaggeration |
 | Rear | 0..1 | extra cues when the source is behind you |
+| Depth | -1..1 | far away .. right at your face (0 neutral) |
 | Room / Decay | 0..1 | room level / RT60 0.25-2 s |
 | Orbit | -2..2 Hz | |
 

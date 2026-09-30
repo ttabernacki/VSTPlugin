@@ -190,7 +190,7 @@ void OrbitPanEditor::addKnob (Knob& k, const juce::String& id, const juce::Strin
 OrbitPanEditor::OrbitPanEditor (OrbitPanAudioProcessor& p)
     : juce::AudioProcessorEditor (&p), proc (p), radar (p), elevation (p)
 {
-    setSize (640, 470);
+    setSize (720, 470);
     title.setText ("ORBITPAN", juce::dontSendNotification);
     title.setFont (juce::FontOptions (18.0f, juce::Font::bold));
     title.setColour (juce::Label::textColourId, kAccent);
@@ -200,6 +200,7 @@ OrbitPanEditor::OrbitPanEditor (OrbitPanAudioProcessor& p)
     addKnob (azimuth, "azimuth", "Azimuth");
     addKnob (elev, "elevation", "Elevation");
     addKnob (distance, "distance", "Distance");
+    addKnob (depth, "depth", "Depth");
     addKnob (focus, "focus", "Focus");
     addKnob (rear, "rear", "Rear");
     addKnob (room, "room", "Room");
@@ -228,8 +229,8 @@ void OrbitPanEditor::resized()
     top.removeFromLeft (10);
     elevation.setBounds (top.removeFromLeft (110));
 
-    const int w = knobs.getWidth() / 8;
-    for (auto* k : { &azimuth, &elev, &distance, &focus, &rear, &room, &decay, &orbit })
+    const int w = knobs.getWidth() / 9;
+    for (auto* k : { &azimuth, &elev, &distance, &depth, &focus, &rear, &room, &decay, &orbit })
     {
         auto cell = knobs.removeFromLeft (w);
         k->label.setBounds (cell.removeFromTop (16));

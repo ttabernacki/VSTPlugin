@@ -240,6 +240,74 @@ int main (int argc, char** argv)
         CHECK (maxStep < 0.2f, "orbit through the back is click-free (max step %.3f)", maxStep);
     }
 
+    std::printf ("Depth (exaggerated push/pull)\n");
+    {
+        auto withDepth = [] (float az, float depth, float room = 0.0f) {
+            SpatParams p = dry (az, 0);
+            p.depth = depth;
+            p.room = room;
+            return p;
+        };
+        const auto mid = run (x, withDepth (0, 0.0f)), nr = run (x, withDepth (0, 1.0f)), fr = run (x, withDepth (0, -1.0f));
+        auto db = [] (double a, double b) { return 20 * std::log10 (a / b); };
+        CHECK (db (rms (nr.l, 2000), rms (mid.l, 2000)) > 2.0, "close is louder: %+.1f dB vs neutral", db (rms (nr.l, 2000), rms (mid.l, 2000)));
+        CHECK (db (rms (fr.l, 2000), rms (mid.l, 2000)) < -15.0, "far is much quieter: %+.1f dB vs neutral", db (rms (fr.l, 2000), rms (mid.l, 2000)));
+        const double darker = 10 * std::log10 (highShare (mid.l) / highShare (fr.l));
+        CHECK (darker > 8.0, "far is much darker: HF share %.1f dB lower", darker);
+        auto bandPower = [] (const std::vector<float>& v, double f) {
+            const double w = 2.0 * 3.14159265358979 * f / 48000.0, c = 2.0 * std::cos (w);
+            double s1 = 0, s2 = 0;
+            for (size_t i = 4000; i < v.size(); ++i)
+            {
+                const double s0 = v[i] + c * s1 - s2;
+                s2 = s1;
+                s1 = s0;
+            }
+            return s1 * s1 + s2 * s2 - c * s1 * s2;
+        };
+        const double lfNear = 10 * std::log10 ((bandPower (nr.l, 100) / bandPower (nr.l, 2000)) / (bandPower (mid.l, 100) / bandPower (mid.l, 2000)));
+        CHECK (lfNear > 5.0, "close has proximity bass: +%.1f dB at 100 Hz relative to 2 kHz", lfNear);
+
+        // direct-to-reverberant ratio falls with depth
+        std::vector<float> imp (48000 * 2, 0.0f);
+        imp[100] = 1.0f;
+        auto drr = [&] (float depth) {
+            const auto r = run (imp, withDepth (0, depth, 0.6f));
+            double direct = 0, reverb = 0;
+            for (size_t i = 0; i < r.l.size(); ++i)
+                (i < 600 ? direct : reverb) += (double) r.l[i] * r.l[i] + (double) r.r[i] * r.r[i];
+            return 10 * std::log10 (direct / reverb);
+        };
+        const double dNear = drr (1.0f), dMid = drr (0.0f), dFar = drr (-1.0f);
+        CHECK (dNear > dMid + 6.0 && dMid > dFar + 6.0, "direct/reverb ratio close %.1f > neutral %.1f > far %.1f dB", dNear, dMid, dFar);
+
+        // near-field ILD at 90 degrees
+        const auto s0 = run (x, withDepth (90, 0.0f)), s1 = run (x, withDepth (90, 1.0f));
+        const double ild0 = db (rms (s0.r, 2000), rms (s0.l, 2000)), ild1 = db (rms (s1.r, 2000), rms (s1.l, 2000));
+        CHECK (ild1 > ild0 + 6.0, "close lateral source has larger ILD: %.1f -> %.1f dB", ild0, ild1);
+
+        // sweep depth far -> close -> far with a sine: no clicks
+        Spatializer sp;
+        sp.prepare (48000.0, 64, blob.data(), blob.size());
+        std::vector<float> sine (96000), ol (96000), orr (96000);
+        for (size_t i = 0; i < sine.size(); ++i)
+            sine[i] = 0.5f * std::sin (2.0f * 3.14159265f * 700.0f * (float) i / 48000.0f);
+        for (size_t i = 0; i < sine.size(); i += 64)
+        {
+            SpatParams p = dry (0, 0);
+            p.depth = std::cos (2.0f * 3.14159265f * (float) i / 48000.0f); // +-1, 1 Hz
+            sp.process (sine.data() + i, nullptr, ol.data() + i, orr.data() + i, 64, p);
+        }
+        float maxStep = 0;
+        bool finite = true;
+        for (size_t i = 10; i < ol.size(); ++i)
+        {
+            maxStep = std::max (maxStep, std::abs (ol[i] - ol[i - 1]));
+            finite = finite && std::isfinite (ol[i]);
+        }
+        CHECK (finite && maxStep < 0.5f, "depth sweep is click-free (max step %.3f)", maxStep);
+    }
+
     std::printf ("Distance\n");
     {
         const auto near_ = run (x, dry (0, 0, 0.05f)), far_ = run (x, dry (0, 0, 0.9f));

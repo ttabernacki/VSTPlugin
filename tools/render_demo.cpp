@@ -213,6 +213,34 @@ int main (int argc, char** argv)
         std::printf ("wrote demo_4_rear_ab.wav (%.0f s)\n", total);
     }
 
+    // ---- demo 5: depth. Keys dead ahead; Depth sweeps, then a lateral close-up ----
+    {
+        auto withDepth = [&] (float az, float depth) {
+            SpatParams p = base (az, 0, 0.25f, 0.8f, 0.25f, 0.6f);
+            p.depth = depth;
+            return p;
+        };
+        std::vector<Segment> segs = {
+            { 6.0f, [&] (float) { return withDepth (0, 0.0f); } },                                   // neutral reference
+            { 10.0f, [&] (float t) { return withDepth (0, -t); } },                                   // glide to far away
+            { 4.0f, [&] (float) { return withDepth (0, -1.0f); } },
+            { 14.0f, [&] (float t) { return withDepth (0, -1.0f + 2.0f * t); } },                     // far -> right at your face
+            { 4.0f, [&] (float) { return withDepth (0, 1.0f); } },
+            { 10.0f, [&] (float t) { return withDepth (0, 1.0f - 2.0f * t); } },                      // back to far
+            { 6.0f, [&] (float) { return withDepth (70, 1.0f); } },                                   // close to the right ear
+            { 6.0f, [&] (float) { return withDepth (-70, 1.0f); } },                                  // close to the left ear
+        };
+        float total = 0;
+        for (auto& s : segs) total += s.seconds;
+        const auto src = keysLine (total);
+        Spatializer sp;
+        sp.prepare (kFs, 64, blob.data(), blob.size());
+        std::vector<float> l, r;
+        renderSegments (sp, segs, src, l, r);
+        writeWav16 (dir + "/demo_5_depth.wav", l, r);
+        std::printf ("wrote demo_5_depth.wav (%.0f s)\n", total);
+    }
+
     // ---- demo 2: electric piano moving through space ---------------------------
     {
         std::vector<Segment> segs = {

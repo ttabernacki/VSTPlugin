@@ -51,6 +51,7 @@ private:
     std::atomic<float>* pAzimuth = nullptr;
     std::atomic<float>* pElevation = nullptr;
     std::atomic<float>* pDistance = nullptr;
+    std::atomic<float>* pDepth = nullptr;
     std::atomic<float>* pFocus = nullptr;
     std::atomic<float>* pRear = nullptr;
     std::atomic<float>* pRoom = nullptr;

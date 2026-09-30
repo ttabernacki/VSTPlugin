@@ -28,6 +28,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout OrbitPanAudioProcessor::crea
         juce::ParameterID { "distance", 1 }, "Distance", Range (0.0f, 1.0f, 0.001f), 0.25f,
         Attr().withStringFromValueFunction ([] (float v, int) { return juce::String (distanceToMetres (v), 1) + " m"; })));
     p.push_back (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { "depth", 1 }, "Depth", Range (-1.0f, 1.0f, 0.001f), 0.0f,
+        Attr().withStringFromValueFunction ([] (float v, int) {
+            return std::abs (v) < 0.005f ? juce::String ("neutral") : (v > 0 ? "close " : "far ") + juce::String (juce::roundToInt (std::abs (v) * 100.0f)) + "%";
+        })));
+    p.push_back (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "focus", 1 }, "Focus", Range (0.0f, 1.0f, 0.001f), 0.7f));
     p.push_back (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "rear", 1 }, "Rear", Range (0.0f, 1.0f, 0.001f), 0.5f));
@@ -50,6 +55,7 @@ OrbitPanAudioProcessor::OrbitPanAudioProcessor()
     pAzimuth = apvts.getRawParameterValue ("azimuth");
     pElevation = apvts.getRawParameterValue ("elevation");
     pDistance = apvts.getRawParameterValue ("distance");
+    pDepth = apvts.getRawParameterValue ("depth");
     pFocus = apvts.getRawParameterValue ("focus");
     pRear = apvts.getRawParameterValue ("rear");
     pRoom = apvts.getRawParameterValue ("room");
@@ -90,6 +96,7 @@ void OrbitPanAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     p.azimuthDeg = pAzimuth->load();
     p.elevationDeg = pElevation->load();
     p.distance = pDistance->load();
+    p.depth = pDepth->load();
     p.focus = pFocus->load();
     p.rear = pRear->load();
     p.room = pRoom->load();

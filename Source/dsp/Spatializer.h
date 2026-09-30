@@ -21,6 +21,7 @@ struct SpatParams
     float orbitHz = 0.0f;      // cycles per second added to azimuth (+ = clockwise from above)
     float focus = 0.7f;        // 0..1 how strongly front/back and up/down cues are exaggerated
     float rear = 0.5f;         // 0..1 extra 'behind' cues: HF shadow, 1 kHz band, less direct / more room
+    float depth = 0.0f;        // -1 far away .. +1 right at your face; heavily exaggerated distance cues on top of 'distance'
 };
 
 // Binaural source positioner: measured HRIRs (min-phase + fractional ITD), distance
@@ -60,9 +61,9 @@ public:
         for (auto& d : delayBuf)
             d.fill (0.0f);
         writePos = 0;
-        lp = 0.0f;
-        rearShelf.clear();
-        rearPeak.clear();
+        lp = lp2 = 0.0f;
+        for (auto* b : { &rearShelf, &rearPeak, &nearLow, &nearHigh })
+            b->clear();
         room.reset();
         initialised = false;
     }
@@ -124,6 +125,18 @@ private:
             a1 = (float) (2 * ((A - 1) - (A + 1) * cw) / a0);
             a2 = (float) (((A + 1) - (A - 1) * cw - sq) / a0);
         }
+        void setLowShelf (double fs, double f0, double gainDb)
+        {
+            const double A = std::pow (10.0, gainDb / 40.0), w = 2.0 * 3.14159265358979 * f0 / fs;
+            const double cw = std::cos (w), alpha = std::sin (w) / 2.0 * std::sqrt (2.0); // S = 1
+            const double sq = 2.0 * std::sqrt (A) * alpha;
+            const double a0 = (A + 1) + (A - 1) * cw + sq;
+            b0 = (float) (A * ((A + 1) - (A - 1) * cw + sq) / a0);
+            b1 = (float) (2 * A * ((A - 1) - (A + 1) * cw) / a0);
+            b2 = (float) (A * ((A + 1) - (A - 1) * cw - sq) / a0);
+            a1 = (float) (-2 * ((A - 1) + (A + 1) * cw) / a0);
+            a2 = (float) (((A + 1) + (A - 1) * cw - sq) / a0);
+        }
         void setPeak (double fs, double f0, double q, double gainDb)
         {
             const double A = std::pow (10.0, gainDb / 40.0), w = 2.0 * 3.14159265358979 * f0 / fs;
@@ -183,6 +196,8 @@ private:
                 distSm = p.distance;
                 roomSm = p.room;
                 focusSm = p.focus;
+                rearSm = p.rear;
+                depthSm = p.depth;
                 gPrev = distanceGain (distanceMetres (distSm));
                 lastRt60 = -1.0f;
             }
@@ -196,6 +211,7 @@ private:
                 roomSm += scalarA * (p.room - roomSm);
                 focusSm += scalarA * (p.focus - focusSm);
                 rearSm += scalarA * (p.rear - rearSm);
+                depthSm += scalarA * (p.depth - depthSm);
             }
             const float len = std::sqrt (sx * sx + sy * sy + sz * sz);
             if (len > 1e-4f)
@@ -215,6 +231,26 @@ private:
                 lastRearAmt = rearAmt;
             }
 
+            // depth: exaggerated push (far) / pull (close) on top of the regular distance control
+            const float depthC = std::clamp (depthSm, -1.0f, 1.0f);
+            const float nearAmt = std::max (0.0f, depthC), farAmt = std::max (0.0f, -depthC);
+            if (std::abs (nearAmt - lastNearAmt) > 1e-3f || ! initialised)
+            {
+                nearLow.setLowShelf (fs, 250.0, 10.0 * nearAmt);   // proximity effect
+                nearHigh.setHighShelf (fs, 6000.0, 4.0 * nearAmt); // close sources are more detailed / present
+                lastNearAmt = nearAmt;
+            }
+            // near-field ILD: a close, lateral source is much louder in the near ear than the far ear
+            const float lateral = len > 1e-4f ? sx / len : 0.0f; // +1 = hard right
+            const float ildDb = nearAmt * std::abs (lateral);
+            const float gRightEnd = std::pow (10.0f, (lateral >= 0.0f ? 2.0f * ildDb : -9.0f * ildDb) / 20.0f);
+            const float gLeftEnd = std::pow (10.0f, (lateral >= 0.0f ? -9.0f * ildDb : 2.0f * ildDb) / 20.0f);
+            if (! initialised)
+            {
+                gPrevEarL = gLeftEnd;
+                gPrevEarR = gRightEnd;
+            }
+
             float itdNew = 0.0f;
             table.interpolateReversed (curAz, curEl, focusSm, hNewL.data(), hNewR.data(), itdNew);
             if (! initialised)
@@ -228,9 +264,13 @@ private:
             const float dNewR = kBaseDelay + std::max (0.0f, -itdNew);
 
             const float dMetres = distanceMetres (distSm);
-            const float gEnd = distanceGain (dMetres) * (1.0f - 0.25f * rearAmt); // behind: less direct
-            const float fc = std::clamp (20000.0f / (1.0f + 0.15f * dMetres), 1500.0f, 0.45f * (float) fs);
+            const float depthDb = 4.0f * nearAmt - 20.0f * farAmt;
+            const float gEnd = distanceGain (dMetres) * (1.0f - 0.25f * rearAmt) * std::pow (10.0f, depthDb / 20.0f);
+            const float fc = std::clamp (20000.0f / ((1.0f + 0.15f * dMetres) * (1.0f + 7.0f * farAmt)), 900.0f, 0.45f * (float) fs);
             const float lpA = 1.0f - std::exp (-2.0f * pi * fc / (float) fs);
+            // far depth adds a second pole (12 dB/oct) so extreme distance really loses its top end
+            // (crossfaded in, so the neutral / close sound is left untouched)
+            const float pole2 = std::min (1.0f, farAmt * 3.0f);
 
             const float rt60 = 0.25f + 1.75f * std::clamp (p.decay, 0.0f, 1.0f);
             if (std::abs (rt60 - lastRt60) > 1e-3f)
@@ -238,7 +278,8 @@ private:
                 room.setDecay (rt60);
                 lastRt60 = rt60;
             }
-            const float wet = roomSm * 0.8f * (1.0f + 0.8f * rearAmt);            // behind: more diffuse
+            const float wet = roomSm * 0.8f * (1.0f + 0.8f * rearAmt)            // behind: more diffuse
+                              * (1.0f - 0.85f * nearAmt) * (1.0f + 3.5f * farAmt); // close: dry, far: mostly room
             initialised = true;
 
             // ---- pre-process input: distance filter + gain, feed the room ----------
@@ -250,8 +291,9 @@ private:
                 revL[(size_t) i] = rl * wet;
                 revR[(size_t) i] = rr * wet;
                 lp += lpA * (x - lp);
+                lp2 += lpA * (lp - lp2);
                 const float g = gPrev + (gEnd - gPrev) * (float) (i + 1) / mf;
-                w[T - 1 + off + i] = lp * g;
+                w[T - 1 + off + i] = (lp + pole2 * (lp2 - lp)) * g;
             }
 
             // ---- HRIR convolution with crossfade, ITD delay, room mix ---------------
@@ -268,11 +310,12 @@ private:
                     yl = t * yl + (1.0f - t) * dot (hOldL.data(), win, T);
                     yr = t * yr + (1.0f - t) * dot (hOldR.data(), win, T);
                 }
-                if (lastRearAmt > 1e-3f || rearActive)
+                yl = nearHigh.process (0, nearLow.process (0, rearPeak.process (0, rearShelf.process (0, yl))));
+                yr = nearHigh.process (1, nearLow.process (1, rearPeak.process (1, rearShelf.process (1, yr))));
                 {
-                    yl = rearPeak.process (0, rearShelf.process (0, yl));
-                    yr = rearPeak.process (1, rearShelf.process (1, yr));
-                    rearActive = lastRearAmt > 1e-3f;
+                    const float te = (float) (i + 1) / mf;
+                    yl *= gPrevEarL + (gLeftEnd - gPrevEarL) * te;
+                    yr *= gPrevEarR + (gRightEnd - gPrevEarR) * te;
                 }
                 delayBuf[0][(size_t) (writePos & kDelayMask)] = yl;
                 delayBuf[1][(size_t) (writePos & kDelayMask)] = yr;
@@ -289,6 +332,8 @@ private:
             dPrevL = dNewL;
             dPrevR = dNewR;
             gPrev = gEnd;
+            gPrevEarL = gLeftEnd;
+            gPrevEarR = gRightEnd;
             lastAz = curAz;
             lastEl = curEl;
             lastFocus = focusSm;
@@ -301,9 +346,9 @@ private:
     static float distanceGain (float metres) { return 1.0f / (0.5f + 0.5f * metres); }
 
     HrtfTable table;
-    Biquad rearShelf, rearPeak;
-    float rearSm = 0.5f, lastRearAmt = 0.0f;
-    bool rearActive = false;
+    Biquad rearShelf, rearPeak, nearLow, nearHigh;
+    float rearSm = 0.5f, lastRearAmt = 0.0f, depthSm = 0.0f, lastNearAmt = 0.0f;
+    float gPrevEarL = 1.0f, gPrevEarR = 1.0f;
     RoomFdn room;
     double fs = 48000.0;
     int maxBlock = 512, taps = 0;
@@ -314,7 +359,7 @@ private:
 
     bool initialised = false;
     float sx = 0, sy = 1, sz = 0, curAz = 0, curEl = 0, lastAz = 0, lastEl = 0, lastFocus = 0.7f;
-    float distSm = 0.25f, roomSm = 0.3f, focusSm = 0.7f, gPrev = 1.0f, lp = 0.0f, lastRt60 = -1.0f;
+    float distSm = 0.25f, roomSm = 0.3f, focusSm = 0.7f, gPrev = 1.0f, lp = 0.0f, lp2 = 0.0f, lastRt60 = -1.0f;
     float dPrevL = kBaseDelay, dPrevR = kBaseDelay, orbitPhase = 0.0f;
 };
 } // namespace spat
