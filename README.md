@@ -37,6 +37,16 @@ where the sound sits around your head: azimuth, elevation and distance.
 
 Input is summed to mono; output is stereo. Latency: 2 samples.
 
+## Interface
+- **Position pad (top-down view of the head):** drag the dot anywhere. Angle around the head is
+  left / right / front / back; distance from the head is Distance (rings at 1, 3 and 10 m). The
+  shaded half is behind you (where Rear applies). Double-click resets, mouse wheel changes
+  distance. The dot's colour and size show Depth; the trail and hollow ring show Orbit/automation.
+- **Height slider (side view):** drag for elevation; double-click resets, wheel nudges.
+- **Depth strip:** far <-> close, exaggerated beyond the pad's distance.
+- **Knobs:** Focus, Rear (localisation cues), Room, Decay, Orbit. Double-click any control to reset.
+- The window is resizable. `ui_snapshot` renders the real editor to PNG without a display.
+
 ## Build
 ```
 cmake -B build -DCMAKE_BUILD_TYPE=Release        # fetches JUCE 8.0.4

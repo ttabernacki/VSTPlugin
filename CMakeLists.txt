@@ -47,6 +47,13 @@ if(ORBITPAN_BUILD_PLUGIN)
         JUCE_USE_CURL=0
         JUCE_VST3_CAN_REPLACE_VST2=0)
 
+    # Offscreen renderer of the real editor, for visual checks without a display.
+    juce_add_console_app(UiSnapshot PRODUCT_NAME "ui_snapshot")
+    target_sources(UiSnapshot PRIVATE tools/ui_snapshot.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp)
+    target_compile_definitions(UiSnapshot PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+        JUCE_STANDALONE_APPLICATION=1)
+    target_link_libraries(UiSnapshot PRIVATE OrbitPanData juce::juce_audio_utils juce::juce_recommended_config_flags)
+
     target_link_libraries(OrbitPan
         PRIVATE
             OrbitPanData
