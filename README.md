@@ -69,6 +69,14 @@ or `OrbitPan-macos`) rather than the Linux build.
 - Parameters are applied per host block and ramped across it in 64-sample steps (not sample-accurate),
   with additional smoothing in the engine, so large buffers do not make automation sound stepped.
 
+## If Live hangs while scanning
+- The status bar names the plug-in being scanned. Alt-Tab: a Windows "DLL not found" dialog can sit behind Live.
+- Windows builds from CI statically link the C++ runtime (checked in CI), so no redistributable is needed.
+  Older builds needed the "Microsoft Visual C++ Redistributable (x64)".
+- Unblock the downloaded zip before extracting (right-click > Properties > Unblock), or run
+  `Get-ChildItem -Recurse OrbitPan.vst3 | Unblock-File`.
+- To isolate it, move `OrbitPan.vst3` out of the scanned folder and rescan.
+
 ## Verification
 - `dsp_tests`: ITD/ILD, front/back and elevation cues, Rear/Depth/Focus behaviour, no clicks.
 - `plugin_tests`: parameters and text entry, bus layouts, state recall, block-size independence

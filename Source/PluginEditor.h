@@ -74,8 +74,19 @@ public:
     ~OrbitPanEditor() override;
     void paint (juce::Graphics&) override;
     void resized() override;
+    void parentHierarchyChanged() override { useSoftwareRendering(); }
+    void visibilityChanged() override { useSoftwareRendering(); }
 
 private:
+    // JUCE 8 renders with Direct2D on Windows by default; the simple software renderer is plenty here
+    // and avoids GPU/driver differences between hosts.
+    void useSoftwareRendering()
+    {
+        if (auto* peer = getPeer())
+            if (peer->getCurrentRenderingEngine() != 0)
+                peer->setCurrentRenderingEngine (0);
+    }
+
     struct Knob
     {
         juce::Slider slider { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::TextBoxBelow };

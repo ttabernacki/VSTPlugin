@@ -1,4 +1,9 @@
 cmake_minimum_required(VERSION 3.22)
+
+# Windows: link the C++ runtime statically so the plug-in has no dependency on the Visual C++
+# redistributable (a missing VCRUNTIME140_1.dll makes a host's plug-in scan stall on a hidden dialog).
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 project(OrbitPan VERSION 0.1.0)
 
 set(CMAKE_CXX_STANDARD 17)
