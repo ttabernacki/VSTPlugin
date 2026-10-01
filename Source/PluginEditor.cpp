@@ -240,7 +240,15 @@ void RadarPad::applyMouse (juce::Point<float> pt)
     const float offset = wrapDeg (proc.heardAzimuth.load() - paramValue (azParam));
     const float angle = juce::radiansToDegrees (std::atan2 (dx, -dy));
     const bool orbiting = std::abs (proc.apvts.getRawParameterValue ("orbit")->load()) > 0.001f;
-    azParam->setValueNotifyingHost (azParam->convertTo0to1 (wrapDeg (orbiting ? angle - offset : angle)));
+    // Keep the parameter continuous: pick the equivalent angle nearest the current value (the
+    // parameter spans two turns), so a recorded drag around the back has no jump in the lane.
+    const float current = paramValue (azParam);
+    float unwrapped = current + wrapDeg ((orbiting ? angle - offset : angle) - current);
+    if (unwrapped > 360.0f)
+        unwrapped -= 360.0f;
+    else if (unwrapped < -360.0f)
+        unwrapped += 360.0f;
+    azParam->setValueNotifyingHost (azParam->convertTo0to1 (unwrapped));
 
     const float r = std::sqrt (dx * dx + dy * dy) / R;
     distParam->setValueNotifyingHost (juce::jlimit (0.0f, 1.0f, (r - kInner) / (1.0f - kInner)));

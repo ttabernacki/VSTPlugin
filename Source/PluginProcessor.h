@@ -29,7 +29,7 @@ public:
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    const juce::String getProgramName (int) override { return "Default"; }
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock& destData) override;
@@ -47,6 +47,10 @@ private:
     spat::Spatializer spatializer;
     juce::AudioBuffer<float> scratch; // copy of the input so we never process in place
     bool tableLoaded = false;
+
+    spat::SpatParams prevParams;
+    bool havePrevParams = false, wasPlaying = false;
+    juce::int64 expectedNextSample = 0;
 
     std::atomic<float>* pAzimuth = nullptr;
     std::atomic<float>* pElevation = nullptr;

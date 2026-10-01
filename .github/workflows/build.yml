@@ -1,0 +1,89 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+          - os: windows-latest
+            name: windows
+          - os: macos-latest
+            name: macos
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev \
+            libxcomposite-dev libfreetype-dev libfontconfig1-dev libgl1-mesa-dev xvfb
+
+      - name: Configure
+        shell: bash
+        run: |
+          EXTRA=""
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            EXTRA='-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0'
+          fi
+          cmake -B build -DCMAKE_BUILD_TYPE=Release $EXTRA
+
+      - name: Build
+        shell: bash
+        run: |
+          TARGETS="dsp_tests render_demo PluginTests OrbitPan_VST3"
+          if [ "$RUNNER_OS" = "macOS" ]; then TARGETS="$TARGETS OrbitPan_AU"; fi
+          cmake --build build --config Release --parallel 4 --target $TARGETS
+
+      - name: Test (DSP + plugin processor)
+        shell: bash
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Ad-hoc sign (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          find build -name "OrbitPan.vst3" -o -name "OrbitPan.component" | while read b; do codesign --force --deep -s - "$b"; done
+
+      - name: Locate plugin bundles
+        shell: bash
+        run: |
+          mkdir -p dist
+          find build -type d -name "OrbitPan.vst3" -prune -exec cp -R {} dist/ \;
+          find build -type d -name "OrbitPan.component" -prune -exec cp -R {} dist/ \;
+          ls -R dist | head -30
+
+      - name: pluginval (strictness 10)
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux)   URL=https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Linux.zip ;;
+            macOS)   URL=https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_macOS.zip ;;
+            Windows) URL=https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Windows.zip ;;
+          esac
+          curl -L -o pluginval.zip "$URL"
+          7z x -y pluginval.zip -opluginval >/dev/null || unzip -o pluginval.zip -d pluginval
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            chmod +x pluginval/pluginval
+            xvfb-run -a pluginval/pluginval --strictness-level 10 --validate-in-process --timeout-ms 180000 dist/OrbitPan.vst3
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            PV=$(find pluginval -type f -path "*MacOS/pluginval" | head -1)
+            chmod +x "$PV"
+            "$PV" --strictness-level 10 --validate-in-process --timeout-ms 180000 dist/OrbitPan.vst3
+          else
+            pluginval/pluginval.exe --strictness-level 10 --validate-in-process --timeout-ms 180000 dist/OrbitPan.vst3
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OrbitPan-${{ matrix.name }}
+          path: dist

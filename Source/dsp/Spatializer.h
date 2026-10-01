@@ -51,6 +51,9 @@ public:
 
     int latencySamples() const { return (int) kBaseDelay; }
 
+    // Phase of the Orbit rotation in turns (lets the host timeline drive it deterministically).
+    void setOrbitPhase (float turns) { orbitPhase = turns - std::floor (turns); }
+
     // Direction currently being rendered (after smoothing and orbit); for UI display.
     float heardAzimuth() const { return curAz; }
     float heardElevation() const { return curEl; }
@@ -266,6 +269,8 @@ private:
             const float dMetres = distanceMetres (distSm);
             const float depthDb = 4.0f * nearAmt - 20.0f * farAmt;
             const float gEnd = distanceGain (dMetres) * (1.0f - 0.25f * rearAmt) * std::pow (10.0f, depthDb / 20.0f);
+            if (! initialised)
+                gPrev = gEnd; // start at the right level instead of fading in from the base distance gain
             const float fc = std::clamp (20000.0f / ((1.0f + 0.15f * dMetres) * (1.0f + 7.0f * farAmt)), 900.0f, 0.45f * (float) fs);
             const float lpA = 1.0f - std::exp (-2.0f * pi * fc / (float) fs);
             // far depth adds a second pole (12 dB/oct) so extreme distance really loses its top end
@@ -285,7 +290,9 @@ private:
             // ---- pre-process input: distance filter + gain, feed the room ----------
             for (int i = 0; i < m; ++i)
             {
-                const float x = inR != nullptr ? 0.5f * (inL[off + i] + inR[off + i]) : inL[off + i];
+                float x = inR != nullptr ? 0.5f * (inL[off + i] + inR[off + i]) : inL[off + i];
+                if (! std::isfinite (x)) // a NaN/inf from upstream must not poison the room's feedback loop
+                    x = 0.0f;
                 float rl, rr;
                 room.process (x, rl, rr);
                 revL[(size_t) i] = rl * wet;

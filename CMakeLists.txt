@@ -24,17 +24,24 @@ if(ORBITPAN_BUILD_PLUGIN)
         GIT_SHALLOW ON)
     FetchContent_MakeAvailable(JUCE)
 
+    # Ableton Live loads VST3 on Windows and macOS (and AU on macOS).
+    set(ORBITPAN_FORMATS VST3 Standalone)
+    if(APPLE)
+        list(APPEND ORBITPAN_FORMATS AU)
+    endif()
+
     juce_add_plugin(OrbitPan
         COMPANY_NAME "OrbitPan"
         PLUGIN_MANUFACTURER_CODE Orbp
         PLUGIN_CODE Orb1
-        FORMATS VST3 Standalone
+        FORMATS ${ORBITPAN_FORMATS}
         PRODUCT_NAME "OrbitPan"
         IS_SYNTH FALSE
         NEEDS_MIDI_INPUT FALSE
         NEEDS_MIDI_OUTPUT FALSE
         COPY_PLUGIN_AFTER_BUILD FALSE
-        VST3_CATEGORIES Fx Spatial)
+        VST3_CATEGORIES Fx Spatial
+        AU_MAIN_TYPE kAudioUnitType_Effect)
 
     juce_add_binary_data(OrbitPanData SOURCES Resources/hrtf_d1_5deg.bin)
 
@@ -53,6 +60,13 @@ if(ORBITPAN_BUILD_PLUGIN)
     target_compile_definitions(UiSnapshot PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
         JUCE_STANDALONE_APPLICATION=1)
     target_link_libraries(UiSnapshot PRIVATE OrbitPanData juce::juce_audio_utils juce::juce_recommended_config_flags)
+
+    # Host-style tests of the real processor (parameters, state, block sizes, automation).
+    juce_add_console_app(PluginTests PRODUCT_NAME "plugin_tests")
+    target_sources(PluginTests PRIVATE tests/plugin_tests.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp)
+    target_compile_definitions(PluginTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_STANDALONE_APPLICATION=1)
+    target_link_libraries(PluginTests PRIVATE OrbitPanData juce::juce_audio_utils juce::juce_recommended_config_flags)
+    add_test(NAME plugin COMMAND PluginTests)
 
     target_link_libraries(OrbitPan
         PRIVATE

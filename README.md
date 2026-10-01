@@ -47,6 +47,36 @@ Input is summed to mono; output is stereo. Latency: 2 samples.
 - **Knobs:** Focus, Rear (localisation cues), Room, Decay, Orbit. Double-click any control to reset.
 - The window is resizable. `ui_snapshot` renders the real editor to PNG without a display.
 
+## Using it in Ableton Live
+Live runs on Windows and macOS only, so use the CI build artifacts (Actions tab, `OrbitPan-windows`
+or `OrbitPan-macos`) rather than the Linux build.
+- **Needs Live 11 or newer** (VST3). On macOS the AU is also built.
+- **Install:** Windows `C:\Program Files\Common Files\VST3\OrbitPan.vst3`; macOS
+  `~/Library/Audio/Plug-Ins/VST3/OrbitPan.vst3` (AU: `~/Library/Audio/Plug-Ins/Components/`). In Live:
+  Preferences > Plug-ins > enable "Use VST3 Plug-in System Folders", then rescan. The macOS build is only
+  ad-hoc signed, so clear the download quarantine: `xattr -dr com.apple.quarantine OrbitPan.vst3`.
+- **Recording automation:** arm automation (A), then drag the pad. A drag writes **Azimuth + Distance**
+  together (two lanes, with touch/release gestures, so Touch and Latch behave as with any plug-in);
+  the height slider writes **Elevation**; the depth strip writes **Depth**. All nine parameters are
+  automatable and show in the device's automation chooser.
+- **Azimuth lane:** it spans two turns (-360..360, centre 0 = front; the lane's tooltip shows
+  "front", "45 deg R", "behind", ...). Recorded pad drags are unwrapped, so circling the head - including
+  through the back - records one continuous line. To draw it by hand, keep going past 180
+  (e.g. 170 -> 190) instead of jumping to -170.
+- **Orbit** is locked to Live's timeline: loops, scrubbing, Freeze/Flatten and Export all put the source
+  in the same place at the same time.
+- **Latency/tail:** 2 samples (reported, so plug-in delay compensation applies); 2.5 s reverb tail.
+- Parameters are applied per host block and ramped across it in 64-sample steps (not sample-accurate),
+  with additional smoothing in the engine, so large buffers do not make automation sound stepped.
+
+## Verification
+- `dsp_tests`: ITD/ILD, front/back and elevation cues, Rear/Depth/Focus behaviour, no clicks.
+- `plugin_tests`: parameters and text entry, bus layouts, state recall, block-size independence
+  (1 to 4096 samples), 22-192 kHz, 3000 blocks of random automation/NaN input, timeline-locked Orbit.
+- Tracktion `pluginval` at strictness 10 and Steinberg's VST3 `validator` (47/47) on the built VST3.
+- CI (`.github/workflows/build.yml`) builds and runs all of the above on Linux, Windows and macOS.
+  Not yet tried inside Live itself.
+
 ## Build
 ```
 cmake -B build -DCMAKE_BUILD_TYPE=Release        # fetches JUCE 8.0.4
