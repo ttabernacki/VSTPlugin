@@ -41,33 +41,37 @@ jobs:
       - name: Build
         shell: bash
         run: |
-          TARGETS="dsp_tests render_demo PluginTests OrbitPan_VST3"
-          if [ "$RUNNER_OS" = "macOS" ]; then TARGETS="$TARGETS OrbitPan_AU"; fi
+          TARGETS="dsp_tests render_demo PluginTests OrbitPan_VST3 leveler_tests BassLevelerPluginTests BassNoteLeveler_VST3"
+          if [ "$RUNNER_OS" = "macOS" ]; then TARGETS="$TARGETS OrbitPan_AU BassNoteLeveler_AU"; fi
           cmake --build build --config Release --parallel 4 --target $TARGETS
 
-      - name: Test (DSP + plugin processor)
+      - name: Test (DSP + plugin processors, both plug-ins)
         shell: bash
         run: ctest --test-dir build -C Release --output-on-failure
 
       - name: Ad-hoc sign (macOS)
         if: runner.os == 'macOS'
-        run: |
-          find build -name "OrbitPan.vst3" -o -name "OrbitPan.component" | while read b; do codesign --force --deep -s - "$b"; done
-
-      - name: Locate plugin bundles
         shell: bash
         run: |
-          mkdir -p dist
-          find build -type d -name "OrbitPan.vst3" -prune -exec cp -R {} dist/ \;
-          find build -type d -name "OrbitPan.component" -prune -exec cp -R {} dist/ \;
-          ls -R dist | head -30
+          find build \( -name "*.vst3" -o -name "*.component" \) -type d -prune | while read -r b; do codesign --force --deep -s - "$b"; done
 
-      - name: Windows DLL must not need the VC++ redistributable
+      - name: Collect plug-in bundles
+        shell: bash
+        run: |
+          mkdir -p dist/orbitpan dist/bassleveler
+          find build -type d -name "OrbitPan.vst3" -prune -exec cp -R {} dist/orbitpan/ \;
+          find build -type d -name "OrbitPan.component" -prune -exec cp -R {} dist/orbitpan/ \;
+          find build -type d -name "Bass Note Leveler.vst3" -prune -exec cp -R {} dist/bassleveler/ \;
+          find build -type d -name "Bass Note Leveler.component" -prune -exec cp -R {} dist/bassleveler/ \;
+          ls -R dist | head -40
+
+      - name: Windows DLLs must not need the VC++ redistributable
         if: runner.os == 'Windows'
         shell: bash
         run: |
           pip install pefile
-          python tools/check_dll_imports.py dist/OrbitPan.vst3/Contents/x86_64-win/OrbitPan.vst3
+          python tools/check_dll_imports.py "dist/orbitpan/OrbitPan.vst3/Contents/x86_64-win/OrbitPan.vst3"
+          python tools/check_dll_imports.py "dist/bassleveler/Bass Note Leveler.vst3/Contents/x86_64-win/Bass Note Leveler.vst3"
 
       - name: pluginval (strictness 10)
         shell: bash
@@ -79,18 +83,27 @@ jobs:
           esac
           curl -L -o pluginval.zip "$URL"
           7z x -y pluginval.zip -opluginval >/dev/null || unzip -o pluginval.zip -d pluginval
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            chmod +x pluginval/pluginval
-            xvfb-run -a pluginval/pluginval --strictness-level 10 --validate-in-process --timeout-ms 180000 dist/OrbitPan.vst3
-          elif [ "$RUNNER_OS" = "macOS" ]; then
-            PV=$(find pluginval -type f -path "*MacOS/pluginval" | head -1)
-            chmod +x "$PV"
-            "$PV" --strictness-level 10 --validate-in-process --timeout-ms 180000 dist/OrbitPan.vst3
-          else
-            pluginval/pluginval.exe --strictness-level 10 --validate-in-process --timeout-ms 180000 dist/OrbitPan.vst3
-          fi
+          run_pv() {
+            if [ "$RUNNER_OS" = "Linux" ]; then
+              chmod +x pluginval/pluginval
+              xvfb-run -a pluginval/pluginval --strictness-level 10 --validate-in-process --timeout-ms 180000 "$1"
+            elif [ "$RUNNER_OS" = "macOS" ]; then
+              PV=$(find pluginval -type f -path "*MacOS/pluginval" | head -1)
+              chmod +x "$PV"
+              "$PV" --strictness-level 10 --validate-in-process --timeout-ms 180000 "$1"
+            else
+              pluginval/pluginval.exe --strictness-level 10 --validate-in-process --timeout-ms 180000 "$1"
+            fi
+          }
+          run_pv "dist/orbitpan/OrbitPan.vst3"
+          run_pv "dist/bassleveler/Bass Note Leveler.vst3"
 
       - uses: actions/upload-artifact@v4
         with:
           name: OrbitPan-${{ matrix.name }}
-          path: dist
+          path: dist/orbitpan
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BassNoteLeveler-${{ matrix.name }}
+          path: dist/bassleveler

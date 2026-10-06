@@ -1,4 +1,7 @@
-# OrbitPan
+# OrbitPan + Bass Note Leveler
+
+This repo holds two plug-ins: **OrbitPan** (binaural 3D panner, below) and **Bass Note Leveler**
+(`bass-leveler/`, see [bass-leveler/README.md](bass-leveler/README.md)). CI builds both for Windows, macOS and Linux.
 
 Binaural 3D panner (VST3 + standalone) for headphones. Put it on a track and automate
 where the sound sits around your head: azimuth, elevation and distance.

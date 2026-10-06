@@ -81,3 +81,6 @@ if(ORBITPAN_BUILD_PLUGIN)
             juce::juce_recommended_config_flags
             juce::juce_recommended_lto_flags)
 endif()
+
+# --- Bass Note Leveler (second plug-in in this repo) ---------------------------------
+add_subdirectory(bass-leveler)
