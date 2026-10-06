@@ -4,6 +4,7 @@
 if(ORBITPAN_BUILD_TOOLS)
     add_executable(leveler_tests tests/leveler_tests.cpp)
     add_test(NAME leveler_core COMMAND leveler_tests)
+    add_executable(bass_demo tools/render_demo.cpp)
 endif()
 
 if(TARGET juce::juce_audio_utils)

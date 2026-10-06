@@ -38,35 +38,25 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
 
-    // --- for the editor (all thread-safe) ---
-    struct View
+    // --- for the editor (thread-safe; a torn read of the display data is harmless) ---
+    static constexpr int kRecent = 32;
+    int getRecent (bnl::RecentNote* out) const
     {
-        float measured[128] {};
-        int count[128] {};
-        float target = 0.0f;
-        int total = 0, observedPitches = 0, mode = 0;
-    };
-    void getView (View& out) const;
-    void clearTable() { clearRequested = true; }
+        const int n = std::min (recentCount.load(), kRecent);
+        for (int i = 0; i < n; ++i)
+            out[i] = { recMidi[i].load(), recDev[i].load(), recCorr[i].load() };
+        return n;
+    }
     std::atomic<float> gainDb { 0.0f }, pitchHz { 0.0f };
     std::atomic<double> latencySeconds { 0.13 };
 
 private:
-    void publish (bool force);
-    bool applyPendingRestore();
-
     bnl::Leveler core;
-    juce::SpinLock lock;
-    // published copies of the learned table (guarded by `lock`)
-    View view_;
-    std::vector<uint8_t> blob_;
-    bnl::PitchTable pending_;
-    std::atomic<bool> restorePending { false }, clearRequested { false };
-    bool prepared_ = false, lastLearn_ = false;
-    int lastTotal_ = -1, publishCountdown_ = 0;
+    bool prepared_ = false;
+    std::atomic<float> recMidi[kRecent], recDev[kRecent], recCorr[kRecent];
+    std::atomic<int> recentCount { 0 };
 
-    std::atomic<float>*pLearn = nullptr, *pStrength = nullptr, *pMode = nullptr, *pRider = nullptr, *pFocus = nullptr,
-                       *pBoost = nullptr, *pCut = nullptr, *pSpeed = nullptr;
+    std::atomic<float>*pAmount = nullptr, *pMode = nullptr, *pFocus = nullptr, *pBoost = nullptr, *pCut = nullptr, *pSpeed = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BassLevelerProcessor)
 };

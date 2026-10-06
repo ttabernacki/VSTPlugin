@@ -3,7 +3,7 @@
 namespace
 {
 const juce::Colour kBg (0xff101418), kPanel (0xff171d23), kPanel2 (0xff1d252d), kLine (0xff2c3640), kAccent (0xff4fd1c5),
-    kWarm (0xfff6ad55), kRec (0xffe5484d), kText (0xffdde6ee), kDim (0xff7b8a97);
+    kWarm (0xfff6ad55), kText (0xffdde6ee), kDim (0xff7b8a97);
 
 juce::String noteName (int midi)
 {
@@ -54,7 +54,7 @@ void BnlLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& b, c
 {
     const auto r = b.getLocalBounds().toFloat().reduced (0.5f);
     const bool on = b.getToggleState();
-    juce::Colour fill = on ? (b.getButtonText() == "LEARN" ? kRec : kAccent.darker (0.4f)) : kPanel2;
+    juce::Colour fill = on ? kAccent.darker (0.4f) : kPanel2;
     if (highlighted)
         fill = fill.brighter (0.1f);
     if (down)
@@ -85,31 +85,16 @@ void BassLevelerEditor::addKnob (Knob& k, const juce::String& id, const juce::St
 BassLevelerEditor::BassLevelerEditor (BassLevelerProcessor& p) : juce::AudioProcessorEditor (&p), proc (p)
 {
     setLookAndFeel (&laf);
-    learn.setClickingTogglesState (true);
     focus.setClickingTogglesState (true);
-    addAndMakeVisible (learn);
     addAndMakeVisible (focus);
-    addAndMakeVisible (clear);
     mode.addItemList ({ "Balance", "Level" }, 1);
     addAndMakeVisible (mode);
-    learnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "learn", learn);
     focusAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "focus", focus);
     modeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "mode", mode);
-    clear.onClick = [this] { proc.clearTable(); };
-    clear.setTooltip ("Forget everything that was learned");
-    addKnob (strength, "strength", "STRENGTH");
-    addKnob (rider, "rider", "RIDER");
+    addKnob (amount, "amount", "AMOUNT");
     addKnob (boost, "boost", "MAX BOOST");
     addKnob (cut, "cut", "MAX CUT");
     addKnob (speed, "speed", "SPEED");
-    strength.slider.setNumDecimalPlacesToDisplay (2);
-    rider.slider.setNumDecimalPlacesToDisplay (2);
-    boost.slider.setNumDecimalPlacesToDisplay (1);
-    boost.slider.setTextValueSuffix (" dB");
-    cut.slider.setNumDecimalPlacesToDisplay (1);
-    cut.slider.setTextValueSuffix (" dB");
-    speed.slider.setNumDecimalPlacesToDisplay (0);
-    speed.slider.setTextValueSuffix (" ms");
     setResizable (true, true);
     setResizeLimits (560, 380, 1100, 700);
     getConstrainer()->setFixedAspectRatio (680.0 / 440.0);
@@ -127,17 +112,14 @@ void BassLevelerEditor::resized()
 {
     auto r = getLocalBounds().reduced (14);
     auto head = r.removeFromTop (34);
-    head.removeFromLeft (176); // title
-    learn.setBounds (head.removeFromLeft (84));
+    head.removeFromLeft (190); // title
+    mode.setBounds (head.removeFromLeft (110));
     head.removeFromLeft (8);
-    mode.setBounds (head.removeFromLeft (104));
-    head.removeFromLeft (8);
-    focus.setBounds (head.removeFromLeft (118));
-    clear.setBounds (head.removeFromRight (100));
+    focus.setBounds (head.removeFromLeft (130));
     r.removeFromTop (8);
     auto knobs = r.removeFromTop (118);
-    const int w = knobs.getWidth() / 5;
-    for (auto* k : { &strength, &rider, &boost, &cut, &speed })
+    const int w = knobs.getWidth() / 4;
+    for (auto* k : { &amount, &boost, &cut, &speed })
     {
         auto cell = knobs.removeFromLeft (w);
         k->label.setBounds (cell.removeFromTop (16));
@@ -154,73 +136,61 @@ void BassLevelerEditor::paint (juce::Graphics& g)
     g.setFont (juce::FontOptions (15.0f, juce::Font::bold));
     g.drawText ("BASS NOTE LEVELER", 14, 14, 170, 26, juce::Justification::centredLeft);
 
-    BassLevelerProcessor::View v;
-    proc.getView (v);
+    bnl::RecentNote notes[BassLevelerProcessor::kRecent];
+    const int n = proc.getRecent (notes);
     g.setColour (kPanel);
     g.fillRoundedRectangle (chart.toFloat(), 8.0f);
     auto area = chart.reduced (12, 10);
     auto footer = area.removeFromBottom (18);
     auto labels = area.removeFromBottom (14);
 
-    int lo = 128, hi = -1;
-    for (int p = 0; p < 128; ++p)
-        if (v.count[p] > 0)
-        {
-            lo = std::min (lo, p);
-            hi = std::max (hi, p);
-        }
-    if (hi < lo)
+    if (n == 0)
     {
         g.setColour (kDim);
         g.setFont (juce::FontOptions (13.0f));
-        g.drawFittedText ("Turn LEARN on and play the whole bass part once, then turn it off.\n"
-                          "The plugin learns how loud each note comes out and evens them toward the middle.",
+        g.drawFittedText ("Just play. Each note is measured while it is still in the look-ahead, compared with the\n"
+                          "typical level of the recent notes, and evened out before you hear it.",
                           area, juce::Justification::centred, 3);
     }
     else
     {
-        lo = std::max (0, std::min (lo, 28) - 1);
-        hi = std::min (127, std::max (hi, 43) + 1);
-        float mn = 1e9f, mx = -1e9f;
-        for (int p = lo; p <= hi; ++p)
-            if (v.count[p] > 0)
-            {
-                mn = std::min (mn, v.measured[p]);
-                mx = std::max (mx, v.measured[p]);
-            }
-        mn = std::min (mn, v.target) - 3.0f;
-        mx = std::max (mx, v.target) + 3.0f;
-        const float bw = (float) area.getWidth() / (float) (hi - lo + 1);
-        auto Y = [&] (float db) { return (float) area.getBottom() - (db - mn) / (mx - mn) * (float) area.getHeight(); };
+        float range = 3.0f;
+        for (int i = 0; i < n; ++i)
+            range = std::max (range, std::fabs (notes[i].deviationDb) + 1.0f);
+        const float midY = (float) area.getCentreY(), halfH = 0.5f * (float) area.getHeight();
+        auto Y = [&] (float db) { return midY - db / range * halfH; };
+        g.setColour (kLine);
+        g.drawHorizontalLine ((int) midY, (float) area.getX(), (float) area.getRight());
         g.setFont (juce::FontOptions (10.0f));
-        for (int p = lo; p <= hi; ++p)
+        g.setColour (kDim);
+        g.drawText ("louder than typical", area.getX() + 2, area.getY(), 120, 12, juce::Justification::left);
+        g.drawText ("quieter", area.getX() + 2, area.getBottom() - 12, 80, 12, juce::Justification::left);
+        const int slots = BassLevelerProcessor::kRecent;
+        const float bw = (float) area.getWidth() / (float) slots;
+        for (int i = 0; i < n; ++i)
         {
-            const float x = (float) area.getX() + (float) (p - lo) * bw;
-            if (v.count[p] > 0)
-            {
-                const float y = Y (v.measured[p]);
-                g.setColour (kAccent.withAlpha (juce::jlimit (0.35f, 1.0f, 0.3f + 0.12f * (float) v.count[p])));
-                g.fillRoundedRectangle (x + 1.5f, y, std::max (1.0f, bw - 3.0f), (float) area.getBottom() - y, 2.0f);
-            }
-            if (p % 12 == 4 || p % 12 == 9 || p % 12 == 2 || p % 12 == 7 || bw > 22.0f)
+            const float x = (float) area.getX() + (float) (slots - n + i) * bw;
+            const float dev = notes[i].deviationDb, after = dev + notes[i].correctionDb;
+            auto bar = [&] (float db, juce::Colour c, float x0, float w) {
+                g.setColour (c);
+                const float y = Y (db);
+                g.fillRoundedRectangle (x0, std::min (y, midY), w, std::max (1.5f, std::fabs (y - midY)), 1.5f);
+            };
+            bar (dev, kDim.withAlpha (0.8f), x + 1.0f, std::max (1.0f, bw * 0.5f - 1.0f));
+            bar (after, kAccent, x + bw * 0.5f, std::max (1.0f, bw * 0.5f - 1.0f));
+            if (bw > 15.0f || i % 2 == 0)
             {
                 g.setColour (kDim);
-                g.drawText (noteName (p), (int) x - 6, labels.getY(), (int) bw + 12, labels.getHeight(), juce::Justification::centred);
+                g.drawText (noteName ((int) std::lround (notes[i].midi)), (int) x - 6, labels.getY(), (int) bw + 12, labels.getHeight(),
+                            juce::Justification::centred);
             }
         }
-        // target level (what every note is moved toward)
-        g.setColour (kWarm);
-        const float ty = Y (v.target);
-        for (float x = (float) area.getX(); x < (float) area.getRight(); x += 8.0f)
-            g.drawLine (x, ty, std::min (x + 4.0f, (float) area.getRight()), ty, 1.5f);
-        g.setFont (juce::FontOptions (10.0f));
-        g.drawText ("target", area.getRight() - 44, (int) ty - 13, 44, 12, juce::Justification::right);
     }
 
     g.setColour (kDim);
     g.setFont (juce::FontOptions (11.0f));
     const double latMs = proc.latencySeconds.load() * 1000.0;
-    g.drawText (juce::String (v.total) + " notes learned on " + juce::String (v.observedPitches) + " pitches    |    now "
+    g.drawText (juce::String ("grey = before, teal = after leveling    |    now ")
                     + (proc.pitchHz.load() > 20.0f ? juce::String (proc.pitchHz.load(), 1) + " Hz" : juce::String ("-")) + ", "
                     + juce::String (proc.gainDb.load(), 1) + " dB    |    latency " + juce::String ((int) std::lround (latMs)) + " ms",
                 footer, juce::Justification::centredLeft);

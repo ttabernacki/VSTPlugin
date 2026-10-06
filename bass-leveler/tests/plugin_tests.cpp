@@ -2,6 +2,7 @@
 #include "../Source/PluginProcessor.h"
 #include "synth.h"
 
+#include <map>
 #include <random>
 
 static int failures = 0;
@@ -39,7 +40,10 @@ static std::vector<float> render (BassLevelerProcessor& p, const std::vector<flo
         const int n = (int) std::min<size_t> ((size_t) blocks[bi++ % blocks.size()], in.size() - pos);
         juce::AudioBuffer<float> view (buf.getArrayOfWritePointers(), 2, n);
         for (int i = 0; i < n; ++i)
-            view.setSample (0, i, in[pos + (size_t) i]), view.setSample (1, i, in[pos + (size_t) i]);
+        {
+            view.setSample (0, i, in[pos + (size_t) i]);
+            view.setSample (1, i, in[pos + (size_t) i]);
+        }
         p.processBlock (view, midi);
         for (int i = 0; i < n; ++i)
             out[pos + (size_t) i] = view.getSample (0, i);
@@ -48,24 +52,58 @@ static std::vector<float> render (BassLevelerProcessor& p, const std::vector<flo
     return out;
 }
 
-static std::vector<float> bassLine (unsigned seed, double& total, double resSpread)
+static std::vector<synth::Ev> bassEvents (unsigned seed, double& total)
 {
     std::mt19937 g (seed);
     std::uniform_real_distribution<double> u (-1.0, 1.0);
-    std::array<double, 128> res {};
-    std::mt19937 gr (99);
-    for (auto& r : res)
-        r = std::uniform_real_distribution<double> (-1.0, 1.0) (gr) * resSpread;
     std::vector<synth::Ev> ev;
     double t = 0.3;
-    for (int rep = 0; rep < 3; ++rep)
+    for (int rep = 0; rep < 4; ++rep)
+    {
+        std::vector<int> pitches;
         for (int p = 28; p <= 43; ++p)
+            pitches.push_back (p);
+        std::shuffle (pitches.begin(), pitches.end(), g);
+        for (int p : pitches)
         {
             ev.push_back ({ t, 0.42, p, u (g) * 3.0 });
             t += 0.55;
         }
+    }
     total = t + 0.5;
-    return synth::render (kFs, ev, total, res, seed);
+    return ev;
+}
+
+static std::array<double, 128> resonances (double spread)
+{
+    std::mt19937 g (99);
+    std::array<double, 128> res {};
+    for (auto& r : res)
+        r = std::uniform_real_distribution<double> (-1.0, 1.0) (g) * spread;
+    return res;
+}
+
+static double spreadOf (const std::vector<float>& sig, int shift, const std::vector<synth::Ev>& ev)
+{
+    std::map<int, std::vector<double>> acc;
+    for (size_t i = 8; i < ev.size(); ++i)
+        acc[ev[i].midi].push_back (synth::measure (sig, kFs, ev[i].midi, ev[i].t + (double) shift / kFs).balDb);
+    std::vector<double> means;
+    for (auto& kv : acc)
+    {
+        double s = 0;
+        for (double v : kv.second)
+            s += v;
+        means.push_back (s / (double) kv.second.size());
+    }
+    double m = 0;
+    for (double v : means)
+        m += v;
+    m /= (double) means.size();
+    double s = 0;
+    for (double v : means)
+        s += (v - m) * (v - m);
+    return std::sqrt (s / (double) means.size());
 }
 
 int main()
@@ -75,7 +113,7 @@ int main()
     std::printf ("Parameters and layouts\n");
     {
         BassLevelerProcessor p;
-        const char* ids[] = { "learn", "strength", "mode", "rider", "focus", "boost", "cut", "speed" };
+        const char* ids[] = { "amount", "mode", "focus", "boost", "cut", "speed" };
         bool present = true, automatable = true;
         for (auto* id : ids)
         {
@@ -83,7 +121,7 @@ int main()
             present = present && prm != nullptr;
             automatable = automatable && prm != nullptr && prm->isAutomatable();
         }
-        CHECK (present && automatable && p.getParameters().size() == 8, "8 automatable parameters");
+        CHECK (present && automatable && p.getParameters().size() == 6, "6 automatable parameters");
         using L = juce::AudioProcessor::BusesLayout;
         auto layout = [] (juce::AudioChannelSet in, juce::AudioChannelSet out) {
             L l;
@@ -99,7 +137,7 @@ int main()
                "stereo-in/mono-out and 5.1 are rejected");
     }
 
-    std::printf ("Latency\n");
+    std::printf ("Latency and transparency\n");
     {
         BassLevelerProcessor p;
         prepare (p, kFs, 512);
@@ -114,87 +152,70 @@ int main()
         double md = 0;
         for (size_t i = (size_t) lat; i < in.size(); ++i)
             md = std::max (md, (double) std::fabs (out[i] - in[i - (size_t) lat]));
-        CHECK (md < 1e-7, "with nothing learned the output is the input delayed by the reported latency (diff %.1e)", md);
+        CHECK (md < 1e-7, "audio with no pitch to track passes through untouched, delayed by the reported latency (diff %.1e)", md);
+
+        double total;
+        const auto ev = bassEvents (3, total);
+        const auto sig = synth::render (kFs, ev, total, resonances (6.0));
+        BassLevelerProcessor z;
+        prepare (z, kFs, 512);
+        setPlain (z, "amount", 0.0f);
+        const auto o2 = render (z, sig, { 512 });
+        md = 0;
+        for (size_t i = (size_t) lat; i < sig.size(); ++i)
+            md = std::max (md, (double) std::fabs (o2[i] - sig[i - (size_t) lat]));
+        CHECK (md < 1e-7, "amount 0 is a bit-exact delay (diff %.1e)", md);
     }
 
-    std::printf ("Learning, state recall and correction\n");
+    std::printf ("Automatic leveling\n");
     {
         double total;
-        const auto sig = bassLine (3, total, 6.0);
+        const auto ev = bassEvents (5, total);
+        const auto sig = synth::render (kFs, ev, total, resonances (7.0), 2);
+        BassLevelerProcessor p;
+        prepare (p, kFs, 480);
+        setPlain (p, "amount", 1.0f);
+        setPlain (p, "boost", 12.0f);
+        setPlain (p, "cut", 18.0f);
+        const auto out = render (p, sig, { 480 });
+        const double before = spreadOf (sig, 0, ev), after = spreadOf (out, p.getLatencySamples(), ev);
+        CHECK (after < before * 0.5, "no learning pass: spread between pitches %.2f dB -> %.2f dB (-%.0f%%)", before, after,
+               100.0 * (1.0 - after / before));
+        bnl::RecentNote r[BassLevelerProcessor::kRecent];
+        const int n = p.getRecent (r);
+        CHECK (n == BassLevelerProcessor::kRecent, "the editor gets the last %d notes to display", n);
+    }
 
-        BassLevelerProcessor a;
-        prepare (a, kFs, 512);
-        setPlain (a, "learn", 1.0f);
-        render (a, sig, { 512 });
-        // let the processor publish what it learned, then switch learning off
-        setPlain (a, "learn", 0.0f);
-        render (a, std::vector<float> (4800, 0.0f), { 512 });
-        BassLevelerProcessor::View v;
-        a.getView (v);
-        CHECK (v.total >= 44 && v.observedPitches >= 15, "learned %d notes on %d pitches", v.total, v.observedPitches);
-
-        juce::MemoryBlock state;
-        a.getStateInformation (state);
-        BassLevelerProcessor b;
-        b.setStateInformation (state.getData(), (int) state.getSize());
-        prepare (b, kFs, 512);
-        b.getView (v);
-        CHECK (v.total >= 44, "project state carries the learned table (%zu bytes, %d notes after reload)", state.getSize(), v.total);
-
-        setPlain (a, "strength", 1.0f);
-        setPlain (b, "strength", 1.0f);
-        a.prepareToPlay (kFs, 512); // fresh audio state in both, keeping the table
-        const auto outA = render (a, sig, { 480 });
-        const auto outB = render (b, sig, { 480 });
-        double md = 0;
-        for (size_t i = 0; i < outA.size(); ++i)
-            md = std::max (md, (double) std::fabs (outA[i] - outB[i]));
-        CHECK (md < 1e-5, "a reloaded project corrects exactly like the original (max diff %.1e)", md);
-
-        double changed = 0;
-        const int lat = a.getLatencySamples();
-        for (size_t i = (size_t) lat; i < sig.size(); ++i)
-            changed = std::max (changed, (double) std::fabs (outA[i] - sig[i - (size_t) lat]));
-        CHECK (changed > 0.01, "the correction actually changes the audio (max change %.3f)", changed);
-
-        BassLevelerProcessor c;
-        setPlain (c, "strength", 1.0f);
-        c.setStateInformation ("garbage", 7);
-        juce::MemoryBlock bad;
-        bad.append ("<STATE table=\"AAAA\"/>", 21);
-        c.setStateInformation (bad.getData(), (int) bad.getSize());
-        CHECK (true, "garbage and truncated state do not crash");
-
-        if (const char* dir = std::getenv ("BNL_SNAPSHOT_DIR")) // optional: render the real editor to a PNG
-        {
-            std::unique_ptr<juce::AudioProcessorEditor> ed (a.createEditor());
-            ed->setSize (680, 440);
-            auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
-            juce::File f (juce::String (dir) + "/bass_leveler_ui.png");
-            f.deleteFile();
-            juce::FileOutputStream out (f);
-            juce::PNGImageFormat().writeImageToStream (img, out);
-        }
-
-        a.clearTable();
-        render (a, std::vector<float> (4800, 0.0f), { 512 });
-        a.getView (v);
-        CHECK (v.total == 0, "Clear table empties the table");
+    std::printf ("State recall\n");
+    {
+        BassLevelerProcessor a, b;
+        setPlain (a, "amount", 0.33f);
+        setPlain (a, "mode", 1.0f);
+        setPlain (a, "focus", 1.0f);
+        setPlain (a, "boost", 4.5f);
+        setPlain (a, "cut", 13.0f);
+        setPlain (a, "speed", 77.0f);
+        juce::MemoryBlock mb;
+        a.getStateInformation (mb);
+        b.setStateInformation (mb.getData(), (int) mb.getSize());
+        bool same = true;
+        for (auto* id : { "amount", "mode", "focus", "boost", "cut", "speed" })
+            same = same && std::abs (a.apvts.getParameter (id)->getValue() - b.apvts.getParameter (id)->getValue()) < 1e-5f;
+        CHECK (same, "all parameters survive a state round trip (%zu bytes)", mb.getSize());
+        b.setStateInformation ("garbage", 7);
+        CHECK (true, "garbage state does not crash");
     }
 
     std::printf ("Block sizes\n");
     {
         double total;
-        const auto sig = bassLine (5, total, 6.0);
+        const auto ev = bassEvents (7, total);
+        const auto sig = synth::render (kFs, ev, total, resonances (6.0));
         auto go = [&] (const std::vector<int>& blocks) {
             BassLevelerProcessor p;
             prepare (p, kFs, 4096);
-            setPlain (p, "learn", 1.0f);
-            render (p, sig, blocks);
-            setPlain (p, "learn", 0.0f);
-            setPlain (p, "strength", 1.0f);
-            setPlain (p, "rider", 0.4f);
-            p.prepareToPlay (kFs, 4096);
+            setPlain (p, "amount", 1.0f);
+            setPlain (p, "focus", 1.0f);
             return render (p, sig, blocks);
         };
         const auto ref = go ({ 512 });
@@ -213,7 +234,7 @@ int main()
     {
         BassLevelerProcessor p;
         prepare (p, sr, 256);
-        setPlain (p, "learn", 1.0f);
+        setPlain (p, "amount", 1.0f);
         std::mt19937 g (7);
         std::uniform_real_distribution<float> u (-1.0f, 1.0f);
         std::vector<float> in ((size_t) sr * 2);
@@ -240,7 +261,7 @@ int main()
         bool finite = true;
         for (int blk = 0; blk < 800; ++blk)
         {
-            for (auto* id : { "learn", "strength", "mode", "rider", "focus", "boost", "cut", "speed" })
+            for (auto* id : { "amount", "mode", "focus", "boost", "cut", "speed" })
                 if (u (g) < 0.25f)
                     p.apvts.getParameter (id)->setValueNotifyingHost (u (g));
             const int n = 1 + (int) (u (g) * 3000);
@@ -254,6 +275,24 @@ int main()
                     finite = finite && std::isfinite (view.getSample (c, i));
         }
         CHECK (finite, "800 blocks of random parameter changes: output always finite");
+    }
+
+    if (const char* dir = std::getenv ("BNL_SNAPSHOT_DIR")) // optional: render the real editor to a PNG after some playing
+    {
+        double total;
+        const auto ev = bassEvents (11, total);
+        const auto sig = synth::render (kFs, ev, total, resonances (7.0), 4);
+        BassLevelerProcessor p;
+        prepare (p, kFs, 480);
+        setPlain (p, "amount", 0.8f);
+        render (p, sig, { 480 });
+        std::unique_ptr<juce::AudioProcessorEditor> ed (p.createEditor());
+        ed->setSize (680, 440);
+        auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
+        juce::File f (juce::String (dir) + "/bass_leveler_ui.png");
+        f.deleteFile();
+        juce::FileOutputStream out (f);
+        juce::PNGImageFormat().writeImageToStream (img, out);
     }
 
     std::printf ("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASSED" : "FAILED", failures, failures == 1 ? "" : "s");

@@ -2,18 +2,16 @@
 
 // Bass Note Leveler - DSP core (header-only, C++17, no dependencies).
 //
-// Evens out per-note level on a monophonic bass line by finding out what each note's fundamental
-// does in the room / cab / instrument and applying a narrow bell filter at the played pitch.
+// Evens out per-note level on a monophonic bass line, automatically. Each note is measured while it
+// is still inside the look-ahead delay, compared with the typical level of the recent notes, and
+// corrected by a narrow bell filter on its own fundamental - before its first sample is heard.
 //
 //   input --> [analysis path: low-pass + decimate -> YIN pitch tracker -> onset detector ->
-//              note segmentation -> per-note level measurement -> per-pitch table]
-//   input --> [look-ahead delay] --> [bell at the tracked fundamental (+ optional 2nd harmonic)] --> output
+//              note segmentation -> per-note level -> running reference -> soft-knee correction]
+//   input --> [look-ahead delay] --> [two crossfading bell voices at the tracked pitch] --> output
 //
-// The look-ahead lets the filter know a note's pitch and the correction it needs before the note's
-// first sample reaches the output, so the correction is in place from the attack.
-// The analysis path never touches the audio; the delayed signal is only modified by the bell.
-
-#include "PitchTable.h"
+// The correction curve is smooth everywhere (small dead zone around "already even", ease-in, smooth
+// ceilings) and the gain moves with attack / release times, so nothing ever hits a hard limit.
 
 #include <algorithm>
 #include <array>
@@ -27,14 +25,12 @@ constexpr double kPi = 3.14159265358979323846;
 
 struct Params
 {
-    float strength = 0.7f;     // 0..1   how far each pitch is moved toward the common level
+    float amount = 0.6f;       // 0..1   how much of each note's distance from the typical level is corrected
     int mode = 0;              // 0 Balance (fundamental vs its harmonics), 1 Level (absolute fundamental)
-    float rider = 0.0f;        // 0..1   extra per-note correction against the recent notes
     bool focus2 = false;       // also put a bell on the 2nd harmonic
-    float maxBoostDb = 6.0f;
-    float maxCutDb = 12.0f;
-    float speedMs = 30.0f;     // how fast the gain moves inside a note (slides, decays)
-    bool learn = false;        // measure notes into the table (audio passes through unchanged)
+    float maxBoostDb = 6.0f;   // soft ceilings: the correction eases toward them, it never stops dead
+    float maxCutDb = 9.0f;
+    float speedMs = 30.0f;     // how fast the gain moves (release; attack is about 40% of this)
     float bellQ = 2.5f;
     float voicedThreshold = 0.70f;
 };
@@ -42,7 +38,13 @@ struct Params
 struct NoteInfo
 {
     double startSec;
-    float midi, balanceDb, levelDb, riderDb;
+    float midi, balanceDb, levelDb, metricDb, targetDb, corrDb;
+};
+
+// compact record of a recent note, for displays
+struct RecentNote
+{
+    float midi = 0.0f, deviationDb = 0.0f, correctionDb = 0.0f;
 };
 
 class Leveler
@@ -94,7 +96,6 @@ public:
         frameCount_ = 0;
         notes_.fill (Note {});
         noteHead_ = -1;
-        lastNoteId_ = -2;
         onsetN_ = 0;
         boxSum_ = 0.0;
         boxBuf_.fill (0.0f);
@@ -107,28 +108,45 @@ public:
         candRun_ = 0;
         lastMidi_ = candMidi_ = 0.0f;
         histN_ = 0;
-        gain_ = 0.0f;
-        freq_ = 80.0f;
-        fastUntil_ = 0;
-        for (auto& c : bell_)
-            for (auto& s : c)
-                s = {};
-        lastActiveGain_ = 0.0f;
-        active_ = false;
+        hist_[0].fill (0.0f);
+        hist_[1].fill (0.0f);
+        for (auto& v : v_)
+            v = Voice {};
+        cur_ = 0;
+        voiceKey_ = -2;
+        recentN_ = 0;
+        recent_.fill (RecentNote {});
         notesLog.clear();
     }
 
     int latencySamples() const { return lat_; }
-    void setParams (const Params& p)
+    void setParams (const Params& p) { prm_ = p; }
+    float currentGainDb() const { return v_[cur_].gain; }
+    float currentPitchHz() const { return v_[cur_].freq; }
+    float voiceGainDb (int voice) const { return v_[voice & 1].gain; } // each bell voice's own gain (for tests)
+
+    // Correction (dB) for a note whose level is devDb BELOW (+) or ABOVE (-) the typical level.
+    // Smooth everywhere: a small dead zone (a note within about 1 dB of typical is barely touched), a
+    // gentle ease-in, then a soft ceiling. There is no corner where the correction suddenly stops.
+    static float softCorrection (float devDb, float amount, float maxBoostDb, float maxCutDb)
     {
-        if (prm_.learn && ! p.learn)
-            table_.rebuild();
-        prm_ = p;
+        const float ceiling = devDb >= 0.0f ? maxBoostDb : maxCutDb;
+        if (ceiling < 0.05f || amount <= 0.0f)
+            return 0.0f;
+        constexpr float kDead = 1.0f;
+        const float a = std::fabs (devDb);
+        const float eased = devDb * a / (a + kDead);
+        return ceiling * std::tanh (amount * eased / ceiling);
     }
-    PitchTable& table() { return table_; }
-    const PitchTable& table() const { return table_; }
-    float currentGainDb() const { return gain_; }
-    float currentPitchHz() const { return freq_; }
+
+    // The most recent notes, oldest first (for displays). Returns how many were copied.
+    int copyRecent (RecentNote* out, int maxCount) const
+    {
+        const int n = std::min (std::min (recentN_, (int) recent_.size()), maxCount);
+        for (int i = 0; i < n; ++i)
+            out[i] = recent_[(size_t) ((recentN_ - n + i) % (int) recent_.size())];
+        return n;
+    }
 
     bool logNotes = false;
     std::vector<NoteInfo> notesLog;
@@ -153,13 +171,18 @@ public:
             for (int c = 0; c < nCh; ++c)
             {
                 float x = delay_[c][(size_t) ((wr_ - 1 - lat_) & (dsize_ - 1))];
-                if (active_)
+                double y = x;
+                for (auto& v : v_)
                 {
-                    double y = bellStep (s1_, bell_[c][0], m1_, x);
+                    if (! v.active)
+                    {
+                        v.st[c][0] = v.st[c][1] = {};
+                        continue;
+                    }
+                    y = bellStep (v.s1, v.st[c][0], v.m1, y);
                     if (prm_.focus2)
-                        y = bellStep (s2_, bell_[c][1], m2_, y);
-                    x = (float) y;
-                    for (auto& st : bell_[c])
+                        y = bellStep (v.s2, v.st[c][1], v.m2, y);
+                    for (auto& st : v.st[c])
                     {
                         if (std::fabs (st.z1) < 1e-20)
                             st.z1 = 0;
@@ -167,9 +190,7 @@ public:
                             st.z2 = 0;
                     }
                 }
-                else
-                    bell_[c][0] = bell_[c][1] = {};
-                ch[c][i] = x;
+                ch[c][i] = (float) y;
             }
         }
     }
@@ -192,7 +213,7 @@ private:
     {
         int64_t start = 0, lastVoiced = 0;
         bool done = false, known = false;
-        float hz = 0.0f, midi = 0.0f, balance = 0.0f, level = 0.0f, rider = 0.0f;
+        float hz = 0.0f, midi = 0.0f, balance = 0.0f, level = 0.0f, metric = 0.0f, target = 0.0f, corr = 0.0f;
         int n = 0;
         std::array<float, 24> aMidi {}, aBal {}, aLvl {}, aConf {};
     };
@@ -545,53 +566,55 @@ private:
         n.midi = midi;
         n.hz = 440.0f * std::pow (2.0f, (midi - 69.0f) / 12.0f);
         n.known = true;
-        if (prm_.learn)
+
+        // The reference is the typical level of the recent notes (their running median), taken BEFORE
+        // this note joins them. It needs a few notes first, then is trusted more and more.
+        const int metricIdx = prm_.mode == 1 ? 1 : 0;
+        n.metric = metricIdx == 1 ? n.level : n.balance;
+        float refVal = n.metric;
+        const int cnt = std::min (histN_, kHist);
+        if (cnt > 0)
         {
-            table_.add ((int) std::lround (midi), n.balance, n.level);
-            table_.rebuild();
-        }
-        // Rider: how far this note, after the table's correction, sits from the recent notes
-        const float metric = prm_.mode == 1 ? n.level : n.balance;
-        const float corrected = metric + prm_.strength * table_.correction (prm_.mode, midi);
-        n.rider = 0.0f;
-        if (histN_ >= 3)
-        {
-            float h[8];
-            const int cnt = std::min (histN_, 8);
+            float h[kHist];
             for (int i = 0; i < cnt; ++i)
-                h[i] = hist_[(size_t) i];
-            n.rider = std::max (-6.0f, std::min (6.0f, -(corrected - medianOf (h, cnt)) * prm_.rider));
+                h[i] = hist_[metricIdx][(size_t) i];
+            refVal = medianOf (h, cnt);
         }
-        hist_[(size_t) (histN_ % 8)] = corrected;
+        n.target = refVal;
+        const float trust = std::max (0.0f, std::min (1.0f, (float) (histN_ - 2) / 3.0f));
+        n.corr = trust * softCorrection (refVal - n.metric, prm_.amount, prm_.maxBoostDb, prm_.maxCutDb);
+        hist_[0][(size_t) (histN_ % kHist)] = n.balance;
+        hist_[1][(size_t) (histN_ % kHist)] = n.level;
         ++histN_;
+
+        recent_[(size_t) (recentN_ % (int) recent_.size())] = { midi, n.metric - refVal, n.corr };
+        ++recentN_;
         if (logNotes)
-            notesLog.push_back ({ (double) n.start / sr_, midi, n.balance, n.level, n.rider });
+            notesLog.push_back ({ (double) n.start / sr_, midi, n.balance, n.level, n.metric, refVal, n.corr });
     }
 
-    // ---------------- control (decides gain and bell frequency at the output time) -------------
-    void control (int64_t tOut, float& fHz, float& gDb, bool& changed)
+    // ---------------- control (what the bell should do at the output time) ----------------------------
+    // Returns the key of the note that is sounding (or about to: the correction starts 12 ms ahead of the
+    // attack, so it is already in place when the note arrives), or -1 when there is nothing to correct.
+    int control (int64_t tOut, float& fHz, float& gDb)
     {
         gDb = 0.0f;
+        const int64_t tLook = tOut + (int64_t) (0.012 * sr_);
         const Note* found = nullptr;
         int id = -1;
         for (int k = noteHead_; k >= 0 && k > noteHead_ - kNotes; --k)
-            if (notes_[(size_t) (k % kNotes)].start <= tOut)
+            if (notes_[(size_t) (k % kNotes)].start <= tLook)
             {
                 found = &notes_[(size_t) (k % kNotes)];
                 id = k;
                 break;
             }
-        if (id != lastNoteId_)
-        {
-            changed = true;
-            lastNoteId_ = id;
-        }
         if (! found || ! found->known)
-            return;
+            return -1;
         const int64_t end = id < noteHead_ ? notes_[(size_t) ((id + 1) % kNotes)].start
                                            : found->lastVoiced + nIn_win_ / 4 + (int64_t) (0.02 * sr_);
         if (tOut >= end)
-            return;
+            return id; // the note has ended: let the gain relax to nothing
         float f = found->hz;
         if (frameCount_ > 0)
         {
@@ -602,17 +625,17 @@ private:
                 if (fr.conf >= prm_.voicedThreshold)
                 {
                     if (std::fabs (12.0f * std::log2 (fr.f0 / f)) >= 3.0f)
-                        return; // slid too far from the measured pitch to know the room's response: leave it alone
-                    f = fr.f0;  // follow slides and bends inside the note
+                    {
+                        fHz = f;
+                        return id; // slid too far from where it was measured: ease the correction away
+                    }
+                    f = fr.f0; // follow slides and bends inside the note
                 }
             }
         }
         fHz = f;
-        if (prm_.learn)
-            return;
-        const float midi = 69.0f + 12.0f * std::log2 (f / 440.0f);
-        const float g = prm_.strength * table_.correction (prm_.mode, midi) + found->rider;
-        gDb = std::max (-prm_.maxCutDb, std::min (prm_.maxBoostDb, g));
+        gDb = found->corr;
+        return id;
     }
 
     // ---------------- audio path --------------------------------------------------------
@@ -641,35 +664,48 @@ private:
     }
 
     // Every kSub samples: decide gain and bell frequency for the next kSub output samples.
+    // Two bell voices take turns: a new note starts on the idle voice while the previous note's voice
+    // releases, so a bell never has to jump from one pitch to another while it still has gain.
     void updateControl()
     {
         const int64_t tOut = nIn_ - lat_ + kSub / 2;
-        float fTarget = freq_, gTarget = 0.0f;
-        bool changed = false;
-        control (tOut, fTarget, gTarget, changed);
-        if (changed)
-            fastUntil_ = nIn_ + (int64_t) (0.015 * sr_);
-        const float tau = nIn_ < fastUntil_ ? 0.003f : std::max (0.002f, prm_.speedMs * 0.001f);
-        const float a = 1.0f - std::exp (-(float) kSub / (tau * (float) sr_));
-        const float af = 1.0f - std::exp (-(float) kSub / (0.004f * (float) sr_));
-        gain_ += a * (gTarget - gain_);
-        if (gTarget == 0.0f && std::fabs (gain_) < 1e-3f)
-            gain_ = 0.0f;
-        freq_ = std::exp (std::log (freq_) + af * (std::log (std::max (20.0f, fTarget)) - std::log (freq_)));
-
-        active_ = std::fabs (gain_) > 1e-3f || std::fabs (lastActiveGain_) > 1e-3f;
-        lastActiveGain_ = gain_;
-        const double A = std::pow (10.0, (double) gain_ / 40.0);
-        const double q1 = prm_.bellQ, q2 = prm_.bellQ * 1.2;
-        setSvf (s1_, freq_, sr_, 1.0 / (q1 * A));
-        setSvf (s2_, std::min (2.0 * freq_, 0.45 * sr_), sr_, 1.0 / (q2 * A));
-        m1_ = (A - 1.0 / A) / q1;
-        m2_ = (A - 1.0 / A) / q2;
+        float fTarget = v_[cur_].freq, gTarget = 0.0f;
+        const int key = control (tOut, fTarget, gTarget);
+        if (key != voiceKey_)
+        {
+            voiceKey_ = key;
+            if (key >= 0)
+            {
+                cur_ ^= 1;
+                v_[cur_].freq = fTarget;
+            }
+        }
+        const float attack = std::max (0.003f, 0.4f * prm_.speedMs * 0.001f);
+        const float release = std::max (0.004f, prm_.speedMs * 0.001f);
+        const float af = 1.0f - std::exp (-(float) kSub / (0.006f * (float) sr_));
+        for (int i = 0; i < 2; ++i)
+        {
+            Voice& v = v_[i];
+            const float target = i == cur_ ? gTarget : 0.0f;
+            const float tau = std::fabs (target) > std::fabs (v.gain) ? attack : release;
+            v.gain += (1.0f - std::exp (-(float) kSub / (tau * (float) sr_))) * (target - v.gain);
+            if (target == 0.0f && std::fabs (v.gain) < 1e-3f)
+                v.gain = 0.0f;
+            if (i == cur_ && v.gain != 0.0f)
+                v.freq = std::exp (std::log (v.freq) + af * (std::log (std::max (20.0f, fTarget)) - std::log (v.freq)));
+            v.active = std::fabs (v.gain) > 1e-3f || std::fabs (v.lastGain) > 1e-3f;
+            v.lastGain = v.gain;
+            const double A = std::pow (10.0, (double) v.gain / 40.0);
+            const double q1 = prm_.bellQ, q2 = prm_.bellQ * 1.2;
+            setSvf (v.s1, v.freq, sr_, 1.0 / (q1 * A));
+            setSvf (v.s2, std::min (2.0 * v.freq, 0.45 * sr_), sr_, 1.0 / (q2 * A));
+            v.m1 = (A - 1.0 / A) / q1;
+            v.m2 = (A - 1.0 / A) / q2;
+        }
     }
 
     static constexpr int kFrames = 1024, kNotes = 64;
     Params prm_;
-    PitchTable table_;
     double sr_ = 48000.0, fsd_ = 4800.0;
     float fmin_ = 28.0f, fmax_ = 420.0f;
     int D_ = 10, tauMax_ = 175, tauMin_ = 11, N_ = 350, hopD_ = 10, lat_ = 4800, dsize_ = 8192, wr_ = 0, boxLen_ = 120;
@@ -680,7 +716,7 @@ private:
     State lp_[2] {};
     std::array<Frame, kFrames> frames_ {};
     std::array<Note, kNotes> notes_ {};
-    int noteHead_ = -1, lastNoteId_ = -2;
+    int noteHead_ = -1;
     std::array<int64_t, 32> onsets_ {};
     int onsetN_ = 0;
     double boxSum_ = 0;
@@ -692,13 +728,20 @@ private:
     int64_t lastOnsetM_ = -1000000;
     int unvoicedRun_ = 0, candRun_ = 0;
     float lastMidi_ = 0.0f, candMidi_ = 0.0f;
-    std::array<float, 8> hist_ {};
+    static constexpr int kHist = 24;
+    std::array<float, kHist> hist_[2] {};
     int histN_ = 0;
-    float gain_ = 0.0f, freq_ = 80.0f, lastActiveGain_ = 0.0f;
-    Svf s1_, s2_;
-    double m1_ = 0, m2_ = 0;
-    bool active_ = false;
-    int64_t fastUntil_ = 0;
-    State bell_[2][2] {};
+    struct Voice
+    {
+        float gain = 0.0f, lastGain = 0.0f, freq = 80.0f;
+        bool active = false;
+        Svf s1, s2;
+        double m1 = 0, m2 = 0;
+        State st[2][2] {};
+    };
+    Voice v_[2];
+    int cur_ = 0, voiceKey_ = -2;
+    std::array<RecentNote, 32> recent_ {};
+    int recentN_ = 0;
 };
 } // namespace bnl

@@ -20,7 +20,7 @@ static int failures = 0;
 
 static constexpr double kFs = 48000.0;
 
-// a bass line over 16 pitches (E1..G2), several repeats, random velocities
+// a bass line over 16 pitches (E1..G2), shuffled repeats, random velocities
 static std::vector<synth::Ev> makeLine (unsigned seed, int repeats, double velSpreadDb, double& total)
 {
     std::mt19937 g (seed);
@@ -57,7 +57,6 @@ static std::vector<float> run (Leveler& l, const std::vector<float>& in, int blo
 {
     l.setParams (p);
     std::vector<float> out = in;
-    std::vector<float> scratch ((size_t) block);
     for (size_t i = 0; i < in.size(); i += (size_t) block)
     {
         const int n = (int) std::min<size_t> ((size_t) block, in.size() - i);
@@ -79,15 +78,15 @@ static double stddev (const std::vector<double>& v)
     return std::sqrt (s / (double) v.size());
 }
 
-// per-pitch mean of a metric over the notes of a line
-static std::vector<double> perPitch (const std::vector<float>& sig, int shiftSamples, const std::vector<synth::Ev>& ev, bool balance)
+// per-pitch mean of a metric over the notes of a line (skipping the first `skip` notes, where the
+// automatic reference is still warming up)
+static std::vector<double> perPitch (const std::vector<float>& sig, int shift, const std::vector<synth::Ev>& ev, bool balance, size_t skip)
 {
     std::map<int, std::vector<double>> acc;
-    for (const auto& e : ev)
+    for (size_t i = skip; i < ev.size(); ++i)
     {
-        // measurement window starts 40 ms after the onset, in the (delayed) signal
-        auto m = synth::measure (sig, kFs, e.midi, e.t + (double) shiftSamples / kFs);
-        acc[e.midi].push_back (balance ? m.balDb : m.lvlDb);
+        auto m = synth::measure (sig, kFs, ev[i].midi, ev[i].t + (double) shift / kFs);
+        acc[ev[i].midi].push_back (balance ? m.balDb : m.lvlDb);
     }
     std::vector<double> out;
     for (auto& kv : acc)
@@ -100,38 +99,38 @@ static std::vector<double> perPitch (const std::vector<float>& sig, int shiftSam
     return out;
 }
 
+static int matchNotes (const Leveler& l, const std::vector<synth::Ev>& ev, bool pitchToo = true)
+{
+    int ok = 0;
+    for (const auto& e : ev)
+        for (const auto& n : l.notesLog)
+            if (std::fabs (n.startSec - e.t) < 0.06 && (! pitchToo || std::fabs (n.midi - e.midi) < 0.3f))
+            {
+                ++ok;
+                break;
+            }
+    return ok;
+}
+
 int main()
 {
     std::printf ("Pitch and note tracking\n");
     {
         double total;
         const auto ev = makeLine (1, 3, 3.0, total);
-        const auto res = makeResonances (7, 0.0);
-        const auto sig = synth::render (kFs, ev, total, res);
+        const auto sig = synth::render (kFs, ev, total, makeResonances (7, 0.0));
         Leveler l;
         l.prepare (kFs);
         l.logNotes = true;
-        Params p;
-        p.learn = true;
-        run (l, sig, 256, p);
-        int matched = 0, right = 0;
-        for (const auto& e : ev)
-            for (const auto& n : l.notesLog)
-                if (std::fabs (n.startSec - e.t) < 0.06)
-                {
-                    ++matched;
-                    right += std::fabs (n.midi - e.midi) < 0.3f;
-                    break;
-                }
-        CHECK (matched >= (int) ev.size() * 95 / 100, "notes found: %d of %zu", matched, ev.size());
-        CHECK (right >= matched * 95 / 100, "pitch correct: %d of %d", right, matched);
+        run (l, sig, 256, Params {});
+        CHECK (matchNotes (l, ev, false) >= (int) ev.size() * 95 / 100, "notes found: %d of %zu", matchNotes (l, ev, false), ev.size());
+        CHECK (matchNotes (l, ev) >= (int) ev.size() * 95 / 100, "notes found with the right pitch: %d of %zu", matchNotes (l, ev), ev.size());
         CHECK (l.notesLog.size() <= ev.size() + 2, "no phantom notes (%zu logged for %zu played)", l.notesLog.size(), ev.size());
         std::printf ("  latency %d samples = %.1f ms\n", l.latencySamples(), 1000.0 * l.latencySamples() / kFs);
     }
 
     std::printf ("Harder playing\n");
     {
-        // (a) fast repeated notes on one pitch and alternating pitches (8th notes at ~143 bpm)
         std::vector<synth::Ev> ev;
         double t = 0.3;
         for (int i = 0; i < 24; ++i)
@@ -143,21 +142,10 @@ int main()
         Leveler l;
         l.prepare (kFs);
         l.logNotes = true;
-        Params p;
-        p.learn = true;
-        run (l, sig, 256, p);
-        int ok = 0;
-        for (const auto& e : ev)
-            for (const auto& n : l.notesLog)
-                if (std::fabs (n.startSec - e.t) < 0.06 && std::fabs (n.midi - e.midi) < 0.3f)
-                {
-                    ++ok;
-                    break;
-                }
-        CHECK (ok >= (int) ev.size() * 9 / 10, "fast 8ths: %d of %zu notes tracked (%zu logged)", ok, ev.size(), l.notesLog.size());
+        run (l, sig, 256, Params {});
+        CHECK (matchNotes (l, ev) >= (int) ev.size() * 9 / 10, "fast 8ths: %d of %zu notes tracked (%zu logged)", matchNotes (l, ev), ev.size(), l.notesLog.size());
     }
     {
-        // (b) hammer-ons: the second note of each pair has no pick and no new energy onset
         std::vector<synth::Ev> ev;
         double t = 0.3;
         for (int i = 0; i < 8; ++i)
@@ -174,9 +162,7 @@ int main()
         Leveler l;
         l.prepare (kFs);
         l.logNotes = true;
-        Params p;
-        p.learn = true;
-        run (l, sig, 256, p);
+        run (l, sig, 256, Params {});
         int hit = 0;
         for (size_t i = 1; i < ev.size(); i += 2)
             for (const auto& n : l.notesLog)
@@ -188,7 +174,6 @@ int main()
         CHECK (hit >= 7, "hammer-ons picked up as new notes with the right pitch: %d of 8", hit);
     }
     {
-        // (c) a slide: stays one note, bell follows the pitch (output stays finite and sane)
         std::vector<synth::Ev> ev;
         synth::Ev s1 { 0.3, 1.2, 31, 0.0 };
         s1.glideTo = 36.0;
@@ -197,50 +182,169 @@ int main()
         Leveler l;
         l.prepare (kFs);
         l.logNotes = true;
-        Params p;
-        p.learn = true;
-        run (l, sig, 256, p);
+        run (l, sig, 256, Params {});
         CHECK (l.notesLog.size() == 1, "a 5-semitone slide stays one note (%zu logged)", l.notesLog.size());
     }
+
+    std::printf ("Automatic leveling (no learning pass)\n");
+    for (int mode = 0; mode < 2; ++mode)
     {
-        // (d) Rider: per-note variation inside one pitch (the table cannot fix this, Rider can)
+        double total;
+        const auto ev = makeLine (5, 4, 3.0, total);
+        const auto sig = synth::render (kFs, ev, total, makeResonances (11, 7.0), 2);
+        for (float amount : { 1.0f, 0.6f })
+        {
+            if (mode == 1 && amount < 1.0f)
+                continue;
+            Leveler l;
+            l.prepare (kFs);
+            Params p;
+            p.mode = mode;
+            p.amount = amount;
+            p.maxBoostDb = 12.0f;
+            p.maxCutDb = 18.0f;
+            const auto out = run (l, sig, 512, p);
+            const bool bal = mode == 0;
+            const double before = stddev (perPitch (sig, 0, ev, bal, 8));
+            const double after = stddev (perPitch (out, l.latencySamples(), ev, bal, 8));
+            const double want = mode == 0 ? (amount == 1.0f ? 0.40 : 0.70) : 0.65;
+            CHECK (after < before * want, "%s mode, amount %.1f: spread between pitches %.2f dB -> %.2f dB (-%.0f%%)", bal ? "Balance" : "Level",
+                   amount, before, after, 100.0 * (1.0 - after / before));
+        }
+    }
+    {
+        // within-pitch variation (playing dynamics) in Level mode
         std::mt19937 g (21);
         std::uniform_real_distribution<double> u (-1.0, 1.0);
-        auto line = [&] (double& total) {
-            std::vector<synth::Ev> ev;
-            double t = 0.3;
-            for (int i = 0; i < 40; ++i)
-            {
-                ev.push_back ({ t, 0.42, 30 + (i % 4), u (g) * 4.0 });
-                t += 0.55;
-            }
-            total = t + 0.5;
-            return ev;
-        };
-        double tA, tB;
-        const auto evA = line (tA), evB = line (tB);
-        const auto flat = makeResonances (1, 0.0);
-        const auto sigA = synth::render (kFs, evA, tA, flat, 1), sigB = synth::render (kFs, evB, tB, flat, 2);
-        auto noteStd = [&] (const std::vector<float>& sig, int shift, const std::vector<synth::Ev>& ev, size_t skip) {
-            std::vector<double> v;
-            for (size_t i = skip; i < ev.size(); ++i)
-                v.push_back (synth::measure (sig, kFs, ev[i].midi, ev[i].t + (double) shift / kFs).lvlDb);
-            return stddev (v);
-        };
+        std::vector<synth::Ev> ev;
+        double t = 0.3;
+        for (int i = 0; i < 48; ++i)
+        {
+            ev.push_back ({ t, 0.42, 30 + (i % 4), u (g) * 4.0 });
+            t += 0.55;
+        }
+        const auto sig = synth::render (kFs, ev, t + 0.5, makeResonances (1, 0.0), 1);
         Leveler l;
         l.prepare (kFs);
         Params p;
         p.mode = 1;
-        p.learn = true;
-        run (l, sigA, 512, p);
-        p.learn = false;
-        p.strength = 1.0f;
-        p.rider = 1.0f;
-        l.reset();
-        const auto out = run (l, sigB, 512, p);
-        const double before = noteStd (sigB, 0, evB, 8);
-        const double after = noteStd (out, l.latencySamples(), evB, 8);
-        CHECK (after < before * 0.75, "Rider: note-to-note spread %.2f dB -> %.2f dB", before, after);
+        p.amount = 1.0f;
+        const auto out = run (l, sig, 512, p);
+        auto noteStd = [&] (const std::vector<float>& s, int shift) {
+            std::vector<double> v;
+            for (size_t i = 10; i < ev.size(); ++i)
+                v.push_back (synth::measure (s, kFs, ev[i].midi, ev[i].t + (double) shift / kFs).lvlDb);
+            return stddev (v);
+        };
+        const double before = noteStd (sig, 0), after = noteStd (out, l.latencySamples());
+        CHECK (after < before * 0.6, "Level mode evens out playing dynamics: note-to-note spread %.2f dB -> %.2f dB", before, after);
+    }
+    {
+        // the reference needs a few notes before it is trusted
+        double total;
+        const auto ev = makeLine (9, 1, 0.0, total);
+        const auto sig = synth::render (kFs, ev, total, makeResonances (3, 7.0));
+        Leveler l;
+        l.prepare (kFs);
+        l.logNotes = true;
+        Params p;
+        p.amount = 1.0f;
+        run (l, sig, 256, p);
+        CHECK (l.notesLog.size() > 6 && l.notesLog[0].corrDb == 0.0f && l.notesLog[1].corrDb == 0.0f,
+               "the first two notes are left alone while the reference forms");
+    }
+
+    std::printf ("Natural-sounding correction (no brick wall)\n");
+    {
+        // (1) the correction curve is smooth everywhere: no corner where it suddenly stops
+        const float boost = 6.0f, cut = 9.0f, amount = 1.0f;
+        float prev = Leveler::softCorrection (-30.0f, amount, boost, cut), prevSlope = 0.0f, maxSlope = 0.0f, maxSlopeJump = 0.0f;
+        bool monotonic = true, belowCeiling = true;
+        for (float d = -29.99f; d <= 30.0f; d += 0.01f)
+        {
+            const float c = Leveler::softCorrection (d, amount, boost, cut);
+            const float slope = (c - prev) / 0.01f;
+            monotonic = monotonic && slope >= -1e-4f;
+            belowCeiling = belowCeiling && c < boost && c > -cut;
+            maxSlope = std::max (maxSlope, slope);
+            if (d > -29.9f)
+                maxSlopeJump = std::max (maxSlopeJump, std::fabs (slope - prevSlope));
+            prev = c;
+            prevSlope = slope;
+        }
+        CHECK (monotonic && belowCeiling, "correction grows steadily with the deviation and stays under the ceilings");
+        CHECK (maxSlope <= 1.001f, "never more than 1 dB of correction per dB of deviation (steepest %.2f)", maxSlope);
+        // a hard clamp changes slope from 1 to 0 in one step (jump of 1.0 per 0.01 dB step = 100 dB/dB^2)
+        CHECK (maxSlopeJump < 0.05f, "no corner anywhere in the curve (largest slope change per 0.01 dB step %.4f)", maxSlopeJump);
+        CHECK (std::fabs (Leveler::softCorrection (0.4f, 1.0f, boost, cut)) < 0.15f, "tiny deviations are barely touched (0.4 dB off -> %.2f dB)",
+               Leveler::softCorrection (0.4f, 1.0f, boost, cut));
+        CHECK (Leveler::softCorrection (4.0f, 0.5f, boost, cut) < 2.0f && Leveler::softCorrection (4.0f, 0.5f, boost, cut) > 1.0f,
+               "amount 0.5 corrects roughly half (4 dB off -> %.2f dB)", Leveler::softCorrection (4.0f, 0.5f, boost, cut));
+    }
+    {
+        // (2) the bell's gain moves smoothly: no steps, never past the ceilings
+        double total;
+        const auto ev = makeLine (12, 3, 3.0, total);
+        const auto sig = synth::render (kFs, ev, total, makeResonances (13, 7.0), 3);
+        Leveler l;
+        l.prepare (kFs);
+        Params p;
+        p.amount = 1.0f;
+        p.maxBoostDb = 6.0f;
+        p.maxCutDb = 9.0f;
+        l.setParams (p);
+        std::vector<float> out = sig;
+        std::vector<float> g0 (sig.size()), g1 (sig.size());
+        for (size_t i = 0; i < sig.size(); ++i)
+        {
+            float* ch[1] = { out.data() + i };
+            l.process (ch, 1, 1);
+            g0[i] = l.voiceGainDb (0);
+            g1[i] = l.voiceGainDb (1);
+        }
+        // two bell voices take turns, so check each voice's own gain trajectory
+        double maxStep = 0, maxG = -1e9, minG = 1e9;
+        for (const auto* g : { &g0, &g1 })
+            for (size_t i = 48; i < g->size(); ++i)
+            {
+                maxStep = std::max (maxStep, (double) std::fabs ((*g)[i] - (*g)[i - 48])); // dB moved within 1 ms
+                maxG = std::max (maxG, (double) (*g)[i]);
+                minG = std::min (minG, (double) (*g)[i]);
+            }
+        CHECK (maxStep < 1.5, "gain never jumps: the most it moves in 1 ms is %.2f dB", maxStep);
+        CHECK (maxG < 6.0 && minG > -9.0, "gain stays inside the soft ceilings (%.2f .. %.2f dB)", minG, maxG);
+
+        // (3) the correction adds no clicks: the difference between output and (delayed) input has almost no HF content
+        const int lat = l.latencySamples();
+        double eAll = 0, eHf = 0, lp = 0, prevd = 0;
+        for (size_t i = (size_t) lat + 1; i < sig.size(); ++i)
+        {
+            const double d = (double) out[i] - sig[i - (size_t) lat];
+            lp += 0.08 * (d - lp); // ~600 Hz one-pole low-pass
+            const double hf = d - lp;
+            eAll += d * d;
+            eHf += hf * hf;
+            prevd = d;
+        }
+        (void) prevd;
+        CHECK (eAll > 0 && eHf / eAll < 0.02, "the correction is smooth: only %.2f%% of what it adds lies above ~600 Hz", 100.0 * eHf / eAll);
+    }
+    {
+        // (4) recent-note display data: deviation and correction have opposite signs
+        double total;
+        const auto ev = makeLine (14, 3, 0.0, total);
+        const auto sig = synth::render (kFs, ev, total, makeResonances (15, 7.0));
+        Leveler l;
+        l.prepare (kFs);
+        Params p;
+        p.amount = 1.0f;
+        run (l, sig, 256, p);
+        RecentNote r[32];
+        const int n = l.copyRecent (r, 32);
+        bool ok = n > 20;
+        for (int i = 0; i < n; ++i)
+            ok = ok && (std::fabs (r[i].deviationDb) < 1.0f || r[i].deviationDb * r[i].correctionDb <= 0.0f);
+        CHECK (ok, "recent-note data: %d notes, corrections oppose the deviations", n);
     }
 
     std::printf ("Transparency and latency\n");
@@ -251,75 +355,28 @@ int main()
         Leveler l;
         l.prepare (kFs);
         Params p;
-        p.strength = 1.0f;
-        const auto out = run (l, sig, 128, p); // empty table: nothing to correct
+        p.amount = 0.0f;
+        const auto out = run (l, sig, 128, p);
         const int lat = l.latencySamples();
         double md = 0;
         for (size_t i = (size_t) lat; i < sig.size(); ++i)
             md = std::max (md, (double) std::fabs (out[i] - sig[i - (size_t) lat]));
-        CHECK (md < 1e-7, "empty table: output is the input delayed by exactly the reported latency (max diff %.1e)", md);
-
-        Leveler l2;
-        l2.prepare (kFs);
-        Params pl;
-        pl.learn = true;
-        const auto out2 = run (l2, sig, 128, pl);
-        md = 0;
-        for (size_t i = (size_t) lat; i < sig.size(); ++i)
-            md = std::max (md, (double) std::fabs (out2[i] - sig[i - (size_t) lat]));
-        CHECK (md < 1e-7, "learn mode passes the audio through unchanged (max diff %.1e)", md);
+        CHECK (md < 1e-7, "amount 0: output is the input delayed by exactly the reported latency (max diff %.1e)", md);
     }
-
-    std::printf ("Evening out resonances\n");
-    for (int mode = 0; mode < 2; ++mode)
     {
-        double total, total2;
-        const auto resonances = makeResonances (11, 7.0);
-        const auto evA = makeLine (4, 3, 3.0, total);
-        const auto evB = makeLine (5, 3, 3.0, total2);
-        const auto sigA = synth::render (kFs, evA, total, resonances, 1);
-        const auto sigB = synth::render (kFs, evB, total2, resonances, 2);
+        double total;
+        const auto ev = makeLine (6, 4, 0.0, total);
+        const auto sig = synth::render (kFs, ev, total, makeResonances (1, 0.0), 1);
         Leveler l;
         l.prepare (kFs);
         Params p;
-        p.mode = mode;
-        p.learn = true;
-        run (l, sigA, 512, p);
-        p.learn = false;
-        p.strength = 1.0f;
-        p.maxBoostDb = 12.0f;
-        p.maxCutDb = 18.0f;
-        l.reset(); // keep the learned table; clear audio state
-        const auto outB = run (l, sigB, 512, p);
-        const bool bal = mode == 0;
-        const double before = stddev (perPitch (sigB, 0, evB, bal));
-        const double after = stddev (perPitch (outB, l.latencySamples(), evB, bal));
-        CHECK (after < before * (mode == 0 ? 0.40 : 0.60), "%s mode: spread between pitches %.2f dB -> %.2f dB (-%.0f%%)",
-               bal ? "Balance" : "Level", before, after, 100.0 * (1.0 - after / before));
-    }
-
-    std::printf ("Already-even bass is left alone\n");
-    {
-        double total, total2;
-        const auto flat = makeResonances (1, 0.0);
-        const auto evA = makeLine (6, 3, 0.0, total);
-        const auto evB = makeLine (7, 2, 0.0, total2);
-        const auto sigA = synth::render (kFs, evA, total, flat, 1);
-        const auto sigB = synth::render (kFs, evB, total2, flat, 2);
-        Leveler l;
-        l.prepare (kFs);
-        Params p;
-        p.learn = true;
-        run (l, sigA, 512, p);
-        p.learn = false;
-        p.strength = 1.0f;
-        l.reset();
-        const auto outB = run (l, sigB, 512, p);
-        const auto a = perPitch (sigB, 0, evB, true), b = perPitch (outB, l.latencySamples(), evB, true);
+        p.amount = 1.0f;
+        const auto out = run (l, sig, 512, p);
+        const auto a = perPitch (sig, 0, ev, true, 6), b = perPitch (out, l.latencySamples(), ev, true, 6);
         double worst = 0;
         for (size_t i = 0; i < a.size(); ++i)
             worst = std::max (worst, std::fabs (a[i] - b[i]));
-        CHECK (worst < 1.0, "largest change on even bass: %.2f dB", worst);
+        CHECK (worst < 1.0, "already-even bass: largest change %.2f dB (amount 1.0)", worst);
     }
 
     std::printf ("Block-size independence\n");
@@ -331,13 +388,8 @@ int main()
             Leveler l;
             l.prepare (kFs);
             Params p;
-            p.learn = true;
-            run (l, sig, block, p);
-            p.learn = false;
-            p.strength = 1.0f;
-            p.rider = 0.5f;
+            p.amount = 1.0f;
             p.focus2 = true;
-            l.reset();
             return run (l, sig, block, p);
         };
         const auto ref = go (512);
@@ -356,8 +408,7 @@ int main()
         Leveler l;
         l.prepare (kFs);
         Params p;
-        p.strength = 1.0f;
-        p.rider = 1.0f;
+        p.amount = 1.0f;
         std::mt19937 g (3);
         std::uniform_real_distribution<float> u (-1.0f, 1.0f);
         std::vector<float> junk (48000 * 4);
@@ -380,11 +431,9 @@ int main()
             const auto ev = makeLine (1, 1, 0.0, total);
             Leveler lr;
             lr.prepare (sr);
-            Params pl;
-            pl.learn = true;
-            const auto sig = synth::render (sr, ev, total, makeResonances (1, 0.0));
             lr.logNotes = true;
-            run (lr, sig, 256, pl);
+            const auto sig = synth::render (sr, ev, total, makeResonances (1, 0.0));
+            run (lr, sig, 256, Params {});
             int ok = 0;
             for (const auto& e : ev)
                 for (const auto& n : lr.notesLog)
@@ -395,26 +444,6 @@ int main()
                     }
             CHECK (ok >= (int) ev.size() * 9 / 10, "sample rate %.0f: %d of %zu notes tracked correctly", sr, ok, ev.size());
         }
-    }
-
-    std::printf ("Table persistence\n");
-    {
-        PitchTable t;
-        for (int p = 30; p < 40; ++p)
-            for (int i = 0; i < 5; ++i)
-                t.add (p, (float) p * 0.1f + i, (float) p * 0.2f - i);
-        t.rebuild();
-        std::vector<uint8_t> blob;
-        t.serialise (blob);
-        PitchTable u;
-        const bool ok = u.deserialise (blob.data(), blob.size());
-        bool same = ok;
-        for (int p = 28; p < 42; ++p)
-            for (int m = 0; m < 2; ++m)
-                same = same && std::fabs (t.correction (m, (float) p + 0.3f) - u.correction (m, (float) p + 0.3f)) < 1e-6f;
-        CHECK (same, "table survives a save/restore round trip (%zu bytes)", blob.size());
-        PitchTable w;
-        CHECK (! w.deserialise (blob.data(), blob.size() / 2), "truncated data is rejected");
     }
 
     std::printf ("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASSED" : "FAILED", failures, failures == 1 ? "" : "s");
