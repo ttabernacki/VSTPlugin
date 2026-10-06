@@ -84,3 +84,6 @@ endif()
 
 # --- Bass Note Leveler (second plug-in in this repo) ---------------------------------
 add_subdirectory(bass-leveler)
+
+# --- Low-End Definition (third plug-in in this repo) ----------------------------------
+add_subdirectory(lowend-definition)

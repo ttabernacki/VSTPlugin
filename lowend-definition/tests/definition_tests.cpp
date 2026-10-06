@@ -1,0 +1,437 @@
+// Tests for the Low-End Definition DSP core (no JUCE needed).
+#include "../core/Definition.h"
+#include "../../bass-leveler/tests/synth.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <random>
+
+using namespace led;
+
+static int failures = 0;
+#define CHECK(cond, ...)                                        \
+    do {                                                        \
+        const bool ok_ = (cond);                                \
+        std::printf ("  [%s] ", ok_ ? "PASS" : "FAIL");         \
+        std::printf (__VA_ARGS__);                              \
+        std::printf ("\n");                                     \
+        if (! ok_) ++failures;                                  \
+    } while (0)
+
+static constexpr double kFs = 48000.0;
+
+struct Trace
+{
+    std::vector<float> out;
+    std::vector<float> pitch, trans, contrast, pin, pout; // sampled once per 16-sample block
+};
+
+static Trace run (Definition& d, const std::vector<float>& in, int block, const Params& p, bool record = false)
+{
+    d.setParams (p);
+    Trace t;
+    t.out = in;
+    for (size_t i = 0; i < in.size(); i += (size_t) block)
+    {
+        float* c[1] = { t.out.data() + i };
+        d.process (c, 1, (int) std::min<size_t> ((size_t) block, in.size() - i));
+        if (record)
+        {
+            t.pitch.push_back (d.pitchHz());
+            t.trans.push_back (d.transientGainDb());
+            t.contrast.push_back (d.contrastGainDb());
+            t.pin.push_back (d.meterValid() ? d.definitionIn() : -1.0f);
+            t.pout.push_back (d.meterValid() ? d.definitionOut() : -1.0f);
+        }
+    }
+    return t;
+}
+
+// 4th-order low-pass, to judge only the band the plug-in works on
+static std::vector<float> lowpass (const std::vector<float>& x, double fs, double fc)
+{
+    std::vector<float> y = x;
+    for (int stage = 0; stage < 2; ++stage)
+    {
+        const double q = stage == 0 ? 0.5411961 : 1.3065630, w = 2.0 * kPi * fc / fs, cw = std::cos (w), al = std::sin (w) / (2.0 * q), a0 = 1.0 + al;
+        const double b0 = (1 - cw) / 2 / a0, b1 = (1 - cw) / a0, b2 = b0, a1 = -2 * cw / a0, a2 = (1 - al) / a0;
+        double z1 = 0, z2 = 0;
+        for (auto& v : y)
+        {
+            const double o = b0 * v + z1;
+            z1 = b1 * v - a1 * o + z2;
+            z2 = b2 * v - a2 * o;
+            v = (float) o;
+        }
+    }
+    return y;
+}
+
+static std::array<double, 128> flat() { return {}; }
+
+static std::vector<synth::Ev> line (double spacing, double dur, int repeats, unsigned seed, double& total)
+{
+    std::mt19937 g (seed);
+    std::vector<synth::Ev> ev;
+    double t = 0.3;
+    for (int r = 0; r < repeats; ++r)
+    {
+        std::vector<int> pitches;
+        for (int p = 28; p <= 43; ++p)
+            pitches.push_back (p);
+        std::shuffle (pitches.begin(), pitches.end(), g);
+        for (int p : pitches)
+        {
+            ev.push_back ({ t, dur, p, std::uniform_real_distribution<double> (-3.0, 3.0) (g) });
+            t += spacing;
+        }
+    }
+    total = t + 0.5;
+    return ev;
+}
+
+// amplitude (dB) of one frequency over a window holding a whole number of its cycles
+static double ampDb (const std::vector<float>& x, double fs, double f, double t0, double cycles)
+{
+    const size_t i0 = (size_t) (t0 * fs), L = (size_t) std::llround (cycles * fs / f);
+    const double w = 2.0 * kPi * cycles / (double) L;
+    double re = 0, im = 0;
+    for (size_t j = 0; j < L && i0 + j < x.size(); ++j)
+    {
+        re += x[i0 + j] * std::cos (w * (double) j);
+        im -= x[i0 + j] * std::sin (w * (double) j);
+    }
+    return 20.0 * std::log10 (2.0 / (double) L * std::sqrt (re * re + im * im) + 1e-12);
+}
+
+// a held bass note with steady harmonics and an optional steady "mud" sine
+static std::vector<float> held (double fs, double f0, double seconds, double mudHz, double mudAmp, double h2 = 0.5, double h3 = 0.3)
+{
+    std::vector<float> x ((size_t) (seconds * fs));
+    for (size_t i = 0; i < x.size(); ++i)
+    {
+        const double t = (double) i / fs, env = std::min (1.0, t / 0.03);
+        double s = std::sin (2 * kPi * f0 * t) + h2 * std::sin (2 * kPi * 2 * f0 * t + 0.4) + h3 * std::sin (2 * kPi * 3 * f0 * t + 1.1);
+        if (mudAmp > 0)
+            s += mudAmp * std::sin (2 * kPi * mudHz * t + 0.7);
+        x[i] = (float) (0.3 * env * s);
+    }
+    return x;
+}
+
+int main()
+{
+    Params neutral;
+    neutral.contrast = neutral.punch = neutral.sustain = 0.0f;
+
+    std::printf ("Latency, neutrality and the crossover\n");
+    {
+        Definition d;
+        d.prepare (kFs);
+        const int lat = d.latencySamples();
+        CHECK (lat > 0 && lat % Definition::kSub == 0 && lat < (int) (0.15 * kFs), "look-ahead %d samples (%.0f ms)", lat, 1000.0 * lat / kFs);
+        double total;
+        const auto ev = line (0.55, 0.42, 2, 3, total);
+        const auto sig = synth::render (kFs, ev, total, flat());
+        const auto t = run (d, sig, 480, neutral);
+        double md = 0;
+        for (size_t i = (size_t) lat; i < sig.size(); ++i)
+            md = std::max (md, (double) std::fabs (t.out[i] - sig[i - (size_t) lat]));
+        CHECK (md < 1e-7, "all controls neutral: output is the input delayed by the look-ahead (max diff %.1e)", md);
+
+        // with everything maxed, a signal far above the range must come out untouched
+        std::vector<float> hi (96000), mix;
+        for (size_t i = 0; i < hi.size(); ++i)
+            hi[i] = (float) (0.3 * std::sin (2 * kPi * 3000.0 * (double) i / kFs));
+        mix = hi;
+        const auto bass = held (kFs, 41.2, 2.0, 0, 0);
+        for (size_t i = 0; i < mix.size(); ++i)
+            mix[i] += bass[i];
+        Params maxed;
+        maxed.contrast = 1.0f;
+        maxed.punch = 1.0f;
+        maxed.sustain = 1.0f;
+        Definition d2;
+        d2.prepare (kFs);
+        const auto o = run (d2, mix, 480, maxed);
+        const double a_in = ampDb (mix, kFs, 3000.0, 0.8, 600), a_out = ampDb (o.out, kFs, 3000.0, 0.8 + (double) lat / kFs, 600);
+        CHECK (std::fabs (a_out - a_in) < 0.02, "a 3 kHz tone is left alone with every control up (%.3f dB)", a_out - a_in);
+    }
+
+    std::printf ("Pitch tracking under the look-ahead\n");
+    for (auto spacing : { 0.55, 0.20 })
+    {
+        double total;
+        const double dur = spacing < 0.3 ? 0.17 : 0.42;
+        const auto ev = line (spacing, dur, 3, 5, total);
+        const auto sig = synth::render (kFs, ev, total, flat(), 2);
+        Definition d;
+        d.prepare (kFs);
+        const auto t = run (d, sig, 16, neutral, true);
+        int good = 0, tried = 0;
+        double covered = 0, frames = 0;
+        for (const auto& e : ev)
+        {
+            const double f = synth::hz (e.midi);
+            int in = 0, tot = 0;
+            for (double s = e.t + 0.02; s < e.t + e.dur - 0.02; s += 0.004)
+            {
+                const size_t b = (size_t) ((s * kFs + d.latencySamples()) / 16.0);
+                if (b >= t.pitch.size())
+                    break;
+                ++tot;
+                if (t.pitch[b] > 0 && std::fabs (12.0 * std::log2 (t.pitch[b] / f)) < 0.5)
+                    ++in;
+            }
+            if (tot)
+            {
+                ++tried;
+                covered += in;
+                frames += tot;
+                good += in > 0.8 * tot;
+            }
+        }
+        CHECK (good >= (int) (0.9 * tried), "%s notes (%.0f ms apart): %d/%d notes tracked for >80%% of their length (%.0f%% of all time)",
+               spacing > 0.3 ? "sustained" : "fast", spacing * 1000, good, tried, 100.0 * covered / frames);
+    }
+    {
+        // nothing to track: noise, silence, a pure tone far above the range
+        Definition d;
+        d.prepare (kFs);
+        std::mt19937 g (4);
+        std::vector<float> n (96000);
+        for (auto& v : n)
+            v = std::uniform_real_distribution<float> (-0.3f, 0.3f) (g);
+        Params p;
+        p.contrast = 1.0f;
+        const auto t = run (d, n, 16, p, true);
+        int voiced = 0;
+        for (float f : t.pitch)
+            voiced += f > 0;
+        double mc = 0;
+        for (float c : t.contrast)
+            mc = std::max (mc, (double) std::fabs (c));
+        CHECK ((double) voiced / t.pitch.size() < 0.2 && mc < 1.5, "white noise: %.0f%% of blocks pitched, largest contrast gain %.2f dB",
+               100.0 * voiced / t.pitch.size(), mc);
+    }
+
+    std::printf ("Pitch-aware contrast\n");
+    {
+        const double f0 = 41.2, mud = 1.5 * f0;
+        const auto sig = held (kFs, f0, 3.0, mud, 0.22);
+        Definition dn, dp, dm;
+        for (auto* d : { &dn, &dp, &dm })
+            d->prepare (kFs);
+        const int lat = dn.latencySamples();
+        Params up, dn_;
+        up.contrast = 1.0f;
+        up.punch = up.sustain = 0.0f;
+        dn_ = up;
+        dn_.contrast = -1.0f;
+        const auto pos = run (dp, sig, 16, up, true), neg = run (dm, sig, 480, dn_);
+        const double t0 = 1.2 + (double) lat / kFs;
+        const double fIn = ampDb (sig, kFs, f0, 1.2, 40), mIn = ampDb (sig, kFs, mud, 1.2, 60), hIn = ampDb (sig, kFs, 2 * f0, 1.2, 80);
+        const double fPos = ampDb (pos.out, kFs, f0, t0, 40) - fIn, mPos = ampDb (pos.out, kFs, mud, t0, 60) - mIn, hPos = ampDb (pos.out, kFs, 2 * f0, t0, 80) - hIn;
+        const double fNeg = ampDb (neg.out, kFs, f0, t0, 40) - fIn, mNeg = ampDb (neg.out, kFs, mud, t0, 60) - mIn;
+        CHECK (fPos > 3.0 && mPos < -2.0, "contrast +100%%: note fundamental %+.1f dB, the inter-harmonic mud %+.1f dB", fPos, mPos);
+        CHECK (std::fabs (hPos) < 1.5, "the 2nd harmonic is barely moved (%+.1f dB)", hPos);
+        CHECK (fNeg < -3.0 && mNeg > 2.0, "contrast -100%% softens: fundamental %+.1f dB, mud %+.1f dB", fNeg, mNeg);
+        double pin = 0, pout = 0;
+        int cnt = 0;
+        for (size_t b = (size_t) (1.2 * kFs / 16); b < pos.pin.size(); ++b)
+            if (pos.pin[b] >= 0)
+            {
+                pin += pos.pin[b];
+                pout += pos.pout[b];
+                ++cnt;
+            }
+        CHECK (cnt > 100 && pout / cnt > pin / cnt + 0.05, "definition meter: %.0f%% in, %.0f%% out", 100.0 * pin / cnt, 100.0 * pout / cnt);
+
+        // an already pure tone is left almost alone
+        std::vector<float> pure ((size_t) (3 * kFs));
+        for (size_t i = 0; i < pure.size(); ++i)
+            pure[i] = (float) (0.3 * std::sin (2 * kPi * 55.0 * (double) i / kFs) * std::min (1.0, (double) i / kFs / 0.03));
+        Definition dpure;
+        dpure.prepare (kFs);
+        const auto tp = run (dpure, pure, 16, up, true);
+        double mg = 0;
+        for (float c : tp.contrast)
+            mg = std::max (mg, (double) std::fabs (c));
+        CHECK (mg < 0.5, "pure sine: the boost limits itself (largest bell gain %.2f dB)", mg);
+    }
+
+    std::printf ("Punch and sustain\n");
+    {
+        double total;
+        const auto ev = line (0.55, 0.45, 2, 9, total);
+        const auto sig = synth::render (kFs, ev, total, flat(), 3);
+        Definition d0;
+        d0.prepare (kFs);
+        const int lat = d0.latencySamples();
+        auto score = [&] (const Params& p) {
+            Definition d;
+            d.prepare (kFs);
+            const auto t0 = run (d, sig, 480, p);
+            const auto t = lowpass (t0.out, kFs, 200.0);
+            if (std::getenv ("LED_DEBUG")) std::printf ("    punch %.1f sus %.1f\n", p.punch, p.sustain);
+            double early = 0, late = 0;
+            int n = 0;
+            for (size_t i = 6; i < ev.size(); ++i)
+            {
+                const size_t s0 = (size_t) (ev[i].t * kFs) + (size_t) lat;
+                double pk = 0, e2 = 0;
+                const size_t na = (size_t) (0.030 * kFs);
+                for (size_t j = 0; j < na; ++j)
+                    pk += (double) t[s0 + j] * t[s0 + j];
+                pk = std::sqrt (pk / (double) na);
+                const size_t a = s0 + (size_t) (0.15 * kFs), b = s0 + (size_t) (0.35 * kFs);
+                for (size_t j = a; j < b; ++j)
+                    e2 += (double) t[j] * t[j];
+                early += 20 * std::log10 (pk + 1e-9);
+                late += 10 * std::log10 (e2 / (double) (b - a) + 1e-12);
+                ++n;
+            }
+            if (std::getenv ("LED_DEBUG")) std::printf ("      early %.2f late %.2f (n=%d)\n", early / n, late / n, n);
+            return std::array<double, 2> { early / n, late / n };
+        };
+        const auto base = score (neutral);
+        Params pp = neutral, pm = neutral, sp = neutral, sm = neutral;
+        pp.punch = 1.0f;
+        pm.punch = -1.0f;
+        sp.sustain = 1.0f;
+        sm.sustain = -1.0f;
+        const auto a = score (pp), b = score (pm), c = score (sp), e = score (sm);
+        const double base_ratio = base[0] - base[1] / 2.0;
+        auto ratio = [&] (const std::array<double, 2>& s) { return s[0] - s[1] / 2.0 - base_ratio; };
+        CHECK (ratio (a) > 2.0, "punch +100%%: attack vs body %+.1f dB", ratio (a));
+        CHECK (ratio (b) < -1.5, "punch -100%%: attack vs body %+.1f dB", ratio (b));
+        CHECK (c[1] - base[1] > 1.5 && std::fabs (c[0] - base[0]) < 1.5, "sustain +100%%: body %+.1f dB, attack %+.1f dB", c[1] - base[1], c[0] - base[0]);
+        CHECK (e[1] - base[1] < -1.5 && std::fabs (e[0] - base[0]) < 1.5, "sustain -100%%: body %+.1f dB, attack %+.1f dB", e[1] - base[1], e[0] - base[0]);
+
+        Definition d;
+        d.prepare (kFs);
+        Params all;
+        all.contrast = 1.0f;
+        all.punch = 1.0f;
+        all.sustain = 1.0f;
+        const auto t = run (d, sig, 16, all, true);
+        double steepest = 0, peak = 0;
+        for (size_t i = 1; i < t.trans.size(); ++i)
+        {
+            steepest = std::max (steepest, (double) std::fabs (t.trans[i] - t.trans[i - 1]) * kFs / 16.0 / 1000.0);
+            peak = std::max (peak, (double) std::fabs (t.trans[i]));
+        }
+        CHECK (steepest < 5.0 && peak <= 12.0, "transient gain never exceeds %.1f dB and moves at most %.2f dB per ms", peak, steepest);
+    }
+
+    std::printf ("Smoothness on note changes\n");
+    {
+        double total;
+        const auto ev = line (0.30, 0.28, 2, 13, total);
+        const auto sig = synth::render (kFs, ev, total, flat(), 5);
+        Definition d;
+        d.prepare (kFs);
+        Params p;
+        p.contrast = 1.0f;
+        const auto t = run (d, sig, 480, p);
+        const int lat = d.latencySamples();
+        double stepAdded = 0, stepIn = 0;
+        for (size_t i = (size_t) lat + 2; i < sig.size(); ++i)
+        {
+            const double a = (double) t.out[i] - sig[i - (size_t) lat], b = (double) t.out[i - 1] - sig[i - 1 - (size_t) lat];
+            stepAdded = std::max (stepAdded, std::fabs (a - b));
+            stepIn = std::max (stepIn, (double) std::fabs (sig[i - (size_t) lat] - sig[i - 1 - (size_t) lat]));
+        }
+        CHECK (stepAdded < 0.5 * stepIn, "what the plug-in adds never jumps (largest step %.4f vs %.4f in the dry signal)", stepAdded, stepIn);
+    }
+
+    std::printf ("Block sizes, channels, rates, stress\n");
+    {
+        double total;
+        const auto ev = line (0.40, 0.30, 2, 17, total);
+        const auto sig = synth::render (kFs, ev, total, flat(), 6);
+        Params p;
+        p.contrast = 0.8f;
+        p.punch = 0.7f;
+        p.sustain = -0.4f;
+        Definition ref;
+        ref.prepare (kFs);
+        const auto r = run (ref, sig, 512, p);
+        for (int bs : { 1, 7, 64, 333, 4096 })
+        {
+            Definition d;
+            d.prepare (kFs);
+            const auto t = run (d, sig, bs, p);
+            double md = 0;
+            for (size_t i = 0; i < sig.size(); ++i)
+                md = std::max (md, (double) std::fabs (t.out[i] - r.out[i]));
+            CHECK (md == 0.0, "block size %d: output identical to 512-sample blocks (max diff %.1e)", bs, md);
+        }
+        Definition ds;
+        ds.prepare (kFs);
+        ds.setParams (p);
+        std::vector<float> L = sig, R = sig;
+        for (size_t i = 0; i < sig.size(); i += 480)
+        {
+            float* c[2] = { L.data() + i, R.data() + i };
+            ds.process (c, 2, (int) std::min<size_t> (480, sig.size() - i));
+        }
+        double md = 0, mr = 0;
+        for (size_t i = 0; i < sig.size(); ++i)
+        {
+            md = std::max (md, (double) std::fabs (L[i] - R[i]));
+            mr = std::max (mr, (double) std::fabs (L[i] - r.out[i]));
+        }
+        CHECK (md == 0.0 && mr < 1e-6, "identical channels stay identical and match the mono path (%.1e / %.1e)", md, mr);
+    }
+    for (double sr : { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 })
+    {
+        Definition d;
+        d.prepare (sr);
+        Params p;
+        p.contrast = 1.0f;
+        p.punch = 1.0f;
+        p.sustain = 1.0f;
+        std::mt19937 g (7);
+        std::uniform_real_distribution<float> u (-1.0f, 1.0f);
+        std::vector<float> in ((size_t) sr * 3);
+        for (size_t i = 0; i < in.size(); ++i)
+            in[i] = 0.4f * std::sin (2.0f * 3.14159265f * 55.0f * (float) i / (float) sr) * 1.0f + 0.02f * u (g);
+        in[1000] = std::numeric_limits<float>::quiet_NaN();
+        in[2000] = 5.0f;
+        const auto t = run (d, in, 16, p, true);
+        bool finite = true;
+        float peak = 0;
+        for (float v : t.out)
+        {
+            finite = finite && std::isfinite (v);
+            peak = std::max (peak, std::fabs (v));
+        }
+        int ok = 0, n = 0;
+        for (size_t b = (size_t) (1.0 * sr / 16 + d.latencySamples() / 16); b < (size_t) (1.4 * sr / 16); ++b, ++n)
+            ok += std::fabs (12.0 * std::log2 (t.pitch[b] / 55.0f)) < 0.5;
+        CHECK (finite && peak < 6.0f && ok > 0.8 * n, "%.0f Hz: finite (peak %.2f), 55 Hz tone found in %d/%d blocks", sr, peak, ok, n);
+    }
+    {
+        Definition d;
+        d.prepare (kFs);
+        Params p;
+        p.contrast = 1.0f;
+        p.punch = 1.0f;
+        p.sustain = 1.0f;
+        std::vector<float> dc (96000, 0.8f), sil (96000, 0.0f);
+        const auto a = run (d, dc, 100, p), b = run (d, sil, 100, p);
+        bool fin = true;
+        for (float v : a.out)
+            fin = fin && std::isfinite (v);
+        for (float v : b.out)
+            fin = fin && std::isfinite (v);
+        double tail = 0;
+        for (size_t i = 80000; i < b.out.size(); ++i)
+            tail = std::max (tail, (double) std::fabs (b.out[i]));
+        CHECK (fin && tail < 1e-4, "DC and then silence: finite, and no ringing left (%.1e)", tail);
+    }
+
+    std::printf ("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASSED" : "FAILED", failures, failures == 1 ? "" : "s");
+    return failures == 0 ? 0 : 1;
+}
