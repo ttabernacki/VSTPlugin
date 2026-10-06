@@ -233,9 +233,11 @@ int main()
         const double fIn = ampDb (sig, kFs, f0, 1.2, 40), mIn = ampDb (sig, kFs, mud, 1.2, 60), hIn = ampDb (sig, kFs, 2 * f0, 1.2, 80);
         const double fPos = ampDb (pos.out, kFs, f0, t0, 40) - fIn, mPos = ampDb (pos.out, kFs, mud, t0, 60) - mIn, hPos = ampDb (pos.out, kFs, 2 * f0, t0, 80) - hIn;
         const double fNeg = ampDb (neg.out, kFs, f0, t0, 40) - fIn, mNeg = ampDb (neg.out, kFs, mud, t0, 60) - mIn;
-        CHECK (fPos > 3.0 && mPos < -2.0, "contrast +100%%: note fundamental %+.1f dB, the inter-harmonic mud %+.1f dB", fPos, mPos);
-        CHECK (std::fabs (hPos) < 1.5, "the 2nd harmonic is barely moved (%+.1f dB)", hPos);
-        CHECK (fNeg < -3.0 && mNeg > 2.0, "contrast -100%% softens: fundamental %+.1f dB, mud %+.1f dB", fNeg, mNeg);
+        // judged against the untouched 2nd harmonic, because loudness matching moves the whole band a little
+        CHECK (fPos - hPos > 4.0 && mPos - hPos < -2.0, "contrast +100%%: fundamental %+.1f dB, mud between harmonics %+.1f dB (re the 2nd harmonic)", fPos - hPos, mPos - hPos);
+        CHECK (hPos > -4.5 && hPos < 0.5, "loudness matching trims the untouched 2nd harmonic by %+.1f dB", hPos);
+        const double hNeg = ampDb (neg.out, kFs, 2 * f0, t0, 80) - hIn;
+        CHECK (fNeg - hNeg < -3.5 && mNeg - hNeg > 2.0, "contrast -100%% softens: fundamental %+.1f dB, mud %+.1f dB (re the 2nd harmonic)", fNeg - hNeg, mNeg - hNeg);
         double pin = 0, pout = 0;
         int cnt = 0;
         for (size_t b = (size_t) (1.2 * kFs / 16); b < pos.pin.size(); ++b)
@@ -246,6 +248,23 @@ int main()
                 ++cnt;
             }
         CHECK (cnt > 100 && pout / cnt > pin / cnt + 0.05, "definition meter: %.0f%% in, %.0f%% out", 100.0 * pin / cnt, 100.0 * pout / cnt);
+
+        auto rmsDb = [&] (const std::vector<float>& v, size_t a) {
+            const auto l = lowpass (v, kFs, 200.0);
+            double e = 0;
+            for (size_t i = a; i < a + (size_t) (1.0 * kFs); ++i)
+                e += (double) l[i] * l[i];
+            return 10.0 * std::log10 (e / kFs);
+        };
+        const double inDb = rmsDb (sig, (size_t) (1.2 * kFs));
+        Params off = up;
+        off.match = false;
+        Definition dnm;
+        dnm.prepare (kFs);
+        const auto nomatch = run (dnm, sig, 480, off);
+        const double dPos = rmsDb (pos.out, (size_t) (1.2 * kFs) + (size_t) lat) - inDb, dNeg = rmsDb (neg.out, (size_t) (1.2 * kFs) + (size_t) lat) - inDb,
+                     dOff = rmsDb (nomatch.out, (size_t) (1.2 * kFs) + (size_t) lat) - inDb;
+        CHECK (std::fabs (dPos) < 1.5 && std::fabs (dNeg) < 1.5 && dOff > 2.0, "loudness match: low band level %+.1f dB at +100%%, %+.1f dB at -100%% (%+.1f dB with match off)", dPos, dNeg, dOff);
 
         // an already pure tone is left almost alone
         std::vector<float> pure ((size_t) (3 * kFs));

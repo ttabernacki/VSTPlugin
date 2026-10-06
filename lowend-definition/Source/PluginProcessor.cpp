@@ -23,6 +23,7 @@ APVTS::ParameterLayout LowEndDefinitionProcessor::createLayout()
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "range", 1 }, "Range", Range (60.0f, 300.0f, 0.0f, 0.6f), 200.0f,
                                                   Attr().withStringFromValueFunction ([] (float v, int) { return String (roundToInt (v)) + " Hz"; })
                                                       .withValueFromStringFunction ([] (const String& t) { return t.getFloatValue(); })));
+    l.add (std::make_unique<AudioParameterBool> (ParameterID { "match", 1 }, "Match loudness", true));
     return l;
 }
 
@@ -36,6 +37,7 @@ LowEndDefinitionProcessor::LowEndDefinitionProcessor()
     pPunch = apvts.getRawParameterValue ("punch");
     pSustain = apvts.getRawParameterValue ("sustain");
     pRange = apvts.getRawParameterValue ("range");
+    pMatch = apvts.getRawParameterValue ("match");
     for (int i = 0; i < kHist; ++i)
     {
         hIn[i] = hOut[i] = -1.0f;
@@ -78,6 +80,7 @@ void LowEndDefinitionProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
     p.punch = pPunch->load();
     p.sustain = pSustain->load();
     p.rangeHz = pRange->load();
+    p.match = pMatch->load() > 0.5f;
     core.setParams (p);
     core.process (buffer.getArrayOfWritePointers(), nCh, n);
 

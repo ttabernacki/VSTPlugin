@@ -15,7 +15,7 @@ static int failures = 0;
     } while (0)
 
 static constexpr double kFs = 48000.0;
-static const char* kIds[] = { "contrast", "punch", "sustain", "range" };
+static const char* kIds[] = { "contrast", "punch", "sustain", "range", "match" };
 
 static void setPlain (LowEndDefinitionProcessor& p, const char* id, float v)
 {
@@ -85,7 +85,7 @@ int main()
             present = present && prm != nullptr;
             automatable = automatable && prm != nullptr && prm->isAutomatable();
         }
-        CHECK (present && automatable && p.getParameters().size() == 4, "4 automatable parameters");
+        CHECK (present && automatable && p.getParameters().size() == 5, "5 automatable parameters");
         using L = juce::AudioProcessor::BusesLayout;
         auto layout = [] (juce::AudioChannelSet in, juce::AudioChannelSet out) {
             L l;

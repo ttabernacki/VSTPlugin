@@ -64,7 +64,7 @@ private:
     std::atomic<float> hIn[kHist], hOut[kHist], hTrans[kHist];
     std::atomic<int> histHead { 0 };
 
-    std::atomic<float>*pContrast = nullptr, *pPunch = nullptr, *pSustain = nullptr, *pRange = nullptr;
+    std::atomic<float>*pContrast = nullptr, *pPunch = nullptr, *pSustain = nullptr, *pRange = nullptr, *pMatch = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (LowEndDefinitionProcessor)
 };

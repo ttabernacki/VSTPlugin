@@ -10,6 +10,7 @@ public:
     LedLookAndFeel();
     void drawRotarySlider (juce::Graphics&, int x, int y, int w, int h, float pos, float startAngle, float endAngle,
                            juce::Slider&) override;
+    void drawButtonBackground (juce::Graphics&, juce::Button&, const juce::Colour&, bool highlighted, bool down) override;
 };
 
 class LowEndDefinitionEditor : public juce::AudioProcessorEditor, private juce::Timer
@@ -42,5 +43,7 @@ private:
     LedLookAndFeel laf;
     LowEndDefinitionProcessor& proc;
     Knob contrast, punch, sustain, range;
+    juce::TextButton match { "Match loudness" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> matchAtt;
     juce::Rectangle<int> meterArea, chartArea;
 };

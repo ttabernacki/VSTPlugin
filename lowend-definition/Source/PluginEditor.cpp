@@ -18,6 +18,23 @@ LedLookAndFeel::LedLookAndFeel()
     setColour (juce::Slider::textBoxTextColourId, kText);
     setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
     setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
+    setColour (juce::TextButton::textColourOffId, kText);
+    setColour (juce::TextButton::textColourOnId, juce::Colours::white);
+}
+
+void LedLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& b, const juce::Colour&, bool highlighted, bool down)
+{
+    const auto r = b.getLocalBounds().toFloat().reduced (0.5f);
+    const bool on = b.getToggleState();
+    juce::Colour fill = on ? kAccent.darker (0.4f) : kPanel2;
+    if (highlighted)
+        fill = fill.brighter (0.1f);
+    if (down)
+        fill = fill.brighter (0.2f);
+    g.setColour (fill);
+    g.fillRoundedRectangle (r, 6.0f);
+    g.setColour (on ? fill.brighter (0.3f) : kLine);
+    g.drawRoundedRectangle (r, 6.0f, 1.0f);
 }
 
 void LedLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h, float pos, float startAngle, float endAngle,
@@ -65,6 +82,9 @@ LowEndDefinitionEditor::LowEndDefinitionEditor (LowEndDefinitionProcessor& p) : 
     addKnob (punch, "punch", "PUNCH");
     addKnob (sustain, "sustain", "SUSTAIN");
     addKnob (range, "range", "RANGE");
+    match.setClickingTogglesState (true);
+    addAndMakeVisible (match);
+    matchAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "match", match);
     setResizable (true, true);
     setResizeLimits (560, 380, 1100, 700);
     getConstrainer()->setFixedAspectRatio (680.0 / 440.0);
@@ -81,7 +101,8 @@ LowEndDefinitionEditor::~LowEndDefinitionEditor()
 void LowEndDefinitionEditor::resized()
 {
     auto r = getLocalBounds().reduced (14);
-    r.removeFromTop (34); // title
+    auto head = r.removeFromTop (34); // title
+    match.setBounds (head.removeFromRight (130).reduced (0, 3));
     r.removeFromTop (8);
     auto knobs = r.removeFromTop (118);
     const int w = knobs.getWidth() / 4;

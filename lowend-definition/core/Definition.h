@@ -33,6 +33,7 @@ struct Params
     float punch = 0.3f;    // -1 .. 1   tame .. emphasise the attack
     float sustain = 0.0f;  // -1 .. 1   shorten .. lengthen the body
     float rangeHz = 200.0f; // crossover: everything below is processed
+    bool match = true;      // keep the low band's loudness: contrast moves energy around, it should not just add level
 };
 
 class Definition
@@ -107,7 +108,7 @@ public:
         freq_ = 0.0;
         scale_ = 0.0;
         pS_ = 0.0;
-        gain1Db_ = 0.0;
+        gain1Db_ = matchDb_ = 0.0;
         pitchOut_ = 0.0f;
         pInSm_ = pOutSm_ = 0.0f;
         meterValid_ = false;
@@ -121,6 +122,7 @@ public:
     // for the UI and the tests
     float transientGainDb() const { return transDb_; }
     float contrastGainDb() const { return (float) gain1Db_; }
+    float matchGainDb() const { return (float) matchDb_; }
     float pitchHz() const { return pitchOut_; }
     bool meterValid() const { return meterValid_; }
     float definitionIn() const { return pInSm_; }   // 0..1
@@ -458,7 +460,9 @@ private:
         }
         // Body: a slower pair (ripple of the low band's rectified level stays below 0.2 dB) reads how fast the note is dying
         const double wl = std::clamp ((10.0 * std::log10 (pl_ + 1e-12) + 72.0) / 12.0, 0.0, 1.0);
-        const double dec = std::max (-10.0 * std::log10 ((pm_ + 1e-12) / (pl_ + 1e-12)) * wl, 0.0);
+        // a muted note-off dies far faster than any ring-out: soft-limit it so "sustain" does not pump the end of notes
+        const double decRaw = std::max (-10.0 * std::log10 ((pm_ + 1e-12) / (pl_ + 1e-12)) * wl, 0.0);
+        const double dec = 2.5 * std::tanh (decRaw / 2.5);
         const double wf = std::clamp ((10.0 * std::log10 (pf_ + 1e-12) + 62.0) / 8.0, 0.0, 1.0); // note over: let go
         const double sinceOnset = (double) (nIn_ - lastOnsetT_) / sr_;
         const double wb = std::clamp ((sinceOnset - 0.03) / 0.03, 0.0, 1.0); // the body starts after the attack
@@ -485,7 +489,7 @@ private:
         gOut_ += (1.0 - std::exp (-(double) kSub / (0.0015 * sr_))) * (gT - gOut_);
         gT = gOut_;
         transDb_ = (float) gT;
-        const double gNew = std::pow (10.0, gT / 20.0);
+        const double gNew = std::pow (10.0, (gT + matchDb_) / 20.0);
         gStep_ = (gNew - gAmp_) / kSub;
 
         // pitch-aware contrast
@@ -525,6 +529,14 @@ private:
         }
         gain1Db_ = ce * 6.0 * scale_;
         const double gain2Db = -ce * 4.0 * scale_;
+        // loudness match: the fundamental's share of the band (pS_) gets bell 1, the rest partly gets bell 2
+        double comp = 0.0;
+        if (prm_.match && freq_ > 0.0 && (std::fabs (gain1Db_) > 1e-3 || std::fabs (gain2Db) > 1e-3))
+        {
+            const double r = pS_ * std::pow (10.0, gain1Db_ / 10.0) + (1.0 - pS_) * (0.5 * std::pow (10.0, gain2Db / 10.0) + 0.5);
+            comp = -0.75 * 10.0 * std::log10 (std::max (r, 0.05)); // most of the way: the tone keeps some of its energy change
+        }
+        matchDb_ = comp;
         if (freq_ > 0.0)
         {
             const double A1 = std::pow (10.0, gain1Db_ / 40.0), A2 = std::pow (10.0, gain2Db / 40.0), q1 = 3.0, q2 = 4.0;
@@ -577,7 +589,7 @@ private:
     int onsetN_ = 0, onsetHead_ = 0;
     bool inOnset_ = false, pFresh_ = true;
     int64_t lastOnsetT_ = -1000000;
-    double freq_ = 0.0, scale_ = 0.0, pS_ = 0.0, gain1Db_ = 0.0;
+    double freq_ = 0.0, scale_ = 0.0, pS_ = 0.0, gain1Db_ = 0.0, matchDb_ = 0.0;
     float pitchOut_ = 0.0f, transDb_ = 0.0f, pInSm_ = 0.0f, pOutSm_ = 0.0f;
     bool meterValid_ = false;
 };
