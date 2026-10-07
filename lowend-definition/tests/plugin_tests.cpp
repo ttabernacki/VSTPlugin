@@ -15,7 +15,7 @@ static int failures = 0;
     } while (0)
 
 static constexpr double kFs = 48000.0;
-static const char* kIds[] = { "contrast", "punch", "sustain", "range", "match" };
+static const char* kIds[] = { "contrast", "punch", "sustain", "range", "match", "kick", "align" };
 
 static void setPlain (LowEndDefinitionProcessor& p, const char* id, float v)
 {
@@ -85,17 +85,18 @@ int main()
             present = present && prm != nullptr;
             automatable = automatable && prm != nullptr && prm->isAutomatable();
         }
-        CHECK (present && automatable && p.getParameters().size() == 5, "5 automatable parameters");
+        CHECK (present && automatable && p.getParameters().size() == 7, "7 automatable parameters");
         using L = juce::AudioProcessor::BusesLayout;
         auto layout = [] (juce::AudioChannelSet in, juce::AudioChannelSet out) {
             L l;
             l.inputBuses.add (in);
+            l.inputBuses.add (juce::AudioChannelSet::disabled()); // the optional sidechain, not connected
             l.outputBuses.add (out);
             return l;
         };
         const auto M = juce::AudioChannelSet::mono(), S = juce::AudioChannelSet::stereo();
         CHECK (p.checkBusesLayoutSupported (layout (S, S)) && p.checkBusesLayoutSupported (layout (M, M)) && p.checkBusesLayoutSupported (layout (M, S)),
-               "stereo, mono and mono-in/stereo-out are supported");
+               "stereo, mono and mono-in/stereo-out are supported (sidechain off)");
         CHECK (! p.checkBusesLayoutSupported (layout (S, M)) && ! p.checkBusesLayoutSupported (layout (juce::AudioChannelSet::create5point1(), S)),
                "stereo-in/mono-out and 5.1 are rejected");
         auto* c = p.apvts.getParameter ("contrast");
@@ -151,6 +152,98 @@ int main()
                 lastOut = pt.defOut;
             }
         CHECK (seen > 10 && lastOut >= lastIn - 0.02f, "the editor gets a definition history (%d points, %.0f%% in, %.0f%% out)", seen, 100 * lastIn, 100 * lastOut);
+    }
+
+
+    std::printf ("Sidechain (kick)\n");
+    {
+        using L = juce::AudioProcessor::BusesLayout;
+        auto S = juce::AudioChannelSet::stereo();
+        L l;
+        l.inputBuses.add (S);
+        l.inputBuses.add (S);
+        l.outputBuses.add (S);
+        LowEndDefinitionProcessor probe;
+        CHECK (probe.checkBusesLayoutSupported (l), "stereo + stereo sidechain is a supported layout");
+        L l5 = l;
+        l5.inputBuses.set (1, juce::AudioChannelSet::create5point1());
+        CHECK (! probe.checkBusesLayoutSupported (l5), "a 5.1 sidechain is rejected");
+
+        const double f0 = 41.2, mudHz = 64.0;
+        std::vector<float> bass ((size_t) (4 * kFs)), kick (bass.size(), 0.0f);
+        for (size_t i = 0; i < bass.size(); ++i)
+        {
+            const double t = (double) i / kFs, env = std::min (1.0, t / 0.03);
+            bass[i] = (float) (0.3 * env * (std::sin (2 * 3.14159265 * f0 * t) + 0.5 * std::sin (2 * 3.14159265 * 2 * f0 * t + 0.4) + 0.3 * std::sin (2 * 3.14159265 * mudHz * t + 0.7)));
+        }
+        for (int b = 0; b < 6; ++b)
+            for (size_t i = 0; i < (size_t) (0.18 * kFs); ++i)
+            {
+                const size_t n = (size_t) ((0.5 + 0.6 * b) * kFs) + i;
+                const double t = (double) i / kFs;
+                kick[n] = (float) (0.8 * std::exp (-t / 0.06) * std::sin (2 * 3.14159265 * mudHz * t));
+            }
+        auto go = [&] (float kickAmount, bool connect) {
+            LowEndDefinitionProcessor p;
+            if (connect)
+            {
+                p.setBusesLayout (l);
+                p.getBus (true, 1)->enable();
+            }
+            prepare (p, kFs, 512);
+            for (auto* id : { "contrast", "punch", "sustain" })
+                setPlain (p, id, 0.0f);
+            setPlain (p, "kick", kickAmount);
+            std::vector<float> out (bass.size());
+            juce::MidiBuffer midi;
+            const int nCh = p.getTotalNumInputChannels();
+            juce::AudioBuffer<float> buf (std::max (nCh, 2), 512);
+            for (size_t pos = 0; pos < bass.size(); pos += 512)
+            {
+                const int n = (int) std::min<size_t> (512, bass.size() - pos);
+                juce::AudioBuffer<float> view (buf.getArrayOfWritePointers(), buf.getNumChannels(), n);
+                for (int i = 0; i < n; ++i)
+                {
+                    view.setSample (0, i, bass[pos + (size_t) i]);
+                    view.setSample (1, i, bass[pos + (size_t) i]);
+                    if (view.getNumChannels() > 3)
+                    {
+                        view.setSample (2, i, kick[pos + (size_t) i]);
+                        view.setSample (3, i, kick[pos + (size_t) i]);
+                    }
+                }
+                p.processBlock (view, midi);
+                for (int i = 0; i < n; ++i)
+                    out[pos + (size_t) i] = view.getSample (0, i);
+            }
+            return out;
+        };
+        auto amp = [] (const std::vector<float>& x, double f, double t0, double cycles) {
+            const size_t i0 = (size_t) (t0 * kFs), L = (size_t) std::llround (cycles * kFs / f);
+            double re = 0, im = 0;
+            for (size_t j = 0; j < L; ++j)
+            {
+                re += x[i0 + j] * std::cos (2 * 3.14159265358979 * cycles * (double) j / (double) L);
+                im -= x[i0 + j] * std::sin (2 * 3.14159265358979 * cycles * (double) j / (double) L);
+            }
+            return 20.0 * std::log10 (2.0 / (double) L * std::sqrt (re * re + im * im) + 1e-12);
+        };
+        const auto wet = go (1.0f, true), dry = go (0.0f, true), nosc = go (1.0f, false);
+        LowEndDefinitionProcessor lat;
+        prepare (lat, kFs, 512);
+        const int L0 = lat.getLatencySamples();
+        double md = 0, md2 = 0;
+        for (size_t i = (size_t) L0; i < bass.size(); ++i)
+        {
+            md = std::max (md, (double) std::fabs (dry[i] - bass[i - (size_t) L0]));
+            md2 = std::max (md2, (double) std::fabs (nosc[i] - bass[i - (size_t) L0]));
+        }
+        CHECK (md < 1e-6, "kick 0 %%: a delay, nothing else (%.1e)", md);
+        CHECK (md2 < 1e-6, "sidechain not connected: a delay, nothing else (%.1e)", md2);
+        const double tHit = 0.5 + 0.6 * 3 + 0.04, shift = (double) L0 / kFs;
+        const double mudHit = amp (wet, mudHz, tHit + shift, 6) - amp (bass, mudHz, tHit, 6);
+        const double fundHit = amp (wet, f0, tHit + shift, 4) - amp (bass, f0, tHit, 4);
+        CHECK (mudHit < -3.0 && std::fabs (fundHit) < 1.5, "through the real processor: mud under the kick %+.1f dB, the note's fundamental %+.1f dB", mudHit, fundHit);
     }
 
     std::printf ("State recall\n");

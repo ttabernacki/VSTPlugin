@@ -42,8 +42,8 @@ private:
 
     LedLookAndFeel laf;
     LowEndDefinitionProcessor& proc;
-    Knob contrast, punch, sustain, range;
-    juce::TextButton match { "Match loudness" };
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> matchAtt;
+    Knob contrast, punch, sustain, kick, range;
+    juce::TextButton match { "Match loudness" }, align { "Auto polarity" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> matchAtt, alignAtt;
     juce::Rectangle<int> meterArea, chartArea;
 };

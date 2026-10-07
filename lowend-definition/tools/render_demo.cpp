@@ -1,5 +1,6 @@
-// Renders a dry / processed A-B WAV of Low-End Definition on a synthetic bass riff with a muddy low band, so the
-// result can be auditioned. Usage: lowend_demo out.wav [contrast] [punch] [sustain]
+// Renders a dry / processed A-B WAV of Low-End Definition on a synthetic bass riff with a muddy low band and a kick
+// on the sidechain (the mix = kick + bass), so the result can be auditioned.
+// Usage: lowend_demo out.wav [contrast] [punch] [sustain] [kick]
 #include "../core/Definition.h"
 #include "../../bass-leveler/tests/synth.h"
 
@@ -34,6 +35,7 @@ int main (int argc, char** argv)
     p.contrast = argc > 2 ? (float) std::atof (argv[2]) : 0.7f;
     p.punch = argc > 3 ? (float) std::atof (argv[3]) : 0.5f;
     p.sustain = argc > 4 ? (float) std::atof (argv[4]) : 0.3f;
+    p.kick = argc > 5 ? (float) std::atof (argv[5]) : 0.8f;
 
     std::mt19937 g (5);
     std::uniform_real_distribution<double> u (-1.0, 1.0);
@@ -56,6 +58,20 @@ int main (int argc, char** argv)
         dry[i] += (float) (0.035 * std::sin (2 * 3.14159265358979 * 63.0 * s) + 0.02 * std::sin (2 * 3.14159265358979 * 97.0 * s + 0.5));
     }
 
+    // a kick on every beat of the riff (every 4th 16th note = 1 s... here every 0.5 s), sweeping 120 -> 48 Hz
+    std::vector<float> kick (dry.size(), 0.0f);
+    for (double kt = 0.3; kt < total - 0.5; kt += 0.5)
+    {
+        const size_t n0 = (size_t) (kt * fs);
+        double ph = 0.0;
+        for (size_t i = 0; i < (size_t) (0.32 * fs) && n0 + i < kick.size(); ++i)
+        {
+            const double t = (double) i / fs, f = 48.0 + 72.0 * std::exp (-t / 0.02);
+            ph += 2.0 * 3.14159265358979 * f / fs;
+            kick[n0 + i] = (float) (0.55 * std::exp (-t / 0.11) * std::sin (ph));
+        }
+    }
+
     led::Definition d;
     d.prepare (fs);
     d.setParams (p);
@@ -63,18 +79,27 @@ int main (int argc, char** argv)
     for (size_t i = 0; i < wet.size(); i += 256)
     {
         float* c[1] = { wet.data() + i };
-        d.process (c, 1, (int) std::min<size_t> (256, wet.size() - i));
+        const float* sc[1] = { kick.data() + i };
+        d.process (c, 1, (int) std::min<size_t> (256, wet.size() - i), sc, 1);
     }
     const size_t lat = (size_t) d.latencySamples();
     std::vector<float> out (dry.begin(), dry.end()); // dry first (the same delay as the processed, so the levels line up)
     std::vector<float> delayedDry (dry.size(), 0.0f);
     for (size_t i = lat; i < dry.size(); ++i)
         delayedDry[i] = dry[i - lat];
+    // the mixes: kick + bass, both delayed by the same look-ahead
     out = delayedDry;
+    std::vector<float> wetMix = wet;
+    for (size_t i = 0; i < out.size(); ++i)
+    {
+        const float k = i >= lat ? kick[i - lat] : 0.0f;
+        out[i] += k;
+        wetMix[i] += k;
+    }
     out.insert (out.end(), (size_t) (0.6 * fs), 0.0f);
-    out.insert (out.end(), wet.begin(), wet.end());
+    out.insert (out.end(), wetMix.begin(), wetMix.end());
     writeWav16 (argv[1], out, fs);
-    std::printf ("wrote %s: %.1f s dry, 0.6 s gap, %.1f s processed (contrast %.2f, punch %.2f, sustain %.2f)\n", argv[1], total, total,
-                 p.contrast, p.punch, p.sustain);
+    std::printf ("wrote %s: %.1f s dry mix (kick + bass), 0.6 s gap, %.1f s processed (contrast %.2f, punch %.2f, sustain %.2f, kick %.2f)\n", argv[1], total,
+                 total, p.contrast, p.punch, p.sustain, p.kick);
     return 0;
 }

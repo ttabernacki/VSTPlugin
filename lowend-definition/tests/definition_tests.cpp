@@ -26,7 +26,7 @@ struct Trace
     std::vector<float> pitch, trans, contrast, pin, pout; // sampled once per 16-sample block
 };
 
-static Trace run (Definition& d, const std::vector<float>& in, int block, const Params& p, bool record = false)
+static Trace run (Definition& d, const std::vector<float>& in, int block, const Params& p, bool record = false, const std::vector<float>* sidechain = nullptr)
 {
     d.setParams (p);
     Trace t;
@@ -34,7 +34,8 @@ static Trace run (Definition& d, const std::vector<float>& in, int block, const 
     for (size_t i = 0; i < in.size(); i += (size_t) block)
     {
         float* c[1] = { t.out.data() + i };
-        d.process (c, 1, (int) std::min<size_t> ((size_t) block, in.size() - i));
+        const float* s[1] = { sidechain ? sidechain->data() + i : nullptr };
+        d.process (c, 1, (int) std::min<size_t> ((size_t) block, in.size() - i), sidechain ? s : nullptr, sidechain ? 1 : 0);
         if (record)
         {
             t.pitch.push_back (d.pitchHz());
@@ -341,6 +342,124 @@ int main()
             peak = std::max (peak, (double) std::fabs (t.trans[i]));
         }
         CHECK (steepest < 5.0 && peak <= 12.0, "transient gain never exceeds %.1f dB and moves at most %.2f dB per ms", peak, steepest);
+    }
+
+
+    std::printf("Kick: spectral duck, alignment\n");
+    {
+        // bass: a held E1 with harmonics and a steady muddy 64 Hz sine; kick: a 64 Hz burst every 0.6 s (the mud collides with it)
+        const double f0 = 41.2, mudHz = 64.0;
+        const auto bass = held (kFs, f0, 4.0, mudHz, 0.3);
+        std::vector<float> kick (bass.size(), 0.0f);
+        for (int b = 0; b < 6; ++b)
+        {
+            const size_t n0 = (size_t) ((0.5 + 0.6 * b) * kFs);
+            for (size_t i = 0; i < (size_t) (0.18 * kFs) && n0 + i < kick.size(); ++i)
+            {
+                const double t = (double) i / kFs;
+                kick[n0 + i] = (float) (0.8 * std::exp (-t / 0.06) * std::sin (2 * kPi * mudHz * t));
+            }
+        }
+        Params off = neutral, on = neutral;
+        off.kick = 0.0f;
+        on.kick = 1.0f;
+        Definition d0, d1, dn;
+        for (auto* d : { &d0, &d1, &dn })
+            d->prepare (kFs);
+        const int lat = d0.latencySamples();
+        const auto base = run (d0, bass, 480, off, false, &kick);
+        const auto duck = run (d1, bass, 160, on, true, &kick);
+        double md = 0;
+        for (size_t i = (size_t) lat; i < bass.size(); ++i)
+            md = std::max (md, (double) std::fabs (base.out[i] - bass[i - (size_t) lat]));
+        CHECK (md < 1e-7, "kick amount 0 with a sidechain playing: bit-exact delay (%.1e)", md);
+        Definition dns;
+        dns.prepare (kFs);
+        const auto nosc = run (dns, bass, 480, on);
+        md = 0;
+        for (size_t i = (size_t) lat; i < bass.size(); ++i)
+            md = std::max (md, (double) std::fabs (nosc.out[i] - bass[i - (size_t) lat]));
+        CHECK (md < 1e-7, "kick amount 100%% but no sidechain connected: bit-exact delay (%.1e)", md);
+
+        // during a hit (window 40..140 ms after its start) versus the quiet part of the bass
+        const double tHit = 0.5 + 0.6 * 3 + 0.04;
+        const double mudHit = ampDb (duck.out, kFs, mudHz, tHit + (double) lat / kFs, 6) - ampDb (bass, kFs, mudHz, tHit, 6);
+        const double fundHit = ampDb (duck.out, kFs, f0, tHit + (double) lat / kFs, 4) - ampDb (bass, kFs, f0, tHit, 4);
+        const double tQuiet = 0.5 + 0.6 * 3 + 0.40;
+        const double mudQuiet = ampDb (duck.out, kFs, mudHz, tQuiet + (double) lat / kFs, 8) - ampDb (bass, kFs, mudHz, tQuiet, 8);
+        CHECK (mudHit < -3.0, "the mud under a kick hit is ducked by %.1f dB", -mudHit);
+        CHECK (std::fabs (fundHit) < 1.5, "the bass note's own fundamental stays put during the hit (%+.1f dB)", fundHit);
+        CHECK (std::fabs (mudQuiet) < 1.0, "between hits the mud is left alone (%+.1f dB)", mudQuiet);
+        float deepest = 0;
+        for (size_t b = 0; b < duck.pin.size(); ++b)
+            deepest = std::max (deepest, 0.0f);
+        (void) deepest;
+
+        // block sizes with a sidechain
+        for (int bs : { 1, 333, 4096 })
+        {
+            Definition d;
+            d.prepare (kFs);
+            const auto t = run (d, bass, bs, on, false, &kick);
+            Definition dr;
+            dr.prepare (kFs);
+            const auto r = run (dr, bass, 512, on, false, &kick);
+            double m2 = 0;
+            for (size_t i = 0; i < bass.size(); ++i)
+                m2 = std::max (m2, (double) std::fabs (t.out[i] - r.out[i]));
+            CHECK (m2 == 0.0, "with a sidechain, block size %d is identical to 512-sample blocks (%.1e)", bs, m2);
+        }
+    }
+    {
+        // polarity: bass and kick are the same 55 Hz tone, in phase or in opposite phase, in bursts that overlap
+        auto make = [&] (double sign, std::vector<float>& bass, std::vector<float>& kick) {
+            bass.assign ((size_t) (8 * kFs), 0.0f);
+            kick = bass;
+            for (int b = 0; b < 12; ++b)
+            {
+                const size_t n0 = (size_t) ((0.3 + 0.6 * b) * kFs);
+                for (size_t i = 0; i < (size_t) (0.4 * kFs) && n0 + i < bass.size(); ++i)
+                {
+                    const double t = (double) i / kFs, e = std::exp (-t / 0.25) * std::min (1.0, t / 0.01);
+                    const double s = std::sin (2 * kPi * 55.0 * t);
+                    bass[n0 + i] = (float) (0.4 * e * s * sign);
+                    kick[n0 + i] = (float) (0.5 * e * s);
+                }
+            }
+        };
+        std::vector<float> bass, kick;
+        Params a = neutral;
+        a.kick = 0.0f;
+        a.align = 1;
+        make (-1.0, bass, kick);
+        Definition dflip;
+        dflip.prepare (kFs);
+        const auto o = run (dflip, bass, 480, a, true, &kick);
+        const int lat = dflip.latencySamples();
+        double eSumIn = 0, eSumOut = 0;
+        for (size_t i = (size_t) (4 * kFs); i < (size_t) (7 * kFs); ++i)
+        {
+            const double si = bass[i] + kick[i], so = o.out[i + (size_t) lat] + kick[i + (size_t) lat];
+            eSumIn += si * si;
+            eSumOut += so * so;
+        }
+        CHECK (dflip.polarityFlipped() && dflip.alignDb() < -3.0 && 10 * std::log10 (eSumOut / eSumIn) > 3.0,
+               "opposite-phase bass: detected (%.1f dB), polarity flipped, kick+bass sum %+.1f dB", dflip.alignDb(), 10 * std::log10 (eSumOut / eSumIn));
+        Definition dstay;
+        dstay.prepare (kFs);
+        make (1.0, bass, kick);
+        run (dstay, bass, 480, a, false, &kick);
+        CHECK (! dstay.polarityFlipped() && dstay.alignDb() > 3.0, "in-phase bass is left alone (%.1f dB)", dstay.alignDb());
+        Definition dmanual;
+        dmanual.prepare (kFs);
+        Params man = a;
+        man.align = 0;
+        make (-1.0, bass, kick);
+        const auto om = run (dmanual, bass, 480, man, false, &kick);
+        double md = 0;
+        for (size_t i = (size_t) lat; i < bass.size(); ++i)
+            md = std::max (md, (double) std::fabs (om.out[i] - bass[i - (size_t) lat]));
+        CHECK (! dmanual.polarityFlipped() && dmanual.alignDb() < -3.0 && md < 1e-7, "align off: it reports the cancellation (%.1f dB) and changes nothing", dmanual.alignDb());
     }
 
     std::printf ("Smoothness on note changes\n");

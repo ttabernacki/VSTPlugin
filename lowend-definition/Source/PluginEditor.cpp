@@ -81,8 +81,12 @@ LowEndDefinitionEditor::LowEndDefinitionEditor (LowEndDefinitionProcessor& p) : 
     addKnob (contrast, "contrast", "CONTRAST");
     addKnob (punch, "punch", "PUNCH");
     addKnob (sustain, "sustain", "SUSTAIN");
+    addKnob (kick, "kick", "KICK");
     addKnob (range, "range", "RANGE");
     match.setClickingTogglesState (true);
+    align.setClickingTogglesState (true);
+    addAndMakeVisible (align);
+    alignAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "align", align);
     addAndMakeVisible (match);
     matchAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "match", match);
     setResizable (true, true);
@@ -103,10 +107,12 @@ void LowEndDefinitionEditor::resized()
     auto r = getLocalBounds().reduced (14);
     auto head = r.removeFromTop (34); // title
     match.setBounds (head.removeFromRight (130).reduced (0, 3));
+    head.removeFromRight (6);
+    align.setBounds (head.removeFromRight (120).reduced (0, 3));
     r.removeFromTop (8);
     auto knobs = r.removeFromTop (118);
-    const int w = knobs.getWidth() / 4;
-    for (auto* k : { &contrast, &punch, &sustain, &range })
+    const int w = knobs.getWidth() / 5;
+    for (auto* k : { &contrast, &punch, &sustain, &kick, &range })
     {
         auto cell = knobs.removeFromLeft (w);
         k->label.setBounds (cell.removeFromTop (16));
@@ -215,14 +221,30 @@ void LowEndDefinitionEditor::paint (juce::Graphics& g)
         gp.closeSubPath();
         g.setColour (kWarm.withAlpha (0.55f));
         g.fillPath (gp);
+        juce::Path dp;
+        dp.startNewSubPath ((float) strip.getX(), midY);
+        for (int i = 0; i < n; ++i)
+            dp.lineTo ((float) strip.getX() + dx * (float) i, midY + juce::jlimit (0.0f, 12.0f, pts[i].duck) / 12.0f * 0.5f * (float) strip.getHeight());
+        dp.lineTo ((float) strip.getRight(), midY);
+        dp.closeSubPath();
+        g.setColour (juce::Colour (0xff63a4ff).withAlpha (0.6f));
+        g.fillPath (dp);
         g.setColour (kDim);
-        g.drawText ("punch / sustain gain", strip.getX() + 2, strip.getY(), 160, 12, juce::Justification::left);
+        g.drawText ("punch / sustain gain (up)   kick duck (down)", strip.getX() + 2, strip.getY(), 300, 12, juce::Justification::left);
 
         g.setFont (juce::FontOptions (11.0f));
         const double latMs = proc.latencySeconds.load() * 1000.0;
+        juce::String kickText = "kick: no sidechain";
+        if (proc.scConnected.load())
+        {
+            kickText = "kick: duck " + juce::String (proc.duckDb.load(), 1) + " dB";
+            if (proc.alignKnown.load())
+                kickText += ", sum " + juce::String (proc.alignDb.load(), 1) + " dB" + (proc.flipped.load() ? " (flipped)" : "")
+                            + ", " + juce::String (proc.alignLagMs.load(), 1) + " ms";
+        }
         g.drawText ((pitch > 20.0f ? noteName (pitch) + "  " + juce::String (pitch, 1) + " Hz, note bell " + juce::String (proc.bellDb.load(), 1) + " dB"
                                    : juce::String ("no note"))
-                        + "    |    latency " + juce::String ((int) std::lround (latMs)) + " ms",
+                        + "    |    " + kickText + "    |    latency " + juce::String ((int) std::lround (latMs)) + " ms",
                     footer, juce::Justification::centredLeft);
     }
 }

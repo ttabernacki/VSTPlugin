@@ -19,6 +19,16 @@ so it can tell the note from the stuff between the harmonics.
 - **Match loudness** (on by default): contrast moves energy toward the note, which by itself would just make the low
   band louder (+4.6 dB at +100 % on the test note). With Match on, the low band is trimmed back to within about ±1.5 dB, so you
   judge the definition and not the level. Switch it off if you want the raw boost.
+- **Kick** (0–100 %) and the **sidechain input**: route the kick track to the plug-in's sidechain in Ableton (put
+  Low-End Definition on the bass, pick the kick track as the sidechain source). Where the kick masks the bass, the bass is
+  ducked per frequency (up to 12 dB at 100 %), but the **note's own harmonics are protected** (the pitch tracker knows where
+  they are), so the duck falls on the mud and on the kick's range, not on the bass note itself. It starts a few ms before the kick
+  and lets go over about 45 ms. With no sidechain connected, or at 0 %, nothing changes.
+- **Auto polarity**: a running correlation of kick and bass (gathered only while both play) says whether they partly cancel.
+  The footer shows the summed level against the difference (positive = they add, negative = they fight) and the lag at which
+  the bass would line up best. With Auto polarity on, the whole bass polarity is flipped (30 ms crossfade, with hysteresis)
+  when the sum is more than 1 dB worse than the difference. The reading is only meaningful if the bass starts with the same
+  phase against the kick each time (sampled or well-gated bass); with free-running oscillators it averages out to nothing.
 - **Range** (60–300 Hz): crossover. Complementary split (high = input − low), so with all three controls at 0 the
   output is the bit-exact input, delayed.
 
@@ -26,21 +36,28 @@ The panel shows a **definition meter** (share of the low band's energy that sits
 output, plus a 5-second history) and the punch/sustain gain.
 
 ## How it works
-- The audio is held in a **look-ahead delay of 71 ms** (reported to the host, so plug-in delay compensation applies;
+- The audio is held in a **look-ahead delay of 91 ms** (reported to the host, so plug-in delay compensation applies;
   not for live monitoring). That is what lets it know the note, and where the attack really starts, before you hear them.
 - Pitch: YIN on a decimated copy of the low band. Near a note change the window that starts at the current sample and
   the one that ends there disagree; an energy onset between them says which one is pure, so the bell is on the right note
   from the first sample of the note.
+- Kick: a 72 ms short-time spectrum (87.5 % overlap, sqrt-Hann) of the low band of the bass and of the kick, on a 5 kHz
+  decimated copy. Per bin, the share of energy that is the kick sets how far that bin is ducked; bins within about one bin of
+  the note's harmonics 1-5 are protected. The difference signal is overlap-added inside the look-ahead (this is what grew
+  the delay from 71 to 91 ms), interpolated back to full rate and added to the output.
 - Low band: a Linkwitz-Riley split, read advanced by the filter's group delay so that gain changes line up with the audio in time.
 - Everything is sample-by-sample with control updates every 16 samples: the output does not depend on the host's block size.
 
 ## What it does not do (yet)
-- No kick/bass phase alignment (needs a sidechain and a way to find the kick); no mono-sub control.
-- Monophonic material only: on chords the pitch tracker will pick one voice or give up (then it does nothing).
-- Meant for bass tracks. A kick drum in the signal is treated as a note (the tracker finds it on about 40 % of its length,
-  contrast up to about 4 dB, and each hit gets a punch pulse).
-- Verified on synthetic bass, not on real recordings. Treat the numbers below as "the algorithm does what it claims on
-  clean material", not as a promise about your bass.
+- It does not apply a delay for kick/bass alignment (only reports the lag, and optionally flips polarity). The frequency resolution of
+  the spectral stage is about 14 Hz per bin, so a bass fundamental and a kick that sit within a bin of each other (say 41 and 50 Hz)
+  cannot be separated spectrally; the duck helps where they differ in frequency or in time.
+- No mono-sub control.
+- Monophonic material only: on chords the pitch tracker will pick one voice or give up (then the harmonics are not protected
+  and the duck is plain spectral ducking).
+- Meant for bass tracks. A kick drum *in the main input* is treated as a note.
+- Verified on synthetic bass and kick, not on real recordings. Treat the numbers below as "the algorithm does what it claims on
+  clean material", not as a promise about your mix.
 
 ## Verified (`lowend-definition/tests`, synthetic bass)
 - All controls at 0: bit-exact delay. A 3 kHz tone is untouched with every control up (0.006 dB).
@@ -54,3 +71,10 @@ output, plus a 5-second history) and the punch/sustain gain.
   settings the output peak rises 1.5 to 2.9 dB on those test basses (mostly the punch pulse).
 - CPU: about 1.5 % of one core (stereo, 48 kHz).
 - Output identical for block sizes 1 to 4096; works at 44.1-192 kHz; survives NaN, DC, silence.
+- Kick (synthetic, a 64 Hz mud on the bass against a 64 Hz kick burst): the mud is ducked 8.7 dB during the hit, the note's
+  fundamental moves -1.1 dB, and between hits the mud is untouched (-0.0 dB). Bit-exact delay at Kick 0 % and with no sidechain.
+  Through the real processor with a stereo sidechain bus: mud -9.7 dB, fundamental -1.1 dB. The duck starts about 40 ms before the
+  hit and is down by about 25 dB (re the bass) 200 ms after it.
+- Polarity: an opposite-phase bass is detected (-19 dB sum vs difference), flipped, and kick+bass then sum 18 dB louder; an
+  in-phase bass is left alone; with Auto polarity off it only reports.
+- Output identical for block sizes 1 to 4096 with a sidechain.

@@ -42,7 +42,7 @@ public:
     static constexpr int kHist = 160; // about 5 seconds at one point per 30 ms
     struct Point
     {
-        float defIn, defOut, trans;
+        float defIn, defOut, trans, duck;
     };
     int getHistory (Point* out) const // oldest first; defIn < 0 = nothing measured then
     {
@@ -50,21 +50,23 @@ public:
         for (int i = 0; i < kHist; ++i)
         {
             const int k = (head + i) % kHist;
-            out[i] = { hIn[k].load(), hOut[k].load(), hTrans[k].load() };
+            out[i] = { hIn[k].load(), hOut[k].load(), hTrans[k].load(), hDuck[k].load() };
         }
         return kHist;
     }
-    std::atomic<float> pitchHz { 0.0f }, bellDb { 0.0f }, defIn { -1.0f }, defOut { -1.0f }, transDb { 0.0f };
+    std::atomic<float> pitchHz { 0.0f }, bellDb { 0.0f }, defIn { -1.0f }, defOut { -1.0f }, transDb { 0.0f }, duckDb { 0.0f }, alignDb { 0.0f },
+        alignLagMs { 0.0f };
+    std::atomic<bool> alignKnown { false }, flipped { false }, scConnected { false };
     std::atomic<double> latencySeconds { 0.07 };
 
 private:
     led::Definition core;
     bool prepared_ = false;
     int sinceHist_ = 0, histEvery_ = 1440;
-    std::atomic<float> hIn[kHist], hOut[kHist], hTrans[kHist];
+    std::atomic<float> hIn[kHist], hOut[kHist], hTrans[kHist], hDuck[kHist];
     std::atomic<int> histHead { 0 };
 
-    std::atomic<float>*pContrast = nullptr, *pPunch = nullptr, *pSustain = nullptr, *pRange = nullptr, *pMatch = nullptr;
+    std::atomic<float>*pContrast = nullptr, *pPunch = nullptr, *pSustain = nullptr, *pRange = nullptr, *pMatch = nullptr, *pKick = nullptr, *pAlign = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (LowEndDefinitionProcessor)
 };

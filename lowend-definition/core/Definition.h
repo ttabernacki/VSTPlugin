@@ -14,6 +14,11 @@
 //  * Definition meter: the share of low-band energy that sits on the note's fundamental, measured on the
 //    input and on the processed output.
 //
+//  * Kick awareness (optional sidechain): a spectral duck of the bass against the kick, per frequency bin of a short-time
+//    spectrum of the low band, with the note's own harmonics protected (the pitch tracker says where they are). It is
+//    added to the output as a difference signal, inside the look-ahead, so it costs no extra delay. A running
+//    kick/bass correlation reports whether the two partly cancel, and can flip the bass polarity.
+//
 // All state advances sample by sample and the control logic runs every kSub samples, so the output does not
 // depend on the host's block size.
 
@@ -34,6 +39,62 @@ struct Params
     float sustain = 0.0f;  // -1 .. 1   shorten .. lengthen the body
     float rangeHz = 200.0f; // crossover: everything below is processed
     bool match = true;      // keep the low band's loudness: contrast moves energy around, it should not just add level
+    float kick = 0.6f;      // 0..1  how far the bass is ducked (up to 12 dB) where the kick masks it; needs a sidechain
+    int align = 0;          // 0 = only report the kick/bass polarity, 1 = flip the bass polarity when that helps
+};
+
+// 512-point complex FFT (radix 2), in doubles
+struct Fft512
+{
+    static constexpr int N = 512;
+    double cs[N / 2], sn[N / 2];
+    int rev[N];
+    Fft512()
+    {
+        for (int i = 0; i < N / 2; ++i)
+        {
+            cs[i] = std::cos (2.0 * kPi * i / N);
+            sn[i] = -std::sin (2.0 * kPi * i / N);
+        }
+        for (int i = 0; i < N; ++i)
+        {
+            int r = 0;
+            for (int b = 0; b < 9; ++b)
+                if (i & (1 << b))
+                    r |= 1 << (8 - b);
+            rev[i] = r;
+        }
+    }
+    void run (double* re, double* im, bool inverse) const
+    {
+        for (int i = 0; i < N; ++i)
+            if (rev[i] > i)
+            {
+                std::swap (re[i], re[rev[i]]);
+                std::swap (im[i], im[rev[i]]);
+            }
+        for (int len = 2; len <= N; len <<= 1)
+        {
+            const int half = len / 2, step = N / len;
+            for (int i = 0; i < N; i += len)
+                for (int j = 0; j < half; ++j)
+                {
+                    const double wr = cs[j * step], wi = inverse ? -sn[j * step] : sn[j * step];
+                    const int a = i + j, b = a + half;
+                    const double tr = re[b] * wr - im[b] * wi, ti = re[b] * wi + im[b] * wr;
+                    re[b] = re[a] - tr;
+                    im[b] = im[a] - ti;
+                    re[a] += tr;
+                    im[a] += ti;
+                }
+        }
+        if (inverse)
+            for (int i = 0; i < N; ++i)
+            {
+                re[i] /= N;
+                im[i] /= N;
+            }
+    }
 };
 
 class Definition
@@ -52,8 +113,31 @@ public:
         hopD_ = std::max (4, (int) std::lround (0.002 * fsd_));
         hopIn_ = (int64_t) hopD_ * D_;
         W_ = (int64_t) N_ * D_;
+        // spectral stage: a ~72 ms window with 87.5 % overlap on the decimated low band; its output is final one window
+        // (+ a hop, the group delay of the analysis filter and the interpolator) after the audio it describes
+        Ns_ = std::min (Fft512::N, (int) std::lround (0.072 * fsd_));
+        Ns_ = (Ns_ / 8) * 8;
+        hopS_ = Ns_ / 8;
         lat_ = (int) (W_ + hopIn_ + 64);
+        lat_ = std::max (lat_, (int) ((int64_t) (Ns_ + hopS_ + 4) * D_ + (int64_t) std::lround (0.0075 * sr_) + 64));
         lat_ = ((lat_ + kSub - 1) / kSub) * kSub;
+        sw_.assign ((size_t) Ns_, 0.0);
+        for (int j = 0; j < Ns_; ++j)
+            sw_[(size_t) j] = std::sqrt (0.5 - 0.5 * std::cos (2.0 * kPi * j / Ns_));
+        olaNorm_ = 1.0;
+        {
+            double sum = 0.0; // Hann window summed over the hop grid
+            for (int k = 0; k < 8; ++k)
+            {
+                const double w = sw_[(size_t) (k * hopS_)];
+                sum += w * w;
+            }
+            olaNorm_ = 1.0 / sum;
+        }
+        binHz_ = fsd_ / Fft512::N;
+        kMax_ = std::min (Fft512::N / 2 - 2, (int) std::ceil (380.0 / binHz_));
+        dk_.assign (kRing, 0.0f);
+        dd_.assign (kRing, 0.0f);
         antBlk_ = std::max (1, (int) std::lround (0.004 * sr_ / kSub));
         dsize_ = 1;
         while (dsize_ < lat_ + 4096)
@@ -82,6 +166,21 @@ public:
         std::fill (dout_.begin(), dout_.end(), 0.0f);
         std::fill (gHist_.begin(), gHist_.end(), 0.0f);
         lpA_ = {};
+        lpK_ = {};
+        std::fill (dk_.begin(), dk_.end(), 0.0f);
+        std::fill (dd_.begin(), dd_.end(), 0.0f);
+        gKick_.fill (0.0);
+        lastFrameEnd_ = -1;
+        pk_ = 0.0;
+        kickDuckDb_ = 0.0f;
+        cc_.fill (0.0);
+        ebb_ = ekk_ = activeSec_ = 0.0;
+        alignDb_ = 0.0f;
+        alignLagMs_ = 0.0f;
+        alignRho_ = 0.0f;
+        polTarget_ = 1.0;
+        polSm_ = 1.0;
+        krFrames_ = 0;
         for (auto& l : lpD_)
             l = {};
         for (auto& c : bz_)
@@ -123,12 +222,19 @@ public:
     float transientGainDb() const { return transDb_; }
     float contrastGainDb() const { return (float) gain1Db_; }
     float matchGainDb() const { return (float) matchDb_; }
+    float kickDuckDb() const { return kickDuckDb_; }          // deepest duck of the latest spectral frame, dB (>= 0)
+    float alignDb() const { return alignDb_; }                 // kick+bass summed vs kick-bass: > 0 good, < 0 they partly cancel
+    float alignLagMs() const { return alignLagMs_; }           // delaying the bass by this much would line it up best with the kick
+    float alignCorrelation() const { return alignRho_; }       // correlation at that lag
+    bool polarityFlipped() const { return polTarget_ < 0.0; }
+    bool alignKnown() const { return activeSec_ > 1.5; }
     float pitchHz() const { return pitchOut_; }
     bool meterValid() const { return meterValid_; }
     float definitionIn() const { return pInSm_; }   // 0..1
     float definitionOut() const { return pOutSm_; } // 0..1
 
-    void process (float* const* ch, int nCh, int n)
+    // sc: optional sidechain (the kick), scCh channels, same length n
+    void process (float* const* ch, int nCh, int n, const float* const* sc = nullptr, int scCh = 0)
     {
         nCh = std::min (nCh, 2);
         const int mask = dsize_ - 1;
@@ -143,7 +249,17 @@ public:
                 if (! std::isfinite (x[c]))
                     x[c] = 0.0;
             }
-            analyse (0.5 * (x[0] + x[1]));
+            double k = 0.0;
+            if (sc != nullptr && scCh > 0)
+            {
+                k = sc[0][i];
+                if (scCh > 1)
+                    k = 0.5 * (k + sc[1][i]);
+                if (! std::isfinite (k))
+                    k = 0.0;
+            }
+            analyse (0.5 * (x[0] + x[1]), k);
+            const double delta = kickDelta();
 
             const int wr = (int) (nIn_ & mask);
             double lowMono = 0.0;
@@ -156,8 +272,9 @@ public:
                 const double low = lpD_[c].process (dl_[c][(size_t) ((wr - lat_ + adv_) & mask)]);
                 double y = bell (s1_, bz_[c][0], m1_, low);
                 y = bell (s2_, bz_[c][1], m2_, y) * gAmp_;
+                y += delta;
                 lowMono += y;
-                ch[c][i] = (float) ((d - low) + y);
+                ch[c][i] = (float) (polSm_ * ((d - low) + y));
             }
             if (nIn_ % D_ == 0)
                 dout_[(size_t) ((m_ - 1) & (kRing - 1))] = (float) (lowMono / nCh);
@@ -228,14 +345,16 @@ private:
         const double fc = std::clamp ((double) prm_.rangeHz, 60.0, 300.0);
         Svf s;
         setSvf (s, fc, sr_, 1.4142135623730951);
-        lpA_.s = lpD_[0].s = lpD_[1].s = s;
+        lpA_.s = lpK_.s = lpD_[0].s = lpD_[1].s = s;
         adv_ = std::min (lat_ - kSub, (int) std::lround (0.45 / fc * sr_)); // group delay of two cascaded 2nd-order Butterworth stages
     }
 
     // ---------------- analysis path ------------------------------------------------------
-    void analyse (double a)
+    void analyse (double a, double kickIn)
     {
         const double lo = lpA_.process (a);
+        const double kl = lpK_.process (kickIn);
+        pk_ += af_ * (kl * kl - pk_);
         const double p = lo * lo;
         pf_ += af_ * (p - pf_);
         ps_ += as_ * (p - ps_);
@@ -244,9 +363,13 @@ private:
         if (nIn_ % D_ == 0)
         {
             din_[(size_t) (m_ & (kRing - 1))] = (float) lo;
+            dk_[(size_t) (m_ & (kRing - 1))] = (float) kl;
             ++m_;
             if (m_ % hopD_ == 0 && m_ >= N_)
                 frame();
+            correlate();
+            if (m_ % hopS_ == 0 && m_ >= Ns_ + 1)
+                spectralFrame (m_ - 1);
         }
     }
 
@@ -416,12 +539,161 @@ private:
         return true;
     }
 
+    // ---------------- kick: spectral duck, alignment ---------------------------------------
+    // Cross-correlation of bass and kick over +-2.5 ms, gathered only while both are playing.
+    void correlate()
+    {
+        const int L = kLag;
+        const int64_t m0 = m_ - 1 - L;
+        if (m0 < L + 1)
+            return;
+        const bool active = 10.0 * std::log10 (pf_ + 1e-12) > -45.0 && 10.0 * std::log10 (pk_ + 1e-12) > -40.0;
+        if (! active)
+            return;
+        const double forget = 1.0 - 1.0 / (6.0 * fsd_);
+        const double kv = dk_[(size_t) (m0 & (kRing - 1))];
+        const double bv = din_[(size_t) (m0 & (kRing - 1))];
+        for (int l = -L; l <= L; ++l)
+            cc_[(size_t) (l + L)] = cc_[(size_t) (l + L)] * forget + (double) din_[(size_t) ((m0 - l) & (kRing - 1))] * kv;
+        ebb_ = ebb_ * forget + bv * bv;
+        ekk_ = ekk_ * forget + kv * kv;
+        activeSec_ = std::min (60.0, activeSec_ + 1.0 / fsd_);
+    }
+
+    void spectralFrame (int64_t last)
+    {
+        const int N = Fft512::N, Ns = Ns_;
+        static thread_local double br[Fft512::N], bi[Fft512::N], kr[Fft512::N], ki[Fft512::N];
+        for (int j = 0; j < N; ++j)
+        {
+            if (j < Ns)
+            {
+                const size_t idx = (size_t) ((last - (Ns - 1) + j) & (kRing - 1));
+                br[j] = din_[idx] * sw_[(size_t) j];
+                kr[j] = dk_[idx] * sw_[(size_t) j];
+            }
+            else
+                br[j] = kr[j] = 0.0;
+            bi[j] = ki[j] = 0.0;
+        }
+        fft_.run (br, bi, false);
+        fft_.run (kr, ki, false);
+
+        // the note in this same window: the newest pitch frame covers it
+        float f0 = 0.0f;
+        if (frameCount_ > 0)
+        {
+            const Frame& F = frames_[(size_t) ((frameCount_ - 1) & (kFrames - 1))];
+            if (F.f0 > 0.0f && F.conf >= 0.75f)
+                f0 = F.f0;
+        }
+
+        double raw[Fft512::N / 2 + 2], tgt[Fft512::N / 2 + 2];
+        const int kMax = kMax_;
+        for (int k = 0; k <= kMax + 1; ++k)
+        {
+            const double pb = br[k] * br[k] + bi[k] * bi[k], pk = kr[k] * kr[k] + ki[k] * ki[k];
+            raw[k] = pk / (pb + pk + 1e-12);
+        }
+        const double depth = 12.0 * std::clamp ((double) prm_.kick, 0.0, 1.0);
+        const double sigma = 0.9 * binHz_;
+        double deepest = 0.0;
+        for (int k = 1; k <= kMax; ++k)
+        {
+            const double m = 0.25 * raw[k - 1] + 0.5 * raw[k] + 0.25 * raw[k + 1]; // a little smoothing across frequency
+            double t = std::clamp ((m - 0.30) / 0.55, 0.0, 1.0);
+            const double duck = t * t * (3.0 - 2.0 * t);
+            double prot = 0.0;
+            if (f0 > 0.0f)
+                for (int h = 1; h <= 5; ++h)
+                {
+                    const double dist = std::fabs (k * binHz_ - h * f0) / sigma;
+                    prot = std::max (prot, std::exp (-dist * dist));
+                }
+            tgt[k] = -depth * duck * (1.0 - 0.85 * prot);
+        }
+        // in time: duck quickly, let go over ~45 ms
+        const double rel = 1.0 - std::exp (-(double) hopS_ / (0.045 * fsd_));
+        for (int k = 1; k <= kMax; ++k)
+            gKick_[(size_t) k] += (tgt[k] < gKick_[(size_t) k] ? 0.7 : rel) * (tgt[k] - gKick_[(size_t) k]);
+        static thread_local double ds_r[Fft512::N], ds_i[Fft512::N];
+        for (int j = 0; j < N; ++j)
+            ds_r[j] = ds_i[j] = 0.0;
+        for (int k = 1; k <= kMax; ++k)
+        {
+            const double gdb = 0.25 * gKick_[(size_t) std::max (1, k - 1)] + 0.5 * gKick_[(size_t) k] + 0.25 * gKick_[(size_t) std::min (kMax, k + 1)];
+            deepest = std::max (deepest, -gdb);
+            const double g = std::pow (10.0, gdb / 20.0) - 1.0;
+            ds_r[k] = g * br[k];
+            ds_i[k] = g * bi[k];
+            ds_r[N - k] = ds_r[k];
+            ds_i[N - k] = -ds_i[k];
+        }
+        kickDuckDb_ += 0.5f * ((float) deepest - kickDuckDb_);
+        fft_.run (ds_r, ds_i, true);
+        // overlap-add; the newest hop of samples starts from silence
+        for (int j = Ns - hopS_; j < Ns; ++j)
+            dd_[(size_t) ((last - (Ns - 1) + j) & (kRing - 1))] = 0.0f;
+        for (int j = 0; j < Ns; ++j)
+            dd_[(size_t) ((last - (Ns - 1) + j) & (kRing - 1))] += (float) (ds_r[j] * sw_[(size_t) j] * olaNorm_);
+        lastFrameEnd_ = last;
+    }
+
+    // The difference signal for the output sample leaving the delay now (cubic interpolation of the decimated one).
+    double kickDelta() const
+    {
+        if (lastFrameEnd_ < 0)
+            return 0.0;
+        const int64_t tOut = nIn_ - lat_ + adv_; // the analysis low band lags the audio by the filter's group delay
+        if (tOut < 0)
+            return 0.0;
+        const int64_t j = tOut / D_;
+        const double f = (double) (tOut - j * D_) / D_;
+        if (j - 1 < 0 || j + 2 > lastFrameEnd_ - Ns_ - hopS_)
+            return 0.0;
+        const double p0 = dd_[(size_t) ((j - 1) & (kRing - 1))], p1 = dd_[(size_t) (j & (kRing - 1))], p2 = dd_[(size_t) ((j + 1) & (kRing - 1))],
+                     p3 = dd_[(size_t) ((j + 2) & (kRing - 1))];
+        return p1 + 0.5 * f * (p2 - p0 + f * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3 + f * (3.0 * (p1 - p2) + p3 - p0)));
+    }
+
+    void updateAlign()
+    {
+        if (ebb_ > 1e-12 && ekk_ > 1e-12)
+        {
+            const double cross = cc_[(size_t) kLag], sum = ebb_ + ekk_;
+            alignDb_ = (float) (10.0 * std::log10 ((sum + 2.0 * cross + 1e-12) / (sum - 2.0 * cross + 1e-12)));
+            int best = kLag;
+            double bestV = 0.0;
+            for (int l = -kLag; l <= kLag; ++l)
+                if (std::fabs (cc_[(size_t) (l + kLag)]) > bestV)
+                {
+                    bestV = std::fabs (cc_[(size_t) (l + kLag)]);
+                    best = l;
+                }
+            alignLagMs_ = (float) (1000.0 * (best) / fsd_);
+            alignRho_ = (float) (cc_[(size_t) (best + kLag)] / std::sqrt (ebb_ * ekk_));
+        }
+        if (prm_.align == 1 && alignKnown())
+        {
+            if (alignDb_ < -1.0f)
+                polTarget_ = -1.0;
+            else if (alignDb_ > -0.3f)
+                polTarget_ = 1.0;
+        }
+        else
+            polTarget_ = 1.0;
+        polSm_ += (1.0 - std::exp (-(double) kSub / (0.020 * sr_))) * (polTarget_ - polSm_);
+        if (std::fabs (polSm_ - polTarget_) < 1e-4)
+            polSm_ = polTarget_;
+    }
+
     // ---------------- control ------------------------------------------------------------
     void updateControl()
     {
         const int64_t blk = nIn_ / kSub;
         if (prm_.rangeHz != rangeApplied_)
             designRange();
+        updateAlign();
 
         // fast-vs-slow envelope of the low band: positive while the level is rising, negative while it falls
         const double lvl = 10.0 * std::log10 (ps_ + 1e-12);
@@ -574,7 +846,18 @@ private:
     int adv_ = 0, D_ = 10, tauMax_ = 170, tauMin_ = 18, N_ = 340, hopD_ = 10, lat_ = 4800, dsize_ = 8192, antBlk_ = 12;
     int64_t hopIn_ = 100, W_ = 3400;
     std::vector<float> dl_[2], din_, dout_, gHist_, win_, diff_, cmnd_;
-    Lr4 lpA_, lpD_[2];
+    Lr4 lpA_, lpK_, lpD_[2];
+    static constexpr int kLag = 14;
+    Fft512 fft_;
+    int Ns_ = 384, hopS_ = 48, kMax_ = 26;
+    double olaNorm_ = 0.25, binHz_ = 10.4, pk_ = 0.0, ebb_ = 0.0, ekk_ = 0.0, activeSec_ = 0.0, polTarget_ = 1.0, polSm_ = 1.0;
+    int64_t lastFrameEnd_ = -1;
+    int krFrames_ = 0;
+    std::vector<double> sw_;
+    std::vector<float> dk_, dd_;
+    std::array<double, Fft512::N / 2 + 2> gKick_ {};
+    std::array<double, 2 * kLag + 1> cc_ {};
+    float kickDuckDb_ = 0.0f, alignDb_ = 0.0f, alignLagMs_ = 0.0f, alignRho_ = 0.0f;
     St bz_[2][2];
     Svf s1_, s2_;
     double m1_ = 0.0, m2_ = 0.0;
