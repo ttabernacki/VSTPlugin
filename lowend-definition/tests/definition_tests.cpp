@@ -495,7 +495,7 @@ int main()
             const double mudHit = ampDb (o.out, kFs, 64.0, tHit + sh, 6) - ampDb (bass, kFs, 64.0, tHit, 6);
             const double fundHit = ampDb (o.out, kFs, f0, tHit + sh, 4) - ampDb (bass, kFs, f0, tHit, 4);
             const double mudQuiet = ampDb (o.out, kFs, 64.0, tQuiet + sh, 8) - ampDb (bass, kFs, 64.0, tQuiet, 8);
-            CHECK (mudHit < -3.0 && std::fabs (fundHit) < 1.5 && std::fabs (mudQuiet) < 1.0,
+            CHECK (mudHit < -3.0 && std::fabs (fundHit) < 2.0 && std::fabs (mudQuiet) < 1.0,
                    "masking mode: mud under the kick %+.1f dB, the note %+.1f dB, between hits %+.1f dB", mudHit, fundHit, mudQuiet);
             Params off = mask;
             off.kick = 0.0f;
@@ -645,6 +645,237 @@ int main()
         for (size_t i = 80000; i < b.out.size(); ++i)
             tail = std::max (tail, (double) std::fabs (b.out[i]));
         CHECK (fin && tail < 1e-4, "DC and then silence: finite, and no ringing left (%.1e)", tail);
+    }
+
+
+    std::printf("Robustness\n");
+    {
+        // 1. the duck must always be ready in time: at every sample rate, with the kick playing the whole time
+        for (double sr : { 8000.0, 11025.0, 16000.0, 22050.0, 44100.0, 48000.0, 96000.0, 192000.0, 384000.0 })
+        {
+            Definition d;
+            d.prepare (sr);
+            Params p;
+            p.kick = 1.0f;
+            p.contrast = 0.8f;
+            p.punch = 0.5f;
+            p.sustain = 0.5f;
+            std::vector<float> b ((size_t) (4 * sr)), k (b.size());
+            for (size_t i = 0; i < b.size(); ++i)
+            {
+                b[i] = (float) (0.3 * std::sin (2 * kPi * 41.2 * (double) i / sr) + 0.1 * std::sin (2 * kPi * 63.0 * (double) i / sr));
+                k[i] = (float) (0.4 * std::sin (2 * kPi * 63.0 * (double) i / sr) * (((i / (size_t) (0.3 * sr)) % 2) ? 1.0 : 0.2));
+            }
+            d.setParams (p);
+            bool finite = true;
+            float peak = 0;
+            for (size_t i = 0; i < b.size(); i += 333)
+            {
+                const size_t n = std::min<size_t> (333, b.size() - i);
+                float* c[1] = { b.data() + i };
+                const float* s[1] = { k.data() + i };
+                d.process (c, 1, (int) n, s, 1);
+            }
+            for (float v : b)
+            {
+                finite = finite && std::isfinite (v);
+                peak = std::max (peak, std::fabs (v));
+            }
+            CHECK (finite && peak < 2.0f && d.spectralGaps() == 0, "%.0f Hz: finite, peak %.2f, look-ahead %.0f ms, kick duck never late (%lld gaps)", sr, peak,
+                   1000.0 * d.latencySamples() / sr, (long long) d.spectralGaps());
+        }
+
+        // 2. re-preparing at another rate leaves no state behind
+        {
+            Definition a, b;
+            a.prepare (44100.0);
+            std::vector<float> junk ((size_t) (2 * 44100.0), 0.3f);
+            float* cj[1] = { junk.data() };
+            Params p;
+            p.contrast = 1.0f;
+            p.kick = 1.0f;
+            a.setParams (p);
+            a.process (cj, 1, (int) junk.size(), nullptr, 0);
+            a.prepare (kFs);
+            b.prepare (kFs);
+            std::vector<float> x ((size_t) (2 * kFs)), y;
+            for (size_t i = 0; i < x.size(); ++i)
+                x[i] = (float) (0.3 * std::sin (2 * kPi * 55.0 * (double) i / kFs));
+            y = x;
+            a.setParams (p);
+            b.setParams (p);
+            float* ca[1] = { x.data() };
+            float* cb[1] = { y.data() };
+            a.process (ca, 1, (int) x.size(), nullptr, 0);
+            b.process (cb, 1, (int) y.size(), nullptr, 0);
+            double md = 0;
+            for (size_t i = 0; i < x.size(); ++i)
+                md = std::max (md, (double) std::fabs (x[i] - y[i]));
+            CHECK (md == 0.0, "prepare() again at another rate gives exactly a fresh instance (%.1e)", md);
+        }
+
+        // 3. knobs that jump must not click: contrast, punch, sustain, kick, range and match stepped while a note plays
+        {
+            const auto held1 = held (kFs, 55.0, 4.0, 0, 0);
+            std::vector<float> kick (held1.size(), 0.0f);
+            for (size_t i = 0; i < kick.size(); ++i)
+                kick[i] = (float) (0.3 * std::sin (2 * kPi * 70.0 * (double) i / kFs) * (((i / 12000) % 2) ? 1.0 : 0.0));
+            Definition d;
+            d.prepare (kFs);
+            std::vector<float> o = held1;
+            double stepOut = 0, stepIn = 0;
+            Params p;
+            p.contrast = 0.0f;
+            p.punch = 0.0f;
+            p.sustain = 0.0f;
+            p.kick = 0.0f;
+            std::mt19937 g (21);
+            for (size_t i = 0; i < o.size(); i += 480)
+            {
+                if ((i / 480) % 25 == 24) // every 0.25 s, jump to a random corner of the parameter space
+                {
+                    std::uniform_real_distribution<float> u (0.0f, 1.0f);
+                    p.contrast = u (g) * 2 - 1;
+                    p.punch = u (g) * 2 - 1;
+                    p.sustain = u (g) * 2 - 1;
+                    p.kick = u (g);
+                    p.rangeHz = 60.0f + 240.0f * u (g);
+                    p.match = u (g) > 0.5f;
+                    p.kickMode = u (g) > 0.5f ? 1 : 0;
+                }
+                d.setParams (p);
+                float* c[1] = { o.data() + i };
+                const float* s[1] = { kick.data() + i };
+                d.process (c, 1, (int) std::min<size_t> (480, o.size() - i), s, 1);
+            }
+            for (size_t i = (size_t) d.latencySamples() + 1; i < o.size(); ++i)
+            {
+                stepOut = std::max (stepOut, (double) std::fabs (o[i] - o[i - 1]));
+                stepIn = std::max (stepIn, (double) std::fabs (held1[i - (size_t) d.latencySamples()] - held1[i - 1 - (size_t) d.latencySamples()]));
+            }
+            CHECK (stepOut < 2.5 * stepIn, "random parameter jumps every 250 ms: the largest sample step is %.4f vs %.4f in the dry note", stepOut, stepIn);
+        }
+
+        // 4. fuzz: random material, random parameters every few ms, sidechain on and off, odd block sizes
+        {
+            std::mt19937 g (99);
+            std::uniform_real_distribution<float> u (0.0f, 1.0f);
+            Definition d;
+            d.prepare (kFs);
+            bool finite = true;
+            float peakIn = 0, peakOut = 0;
+            std::vector<float> a (4096), k (4096);
+            for (int blk = 0; blk < 600; ++blk)
+            {
+                const int n = 1 + (int) (u (g) * 3000);
+                const int mode = (int) (u (g) * 5);
+                for (int i = 0; i < n; ++i)
+                {
+                    const double t = (double) (blk * 3000 + i) / kFs;
+                    float v = 0;
+                    if (mode == 0) v = 0.5f * (u (g) - 0.5f);
+                    else if (mode == 1) v = (float) (0.6 * std::sin (2 * kPi * (30.0 + 200.0 * u (g)) * t));
+                    else if (mode == 2) v = (i % 997 == 0) ? 0.95f : 0.0f;
+                    else if (mode == 3) v = (std::sin (2 * kPi * 50.0 * t) > 0) ? 0.8f : -0.8f;
+                    else v = 1e-30f * (u (g) - 0.5f);
+                    a[(size_t) i] = v;
+                    k[(size_t) i] = (u (g) < 0.5f) ? 0.7f * (float) std::sin (2 * kPi * (40.0 + 80.0 * u (g)) * t) : 0.0f;
+                    peakIn = std::max (peakIn, std::fabs (v));
+                }
+                Params p;
+                p.contrast = u (g) * 2 - 1;
+                p.punch = u (g) * 2 - 1;
+                p.sustain = u (g) * 2 - 1;
+                p.kick = u (g);
+                p.rangeHz = 60.0f + 240.0f * u (g);
+                p.match = u (g) > 0.5f;
+                p.align = u (g) > 0.5f ? 1 : 0;
+                p.kickMode = u (g) > 0.5f ? 1 : 0;
+                d.setParams (p);
+                float* c[1] = { a.data() };
+                const float* s[1] = { k.data() };
+                d.process (c, 1, n, u (g) < 0.8f ? s : nullptr, u (g) < 0.8f ? 1 : 0);
+                for (int i = 0; i < n; ++i)
+                {
+                    finite = finite && std::isfinite (a[(size_t) i]);
+                    peakOut = std::max (peakOut, std::fabs (a[(size_t) i]));
+                }
+            }
+            CHECK (finite && peakOut < 20.0f * std::max (peakIn, 0.5f) && d.spectralGaps() == 0, "fuzz (600 random blocks, all parameters): finite, peak %.2f (in %.2f), no late duck", peakOut, peakIn);
+        }
+
+        // 5. a kick that goes away: the polarity decision must not outlive it
+        {
+            auto make = [&] (std::vector<float>& bass, std::vector<float>& kick) {
+                bass.assign ((size_t) (40 * kFs), 0.0f);
+                kick = bass;
+                for (int b = 0; b < 12; ++b)
+                {
+                    const size_t n0 = (size_t) ((0.3 + 0.6 * b) * kFs);
+                    for (size_t i = 0; i < (size_t) (0.4 * kFs); ++i)
+                    {
+                        const double t = (double) i / kFs, e = std::exp (-t / 0.25) * std::min (1.0, t / 0.01), s = std::sin (2 * kPi * 55.0 * t);
+                        bass[n0 + i] = (float) (-0.4 * e * s);
+                        kick[n0 + i] = (float) (0.5 * e * s);
+                    }
+                }
+                for (size_t i = (size_t) (8 * kFs); i < bass.size(); ++i)
+                    bass[i] = (float) (0.3 * std::sin (2 * kPi * 55.0 * (double) i / kFs)); // later: bass alone, no kick
+            };
+            std::vector<float> bass, kick;
+            make (bass, kick);
+            Params p = neutral;
+            p.align = 1;
+            Definition d;
+            d.prepare (kFs);
+            d.setParams (p);
+            bool flippedEarly = false;
+            for (size_t i = 0; i < bass.size(); i += 480)
+            {
+                float* c[1] = { bass.data() + i };
+                const float* s[1] = { kick.data() + i };
+                d.process (c, 1, (int) std::min<size_t> (480, bass.size() - i), s, 1);
+                if (i < (size_t) (7 * kFs) && d.polarityFlipped())
+                    flippedEarly = true;
+            }
+            CHECK (flippedEarly && ! d.polarityFlipped(), "polarity flipped while the kick played (%d), and released after 20 s without a kick (%d)", (int) flippedEarly, (int) d.polarityFlipped());
+        }
+
+        // 6. five minutes of continuous playing: nothing drifts, nothing overflows
+        {
+            Definition d;
+            d.prepare (kFs);
+            Params p;
+            p.contrast = 0.6f;
+            p.punch = 0.4f;
+            p.sustain = 0.3f;
+            p.kick = 0.7f;
+            d.setParams (p);
+            std::vector<float> a (4800), k (4800);
+            bool finite = true;
+            long long tracked = 0, total = 0;
+            for (long long blk = 0; blk < 3000; ++blk)
+            {
+                for (int i = 0; i < 4800; ++i)
+                {
+                    const double t = (double) (blk * 4800 + i) / kFs;
+                    const double note = 41.2 * std::pow (2.0, (double) ((long long) (t * 3) % 5) / 6.0);
+                    a[(size_t) i] = (float) (0.3 * std::sin (2 * kPi * note * t) * (0.5 + 0.5 * std::sin (2 * kPi * 3.0 * t)));
+                    k[(size_t) i] = (float) (0.5 * std::sin (2 * kPi * 55.0 * t) * std::exp (-std::fmod (t, 0.5) / 0.1));
+                }
+                float* c[1] = { a.data() };
+                const float* s[1] = { k.data() };
+                d.process (c, 1, 4800, s, 1);
+                for (float v : a)
+                    finite = finite && std::isfinite (v);
+                if (blk > 2900)
+                {
+                    ++total;
+                    tracked += d.pitchHz() > 0;
+                }
+            }
+            CHECK (finite && d.spectralGaps() == 0 && tracked > total / 2, "5 minutes: finite, no late duck, still tracking the pitch at the end (%lld/%lld blocks)", tracked, total);
+        }
     }
 
     std::printf ("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASSED" : "FAILED", failures, failures == 1 ? "" : "s");

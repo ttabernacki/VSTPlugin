@@ -116,11 +116,13 @@ void LowEndDefinitionEditor::resized()
 {
     auto r = getLocalBounds().reduced (14);
     auto head = r.removeFromTop (34); // title
-    match.setBounds (head.removeFromRight (130).reduced (0, 3));
-    head.removeFromRight (6);
-    align.setBounds (head.removeFromRight (120).reduced (0, 3));
-    head.removeFromRight (6);
-    kickMode.setBounds (head.removeFromRight (130).reduced (0, 3));
+    // the title needs about 170 px; the three controls share what is left
+    const int avail = std::max (300, head.getWidth() - 175);
+    match.setBounds (head.removeFromRight (avail * 37 / 100).reduced (0, 3));
+    head.removeFromRight (5);
+    align.setBounds (head.removeFromRight (avail * 32 / 100).reduced (0, 3));
+    head.removeFromRight (5);
+    kickMode.setBounds (head.removeFromRight (avail * 31 / 100 - 10).reduced (0, 3));
     r.removeFromTop (8);
     auto knobs = r.removeFromTop (118);
     const int w = knobs.getWidth() / 5;
@@ -254,9 +256,9 @@ void LowEndDefinitionEditor::paint (juce::Graphics& g)
                 kickText += ", sum " + juce::String (proc.alignDb.load(), 1) + " dB" + (proc.flipped.load() ? " (flipped)" : "")
                             + ", " + juce::String (proc.alignLagMs.load(), 1) + " ms";
         }
-        g.drawText ((pitch > 20.0f ? noteName (pitch) + "  " + juce::String (pitch, 1) + " Hz, note bell " + juce::String (proc.bellDb.load(), 1) + " dB"
+        g.drawFittedText ((pitch > 20.0f ? noteName (pitch) + "  " + juce::String (pitch, 1) + " Hz, note bell " + juce::String (proc.bellDb.load(), 1) + " dB"
                                    : juce::String ("no note"))
                         + "    |    " + kickText + "    |    latency " + juce::String ((int) std::lround (latMs)) + " ms",
-                    footer, juce::Justification::centredLeft);
+                         footer, juce::Justification::centredLeft, 1, 0.6f);
     }
 }

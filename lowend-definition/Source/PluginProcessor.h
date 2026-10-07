@@ -61,6 +61,7 @@ public:
 
 private:
     led::Definition core;
+    juce::AudioBuffer<float> scratch; // a private copy of the sidechain for the block being processed
     bool prepared_ = false;
     int sinceHist_ = 0, histEvery_ = 1440;
     std::atomic<float> hIn[kHist], hOut[kHist], hTrans[kHist], hDuck[kHist];

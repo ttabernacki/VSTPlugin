@@ -188,6 +188,8 @@ public:
         std::fill (dd_.begin(), dd_.end(), 0.0f);
         gKick_.fill (0.0);
         lastFrameEnd_ = -1;
+        deltaGaps_ = 0;
+        kickQuiet_ = 0;
         pk_ = 0.0;
         kickDuckDb_ = 0.0f;
         cc_.fill (0.0);
@@ -224,7 +226,8 @@ public:
         freq_ = 0.0;
         scale_ = 0.0;
         pS_ = 0.0;
-        gain1Db_ = matchDb_ = 0.0;
+        gain1Db_ = matchDb_ = cSm_ = 0.0;
+        rangeSm_ = 0.0;
         pitchOut_ = 0.0f;
         pInSm_ = pOutSm_ = 0.0f;
         meterValid_ = false;
@@ -245,6 +248,7 @@ public:
     float alignCorrelation() const { return alignRho_; }       // correlation at that lag
     bool polarityFlipped() const { return polTarget_ < 0.0; }
     bool alignKnown() const { return activeSec_ > 1.5; }
+    int64_t spectralGaps() const { return deltaGaps_; } // samples where the kick duck was not ready in time (should stay 0)
     float pitchHz() const { return pitchOut_; }
     bool meterValid() const { return meterValid_; }
     float definitionIn() const { return pInSm_; }   // 0..1
@@ -286,7 +290,8 @@ public:
                 dl_[c][(size_t) wr] = (float) x[c];
                 const double d = dl_[c][(size_t) ((wr - lat_) & mask)];
                 // the low band is read advanced by the filter's group delay, so it lines up with d in time
-                const double low = lpD_[c].process (dl_[c][(size_t) ((wr - lat_ + adv_) & mask)]);
+                const double xa = (1.0 - advFrac_) * dl_[c][(size_t) ((wr - lat_ + advI_) & mask)] + advFrac_ * dl_[c][(size_t) ((wr - lat_ + advI_ + 1) & mask)];
+                const double low = lpD_[c].process (xa);
                 double y = bell (s1_, bz_[c][0], m1_, low);
                 y = bell (s2_, bz_[c][1], m2_, y) * gAmp_;
                 y += delta;
@@ -356,14 +361,17 @@ private:
         float f0 = 0.0f, conf = 0.0f, purity = 0.0f;
     };
 
-    void designRange()
+    void designRange (double fc)
     {
-        rangeApplied_ = prm_.rangeHz;
-        const double fc = std::clamp ((double) prm_.rangeHz, 60.0, 300.0);
+        rangeApplied_ = (float) fc;
         Svf s;
         setSvf (s, fc, sr_, 1.4142135623730951);
         lpA_.s = lpK_.s = lpD_[0].s = lpD_[1].s = s;
-        adv_ = std::min (lat_ - kSub, (int) std::lround (0.45 / fc * sr_)); // group delay of two cascaded 2nd-order Butterworth stages
+        // group delay of two cascaded 2nd-order Butterworth stages, as a fractional read position (it glides with Range)
+        const double adv = std::min ((double) (lat_ - kSub - 2), 0.45 / fc * sr_);
+        advI_ = (int) std::floor (adv);
+        advFrac_ = adv - advI_;
+        adv_ = (int) std::lround (adv);
     }
 
     // ---------------- analysis path ------------------------------------------------------
@@ -519,7 +527,8 @@ private:
             if (k >= oldest)
                 F = &frames_[(size_t) (k & (kFrames - 1))];
         }
-        auto voiced = [] (const Frame* f) { return f != nullptr && f->f0 > 0.0f && f->conf >= 0.75f; };
+        // a pitch that has no energy at its own frequency is a trick of the tracker (a chord's common period), not a note
+        auto voiced = [] (const Frame* f) { return f != nullptr && f->f0 > 0.0f && f->conf >= 0.75f && f->purity >= 0.03f; };
         const Frame* use = nullptr;
         if (voiced (B) && voiced (F))
         {
@@ -564,6 +573,15 @@ private:
         const int64_t m0 = m_ - 1 - L;
         if (m0 < L + 1)
             return;
+        // no kick for a long time (sidechain removed, or a quiet section): drop what was learnt, polarity included
+        if (10.0 * std::log10 (pk_ + 1e-12) > -60.0)
+            kickQuiet_ = 0;
+        else if (++kickQuiet_ > (int64_t) (20.0 * fsd_))
+        {
+            cc_.fill (0.0);
+            ebb_ = ekk_ = activeSec_ = 0.0;
+            alignDb_ = alignLagMs_ = alignRho_ = 0.0f;
+        }
         const bool active = 10.0 * std::log10 (pf_ + 1e-12) > -45.0 && 10.0 * std::log10 (pk_ + 1e-12) > -40.0;
         if (! active)
             return;
@@ -657,7 +675,7 @@ private:
         {
             double duckDb;
             if (prm_.kickMode == 1)
-                duckDb = 0.25 * need[std::max (1, k - 1)] + 0.5 * need[k] + 0.25 * need[std::min (kMax, k + 1)];
+                duckDb = need[k]; // already smooth: it comes through the auditory filters
             else
             {
                 const double m = 0.25 * raw[k - 1] + 0.5 * raw[k] + 0.25 * raw[k + 1]; // a little smoothing across frequency
@@ -702,7 +720,7 @@ private:
     }
 
     // The difference signal for the output sample leaving the delay now (cubic interpolation of the decimated one).
-    double kickDelta() const
+    double kickDelta()
     {
         if (lastFrameEnd_ < 0)
             return 0.0;
@@ -711,8 +729,13 @@ private:
             return 0.0;
         const int64_t j = tOut / D_;
         const double f = (double) (tOut - j * D_) / D_;
-        if (j - 1 < 0 || j + 2 > lastFrameEnd_ - Ns_ - hopS_)
+        // sample j is final once no later frame covers it: the next frame starts hopS_ after the newest one
+        if (j - 1 < 0 || j + 2 > lastFrameEnd_ - Ns_ + hopS_)
+        {
+            if (nIn_ > (int64_t) lat_ + 3 * (int64_t) Ns_ * D_)
+                ++deltaGaps_; // would be a bug: the look-ahead is too short for the spectral stage
             return 0.0;
+        }
         const double p0 = dd_[(size_t) ((j - 1) & (kRing - 1))], p1 = dd_[(size_t) (j & (kRing - 1))], p2 = dd_[(size_t) ((j + 1) & (kRing - 1))],
                      p3 = dd_[(size_t) ((j + 2) & (kRing - 1))];
         return p1 + 0.5 * f * (p2 - p0 + f * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3 + f * (3.0 * (p1 - p2) + p3 - p0)));
@@ -753,8 +776,17 @@ private:
     void updateControl()
     {
         const int64_t blk = nIn_ / kSub;
-        if (prm_.rangeHz != rangeApplied_)
-            designRange();
+        // Range moves the crossover and the read position of the low band: glide to a new value, never jump
+        {
+            const double target = std::clamp ((double) prm_.rangeHz, 60.0, 300.0);
+            if (rangeSm_ <= 0.0)
+                rangeSm_ = target;
+            rangeSm_ += (1.0 - std::exp (-(double) kSub / (0.040 * sr_))) * (target - rangeSm_);
+            if (std::fabs (rangeSm_ - target) < 0.02)
+                rangeSm_ = target;
+            if ((float) rangeSm_ != rangeApplied_)
+                designRange (rangeSm_);
+        }
         updateAlign();
 
         // fast-vs-slow envelope of the low band: positive while the level is rising, negative while it falls
@@ -854,7 +886,11 @@ private:
         scale_ += (1.0 - std::exp (-(double) kSub / (sa * sr_))) * (scaleT - scale_);
         if (scale_ < 1e-4 && scaleT == 0.0)
             scale_ = 0.0;
-        const double c = prm_.contrast;
+        // the knob can move in steps (a host's automation, a click): ease it, so the bells never jump
+        cSm_ += (1.0 - std::exp (-(double) kSub / (0.025 * sr_))) * ((double) prm_.contrast - cSm_);
+        if (std::fabs (cSm_ - (double) prm_.contrast) < 1e-5)
+            cSm_ = prm_.contrast;
+        const double c = cSm_;
         double ce = c;
         if (c > 0.0)
         {
@@ -870,7 +906,9 @@ private:
             const double r = pS_ * std::pow (10.0, gain1Db_ / 10.0) + (1.0 - pS_) * (0.5 * std::pow (10.0, gain2Db / 10.0) + 0.5);
             comp = -0.75 * 10.0 * std::log10 (std::max (r, 0.05)); // most of the way: the tone keeps some of its energy change
         }
-        matchDb_ = comp;
+        matchDb_ += (1.0 - std::exp (-(double) kSub / (0.025 * sr_))) * (comp - matchDb_);
+        if (std::fabs (matchDb_ - comp) < 1e-4)
+            matchDb_ = comp;
         if (freq_ > 0.0)
         {
             const double A1 = std::pow (10.0, gain1Db_ / 40.0), A2 = std::pow (10.0, gain2Db / 40.0), q1 = 3.0, q2 = 4.0;
@@ -905,7 +943,7 @@ private:
 
     Params prm_;
     double sr_ = 48000.0, fsd_ = 4800.0;
-    int adv_ = 0, D_ = 10, tauMax_ = 170, tauMin_ = 18, N_ = 340, hopD_ = 10, lat_ = 4800, dsize_ = 8192, antBlk_ = 12;
+    int adv_ = 0, advI_ = 0, D_ = 10, tauMax_ = 170, tauMin_ = 18, N_ = 340, hopD_ = 10, lat_ = 4800, dsize_ = 8192, antBlk_ = 12;
     int64_t hopIn_ = 100, W_ = 3400;
     std::vector<float> dl_[2], din_, dout_, gHist_, win_, diff_, cmnd_;
     Lr4 lpA_, lpK_, lpD_[2];
@@ -913,7 +951,7 @@ private:
     Fft512 fft_;
     int Ns_ = 384, hopS_ = 48, kMax_ = 26;
     double olaNorm_ = 0.25, binHz_ = 10.4, pk_ = 0.0, ebb_ = 0.0, ekk_ = 0.0, activeSec_ = 0.0, polTarget_ = 1.0, polSm_ = 1.0;
-    int64_t lastFrameEnd_ = -1;
+    int64_t lastFrameEnd_ = -1, deltaGaps_ = 0, kickQuiet_ = 0;
     int krFrames_ = 0;
     std::vector<double> sw_;
     std::vector<float> dk_, dd_, wm_, eq_;
@@ -934,7 +972,7 @@ private:
     int onsetN_ = 0, onsetHead_ = 0;
     bool inOnset_ = false, pFresh_ = true;
     int64_t lastOnsetT_ = -1000000;
-    double freq_ = 0.0, scale_ = 0.0, pS_ = 0.0, gain1Db_ = 0.0, matchDb_ = 0.0;
+    double advFrac_ = 0.0, rangeSm_ = 0.0, freq_ = 0.0, scale_ = 0.0, pS_ = 0.0, gain1Db_ = 0.0, matchDb_ = 0.0, cSm_ = 0.0;
     float pitchOut_ = 0.0f, transDb_ = 0.0f, pInSm_ = 0.0f, pOutSm_ = 0.0f;
     bool meterValid_ = false;
 };

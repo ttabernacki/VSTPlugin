@@ -62,6 +62,9 @@ output, plus a 5-second history) and the punch/sustain gain.
 - No mono-sub control.
 - Monophonic material only: on chords the pitch tracker will pick one voice or give up (then the harmonics are not protected
   and the duck is plain spectral ducking).
+- The pitch tracker follows fundamentals from about 30 Hz up (a low B is fine, a 25 Hz sub drop is not tracked: contrast and the
+  note protection do nothing there, the rest still works). A chord or a power chord is mostly ignored; on a triad it briefly
+  locks onto one chord tone (about 6 % of the time in a test) and then moves a bell there.
 - Meant for bass tracks. A kick drum *in the main input* is treated as a note.
 - Verified on synthetic bass and kick, not on real recordings. Treat the numbers below as "the algorithm does what it claims on
   clean material", not as a promise about your mix.
@@ -78,15 +81,29 @@ output, plus a 5-second history) and the punch/sustain gain.
   settings the output peak rises 1.5 to 2.9 dB on those test basses (mostly the punch pulse).
 - CPU: about 1.5 % of one core (stereo, 48 kHz).
 - Output identical for block sizes 1 to 4096; works at 44.1-192 kHz; survives NaN, DC, silence.
-- Kick (synthetic, a 64 Hz mud on the bass against a 64 Hz kick burst): the mud is ducked 5.7 dB during the hit, the note's
-  fundamental moves -0.3 dB, and between hits the mud is untouched (-0.0 dB). Bit-exact delay at Kick 0 % and with no sidechain.
+- Kick (synthetic, a 64 Hz mud on the bass against a 64 Hz kick burst): the mud is ducked 6.4 dB during the hit, the note's
+  fundamental moves -0.8 dB, and between hits the mud is untouched (-0.0 dB). Bit-exact delay at Kick 0 % and with no sidechain.
   Through the real processor with a stereo sidechain bus: mud -6.2 dB, fundamental -0.7 dB. The duck starts about 40 ms before the
   hit and is down by about 25 dB (re the bass) 200 ms after it.
 - Polarity: an opposite-phase bass is detected (-19 dB sum vs difference), flipped, and kick+bass then sum 18 dB louder; an
   in-phase bass is left alone; with Auto polarity off it only reports.
 - Output identical for block sizes 1 to 4096 with a sidechain.
-- Masking mode (synthetic): a 62 Hz component 30+ dB over a 62 Hz kick is ducked 6.3 dB (Simple: 0 dB); a faint component
-  that does not cover a loud kick is left alone (-0.2 dB; Simple ducks it 5.8 dB); a kick only a few dB under the bass is not
-  masked, so nothing happens (-0.6 dB). The note's own fundamental moves -1.4 dB in the first case. Bit-exact at Kick 0 %,
+- Masking mode (synthetic): a 62 Hz component 30+ dB over a 62 Hz kick is ducked 7.3 dB (Simple: 0 dB); a faint component
+  that does not cover a loud kick is left alone (-0.1 dB; Simple ducks it 6.0 dB); a kick only a few dB under the bass is not
+  masked, so nothing happens (-0.5 dB). The note's own fundamental moves -1.7 dB in the mud case. Bit-exact at Kick 0 %,
   identical across block sizes. To keep the note safe, harmonics 1-5 are protected within about 8 Hz and fade out over the next 7 Hz
-  (the window cannot resolve finer than about 14 Hz), which also trims the Simple-mode duck (mud under a hit: -5.7 dB, was -8.7 dB).
+  (the window cannot resolve finer than about 14 Hz), which also trims the Simple-mode duck (mud under a hit: -6.4 dB).
+
+## Bug hunt (what was found and fixed)
+- **The kick duck was gated off about 20 % of the time.** The overlap-add output was treated as final two hops too late, so
+  for part of every 9 ms hop the difference signal was dropped, switching the duck on and off about 110 times a second. Fixed (a
+  counter, `spectralGaps()`, now proves it never happens: tested at 8 kHz to 384 kHz, in fuzzing and over a 5-minute run).
+- **Stepping Contrast mid-note clicked** (second difference of what is added: 0.26, now 0.004). Contrast and the loudness match are eased, and
+  Range now glides with a fractional read position instead of jumping.
+- **Mono main bus plus a sidechain was processed wrongly.** The audio channel count included the sidechain channels, so a sidechain
+  channel was treated as audio, and in a mono-in / stereo-out layout the host shares a channel between the sidechain and the output,
+  which was overwritten before it was read. The processor now uses the main bus channel count and copies the sidechain first.
+- **Auto polarity stayed flipped after the kick was gone** (sidechain removed or a long quiet section). It now forgets after 20 s without a kick.
+- **A pitch with no energy at its own frequency** (a chord's common period) is no longer accepted as a note.
+- A host that delivers more samples than announced is handled in slices; the smallest and largest editor sizes were checked.
+- Clean under AddressSanitizer and UBSan: the three DSP cores (OrbitPan, Bass Note Leveler, Low-End Definition).

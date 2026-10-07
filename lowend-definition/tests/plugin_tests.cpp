@@ -33,7 +33,7 @@ static std::vector<float> render (LowEndDefinitionProcessor& p, const std::vecto
 {
     std::vector<float> out (in.size());
     juce::MidiBuffer midi;
-    juce::AudioBuffer<float> buf (2, 8192);
+    juce::AudioBuffer<float> buf (2, 131072);
     size_t pos = 0, bi = 0;
     while (pos < in.size())
     {
@@ -246,6 +246,122 @@ int main()
         CHECK (mudHit < -3.0 && std::fabs (fundHit) < 1.5, "through the real processor: mud under the kick %+.1f dB, the note's fundamental %+.1f dB", mudHit, fundHit);
     }
 
+
+    std::printf ("Sidechain layouts\n");
+    {
+        // The audio channels are those of the main bus; the sidechain must not be mistaken for audio, must survive a
+        // mono-in / stereo-out layout (where the host shares a channel between them), and must not be altered.
+        const double f0 = 41.2, mudHz = 64.0;
+        std::vector<float> bass ((size_t) (3 * kFs)), kick (bass.size(), 0.0f);
+        for (size_t i = 0; i < bass.size(); ++i)
+        {
+            const double t = (double) i / kFs, env = std::min (1.0, t / 0.03);
+            bass[i] = (float) (0.3 * env * (std::sin (2 * 3.14159265 * f0 * t) + 0.5 * std::sin (2 * 3.14159265 * 2 * f0 * t + 0.4) + 0.3 * std::sin (2 * 3.14159265 * mudHz * t + 0.7)));
+        }
+        for (int b = 0; b < 4; ++b)
+            for (size_t i = 0; i < (size_t) (0.18 * kFs); ++i)
+            {
+                const double t = (double) i / kFs;
+                kick[(size_t) ((0.5 + 0.6 * b) * kFs) + i] = (float) (0.8 * std::exp (-t / 0.06) * std::sin (2 * 3.14159265 * mudHz * t));
+            }
+        struct Cfg
+        {
+            const char* name;
+            juce::AudioChannelSet in, sc, out;
+        };
+        const auto M = juce::AudioChannelSet::mono(), S = juce::AudioChannelSet::stereo();
+        double ref[3] = {};
+        int idx = 0;
+        for (const Cfg& cfg : { Cfg { "stereo + stereo sidechain", S, S, S }, Cfg { "mono + stereo sidechain, mono out", M, S, M },
+                                Cfg { "mono + mono sidechain, stereo out", M, M, S } })
+        {
+            LowEndDefinitionProcessor p;
+            juce::AudioProcessor::BusesLayout l;
+            l.inputBuses.add (cfg.in);
+            l.inputBuses.add (cfg.sc);
+            l.outputBuses.add (cfg.out);
+            const bool okLayout = p.setBusesLayout (l);
+            p.getBus (true, 1)->enable();
+            prepare (p, kFs, 512);
+            for (auto* id : { "contrast", "punch", "sustain" })
+                setPlain (p, id, 0.0f);
+            setPlain (p, "kick", 1.0f);
+            const int nIn = p.getTotalNumInputChannels(), nOut = p.getTotalNumOutputChannels(), nBuf = std::max (nIn, nOut);
+            const int mainIn = p.getMainBusNumInputChannels(), scN = nIn - mainIn;
+            juce::AudioBuffer<float> buf (nBuf, 512);
+            juce::MidiBuffer midi;
+            std::vector<float> out (bass.size()), out1 (bass.size());
+            bool scIntact = true;
+            for (size_t pos = 0; pos < bass.size(); pos += 512)
+            {
+                const int n = (int) std::min<size_t> (512, bass.size() - pos);
+                juce::AudioBuffer<float> view (buf.getArrayOfWritePointers(), nBuf, n);
+                for (int i = 0; i < n; ++i)
+                {
+                    for (int c = 0; c < mainIn; ++c)
+                        view.setSample (c, i, bass[pos + (size_t) i]);
+                    for (int c = 0; c < scN; ++c)
+                        view.setSample (mainIn + c, i, kick[pos + (size_t) i]);
+                }
+                p.processBlock (view, midi);
+                for (int i = 0; i < n; ++i)
+                {
+                    out[pos + (size_t) i] = view.getSample (0, i);
+                    out1[pos + (size_t) i] = nOut > 1 ? view.getSample (1, i) : view.getSample (0, i);
+                    // an input-only sidechain channel (not shared with an output) must come back as it went in
+                    for (int c = 0; c < scN; ++c)
+                        if (mainIn + c >= nOut && view.getSample (mainIn + c, i) != kick[pos + (size_t) i])
+                            scIntact = false;
+                }
+            }
+            auto amp = [&] (const std::vector<float>& x, double f, double t0, double cycles) {
+                const size_t i0 = (size_t) (t0 * kFs), L = (size_t) std::llround (cycles * kFs / f);
+                double re = 0, im = 0;
+                for (size_t j = 0; j < L; ++j)
+                {
+                    re += x[i0 + j] * std::cos (2 * 3.14159265358979 * cycles * (double) j / (double) L);
+                    im -= x[i0 + j] * std::sin (2 * 3.14159265358979 * cycles * (double) j / (double) L);
+                }
+                return 20.0 * std::log10 (2.0 / (double) L * std::sqrt (re * re + im * im) + 1e-12);
+            };
+            const double sh = (double) p.getLatencySamples() / kFs, tHit = 0.5 + 0.6 * 2 + 0.04;
+            const double mud = amp (out, mudHz, tHit + sh, 6) - amp (bass, mudHz, tHit, 6);
+            ref[idx] = mud;
+            double chDiff = 0;
+            for (size_t i = 0; i < out.size(); ++i)
+                chDiff = std::max (chDiff, (double) std::fabs (out[i] - out1[i]));
+            CHECK (okLayout && mud < -3.0 && scIntact && chDiff < 1e-6, "%s: layout accepted, mud under the kick %+.1f dB, sidechain left intact, outputs agree (%.1e)", cfg.name, mud, chDiff);
+            ++idx;
+        }
+        CHECK (std::fabs (ref[0] - ref[1]) < 0.5 && std::fabs (ref[0] - ref[2]) < 0.5, "the duck is the same whatever the layout (%.1f / %.1f / %.1f dB)", ref[0], ref[1], ref[2]);
+    }
+
+
+    std::printf ("Hosts that exceed the announced block size\n");
+    {
+        double total;
+        const auto sig = riff (total, 5);
+        auto go = [&] (int announced, int actual) {
+            LowEndDefinitionProcessor p;
+            prepare (p, kFs, announced);
+            setPlain (p, "contrast", 0.8f);
+            setPlain (p, "punch", 0.6f);
+            return render (p, sig, { actual });
+        };
+        const auto ref = go (512, 512);
+        const auto big = go (256, 100000); // announced 256, delivered in a single 100000-sample block
+        double md = 0;
+        for (size_t i = 0; i < ref.size(); ++i)
+            md = std::max (md, (double) std::fabs (ref[i] - big[i]));
+        CHECK (md < 1e-6, "a block 400 times the announced size is processed in slices, same result (%.1e)", md);
+        LowEndDefinitionProcessor p;
+        prepare (p, kFs, 512);
+        juce::AudioBuffer<float> empty (2, 0);
+        juce::MidiBuffer midi;
+        p.processBlock (empty, midi);
+        CHECK (true, "an empty block is harmless");
+    }
+
     std::printf ("State recall\n");
     {
         LowEndDefinitionProcessor a, b;
@@ -348,12 +464,15 @@ int main()
         setPlain (p, "sustain", -0.3f);
         render (p, sig, { 480 });
         std::unique_ptr<juce::AudioProcessorEditor> ed (p.createEditor());
-        ed->setSize (680, 440);
-        auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
-        juce::File f (juce::String (dir) + "/low_end_definition_ui.png");
-        f.deleteFile();
-        juce::FileOutputStream out (f);
-        juce::PNGImageFormat().writeImageToStream (img, out);
+        for (auto size : { std::make_pair (680, 440), std::make_pair (560, 364), std::make_pair (1100, 711) }) // default, smallest, largest
+        {
+            ed->setSize (size.first, size.second);
+            auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
+            juce::File f (juce::String (dir) + "/low_end_definition_ui" + (size.first == 680 ? juce::String() : "_" + juce::String (size.first)) + ".png");
+            f.deleteFile();
+            juce::FileOutputStream out (f);
+            juce::PNGImageFormat().writeImageToStream (img, out);
+        }
     }
 
     std::printf ("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASSED" : "FAILED", failures, failures == 1 ? "" : "s");

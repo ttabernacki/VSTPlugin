@@ -69,8 +69,9 @@ bool LowEndDefinitionProcessor::isBusesLayoutSupported (const BusesLayout& layou
     return inOk && outOk && ! (in == juce::AudioChannelSet::stereo() && out == juce::AudioChannelSet::mono());
 }
 
-void LowEndDefinitionProcessor::prepareToPlay (double sampleRate, int)
+void LowEndDefinitionProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
+    scratch.setSize (2, std::max (samplesPerBlock, 512), false, true, false);
     core.prepare (sampleRate);
     setLatencySamples (core.latencySamples());
     latencySeconds = (double) core.latencySamples() / sampleRate;
@@ -79,27 +80,40 @@ void LowEndDefinitionProcessor::prepareToPlay (double sampleRate, int)
     prepared_ = true;
 }
 
-void LowEndDefinitionProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+void LowEndDefinitionProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
+    // a host may hand over more samples than it announced: work in slices that fit the scratch buffer
+    const int cap = scratch.getNumSamples();
+    if (prepared_ && cap > 0 && buffer.getNumSamples() > cap)
+    {
+        for (int pos = 0; pos < buffer.getNumSamples(); pos += cap)
+        {
+            juce::AudioBuffer<float> slice (buffer.getArrayOfWritePointers(), buffer.getNumChannels(), pos,
+                                            std::min (cap, buffer.getNumSamples() - pos));
+            processBlock (slice, midi);
+        }
+        return;
+    }
     juce::ScopedNoDenormals noDenormals;
     const int n = buffer.getNumSamples();
-    const int nCh = std::min (buffer.getNumChannels(), 2);
-    if (nCh < 1 || ! prepared_)
+    // the audio channels are those of the main bus: with a sidechain the buffer carries more channels than that
+    const int nCh = std::min ({ getMainBusNumOutputChannels(), buffer.getNumChannels(), 2 });
+    if (nCh < 1 || ! prepared_ || n < 1)
         return;
-    const int mainIn = getMainBusNumInputChannels();
-    // a mono input on a stereo bus: make both channels carry it
-    if (mainIn == 1 && nCh == 2)
-        buffer.copyFrom (1, 0, buffer, 0, 0, n);
-    // the kick, if a track is routed to the sidechain input
-    const float* scPtr[2] = { nullptr, nullptr };
+    // the kick, if a track is routed to the sidechain input. Copied first: in a mono-in / stereo-out layout the host's
+    // buffer shares its second channel between the sidechain input and the main output.
     int scCh = 0;
     if (getBusCount (true) > 1 && getBus (true, 1) != nullptr && getBus (true, 1)->isEnabled())
     {
         auto scBuf = getBusBuffer (buffer, true, 1);
-        scCh = std::min (scBuf.getNumChannels(), 2);
+        scCh = std::min ({ scBuf.getNumChannels(), 2, scratch.getNumChannels() });
         for (int c = 0; c < scCh; ++c)
-            scPtr[c] = scBuf.getReadPointer (c);
+            scratch.copyFrom (c, 0, scBuf, c, 0, n);
     }
+    const float* scPtr[2] = { scCh > 0 ? scratch.getReadPointer (0) : nullptr, scCh > 1 ? scratch.getReadPointer (1) : nullptr };
+    // a mono input on a stereo bus: make both channels carry it
+    if (getMainBusNumInputChannels() == 1 && nCh == 2)
+        buffer.copyFrom (1, 0, buffer, 0, 0, n);
 
     led::Params p;
     p.contrast = pContrast->load();
