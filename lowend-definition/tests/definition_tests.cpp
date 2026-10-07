@@ -876,6 +876,56 @@ int main()
             }
             CHECK (finite && d.spectralGaps() == 0 && tracked > total / 2, "5 minutes: finite, no late duck, still tracking the pitch at the end (%lld/%lld blocks)", tracked, total);
         }
+
+        // 7. a sidechain that is the bass itself (a routing mistake) must not make the plug-in duck its own bass
+        {
+            const auto bass = held (kFs, 41.2, 6.0, 64.0, 0.4);
+            Params p = neutral;
+            p.kick = 1.0f;
+            Definition d;
+            d.prepare (kFs);
+            const auto o = run (d, bass, 480, p, false, &bass);
+            const int lat = d.latencySamples();
+            double ea = 0, ei = 0;
+            for (size_t i = (size_t) (3 * kFs) + (size_t) lat; i < (size_t) (5.5 * kFs); ++i)
+            {
+                const double a = o.out[i] - bass[i - (size_t) lat];
+                ea += a * a;
+                ei += (double) bass[i - (size_t) lat] * bass[i - (size_t) lat];
+            }
+            CHECK (d.sidechainIsBass() && 10 * std::log10 (ea / ei + 1e-20) < -50.0, "the bass as its own sidechain is recognised (%d) and left alone (%.0f dB re the bass)", (int) d.sidechainIsBass(), 10 * std::log10 (ea / ei + 1e-20));
+            std::vector<float> kick (bass.size(), 0.0f);
+            for (int b = 0; b < 8; ++b)
+                for (size_t i = 0; i < (size_t) (0.18 * kFs); ++i)
+                    kick[(size_t) ((0.5 + 0.6 * b) * kFs) + i] = (float) (0.8 * std::exp (-(double) i / kFs / 0.06) * std::sin (2 * kPi * 64.0 * (double) i / kFs));
+            Definition dk;
+            dk.prepare (kFs);
+            run (dk, bass, 480, p, false, &kick);
+            CHECK (! dk.sidechainIsBass(), "a real kick is not mistaken for the bass");
+        }
+
+        // 8. a kick that is only bleed (about -80 dBFS) is no reason to duck anything
+        {
+            const auto bass = held (kFs, 41.2, 4.0, 64.0, 0.4);
+            for (int loud = 0; loud < 2; ++loud)
+            {
+                std::vector<float> kick (bass.size(), 0.0f);
+                for (int b = 0; b < 6; ++b)
+                    for (size_t i = 0; i < (size_t) (0.18 * kFs); ++i)
+                        kick[(size_t) ((0.5 + 0.6 * b) * kFs) + i] = (float) ((loud ? 0.8 : 0.0001) * std::exp (-(double) i / kFs / 0.06) * std::sin (2 * kPi * 64.0 * (double) i / kFs));
+                Params p = neutral;
+                p.kick = 1.0f;
+                Definition d;
+                d.prepare (kFs);
+                const auto o = run (d, bass, 480, p, false, &kick);
+                const double tHit = 0.5 + 0.6 * 3 + 0.04, sh = (double) d.latencySamples() / kFs;
+                const double mud = ampDb (o.out, kFs, 64.0, tHit + sh, 6) - ampDb (bass, kFs, 64.0, tHit, 6);
+                if (loud)
+                    CHECK (mud < -3.0, "a normal kick still ducks the mud (%+.1f dB)", mud);
+                else
+                    CHECK (std::fabs (mud) < 0.5, "kick bleed at -80 dBFS: the mud is not touched (%+.1f dB)", mud);
+            }
+        }
     }
 
     std::printf ("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASSED" : "FAILED", failures, failures == 1 ? "" : "s");

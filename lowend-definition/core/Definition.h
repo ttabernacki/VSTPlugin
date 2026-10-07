@@ -27,6 +27,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <vector>
 
 namespace led
@@ -190,6 +191,7 @@ public:
         lastFrameEnd_ = -1;
         deltaGaps_ = 0;
         kickQuiet_ = 0;
+        selfSc_ = false;
         pk_ = 0.0;
         kickDuckDb_ = 0.0f;
         cc_.fill (0.0);
@@ -248,6 +250,7 @@ public:
     float alignCorrelation() const { return alignRho_; }       // correlation at that lag
     bool polarityFlipped() const { return polTarget_ < 0.0; }
     bool alignKnown() const { return activeSec_ > 1.5; }
+    bool sidechainIsBass() const { return selfSc_; }           // the sidechain carries (nearly) the same signal as the input: a routing mistake
     int64_t spectralGaps() const { return deltaGaps_; } // samples where the kick duck was not ready in time (should stay 0)
     float pitchHz() const { return pitchOut_; }
     bool meterValid() const { return meterValid_; }
@@ -306,7 +309,7 @@ public:
 
 private:
     static constexpr int kRing = 4096, kGHist = 4096, kFrames = 1024;
-    static constexpr double kPunchDb = 10.0, kS = 5.0, kCeil = 12.0;
+    static constexpr double kPunchDb = 10.0, kS = 8.0, kCeil = 12.0;
 
     struct Svf
     {
@@ -581,6 +584,7 @@ private:
             cc_.fill (0.0);
             ebb_ = ekk_ = activeSec_ = 0.0;
             alignDb_ = alignLagMs_ = alignRho_ = 0.0f;
+            selfSc_ = false;
         }
         const bool active = 10.0 * std::log10 (pf_ + 1e-12) > -45.0 && 10.0 * std::log10 (pk_ + 1e-12) > -40.0;
         if (! active)
@@ -630,7 +634,10 @@ private:
             const double pb = br[k] * br[k] + bi[k] * bi[k], pk = kr[k] * kr[k] + ki[k] * ki[k];
             raw[k] = pk / (pb + pk + 1e-12);
         }
-        const double depth = 12.0 * std::clamp ((double) prm_.kick, 0.0, 1.0);
+        // a kick that is barely there (bleed, noise in the sidechain) is no reason to move anything
+        const double kickLevelDb = 10.0 * std::log10 (pk_ + 1e-12);
+        const double gate = std::clamp ((kickLevelDb + 72.0) / 10.0, 0.0, 1.0);
+        const double depth = selfSc_ ? 0.0 : 12.0 * std::clamp ((double) prm_.kick, 0.0, 1.0) * gate;
         const double resHz = fsd_ / Ns_; // one resolution cell of the window: a gain feature narrower than this smears onto its neighbours
         double deepest = 0.0;
         // Masking mode: which bass components cover up the kick? Excitation of each analysis bin through the auditory filter.
@@ -757,7 +764,12 @@ private:
                 }
             alignLagMs_ = (float) (1000.0 * (best) / fsd_);
             alignRho_ = (float) (cc_[(size_t) (best + kLag)] / std::sqrt (ebb_ * ekk_));
+            // the same signal on both inputs (e.g. the bass track picked as its own sidechain): there is no kick to make room for
+            const double ratioDb = 10.0 * std::log10 (ebb_ / ekk_);
+            selfSc_ = activeSec_ > 0.3 && alignRho_ > 0.98f && std::fabs (ratioDb) < 3.0 && std::abs (best) <= 1;
         }
+        else
+            selfSc_ = false;
         if (prm_.align == 1 && alignKnown())
         {
             if (alignDb_ < -1.0f)
@@ -795,7 +807,7 @@ private:
         const double d = 10.0 * std::log10 ((pf_ + 1e-12) / (ps_ + 1e-12)) * wgt;
         // Attacks: the detector fires a few ms after the real onset (its envelope has to rise), and the delay line gives us
         // time to place a smooth gain pulse where the attack really is. Strength follows how hard the level jumped.
-        if (d > 3.0)
+        if (d > 4.5)
         {
             if (! inOnset_ && nIn_ - lastOnsetT_ > (int64_t) (0.04 * sr_))
             {
@@ -821,14 +833,14 @@ private:
         {
             dPeak_ = std::max (dPeak_, d);
             onsetAmp_[(size_t) ((onsetHead_ - 1) & 31)] = (float) std::clamp (dPeak_ / 6.0, 0.4, 1.0);
-            if (d < 1.5)
+            if (d < 2.0)
                 inOnset_ = false;
         }
         // Body: a slower pair (ripple of the low band's rectified level stays below 0.2 dB) reads how fast the note is dying
         const double wl = std::clamp ((10.0 * std::log10 (pl_ + 1e-12) + 72.0) / 12.0, 0.0, 1.0);
-        // a muted note-off dies far faster than any ring-out: soft-limit it so "sustain" does not pump the end of notes
-        const double decRaw = std::max (-10.0 * std::log10 ((pm_ + 1e-12) / (pl_ + 1e-12)) * wl, 0.0);
-        const double dec = 2.5 * std::tanh (decRaw / 2.5);
+                const double decRaw = std::max (-10.0 * std::log10 ((pm_ + 1e-12) / (pl_ + 1e-12)) * wl, 0.0);
+        // a natural ring-out falls at about decRaw 0.3-1.5; anything much faster is a mute or a tremolo/wobble, not a decay, and gets less
+        const double dec = decRaw / (1.0 + (decRaw / 1.5) * (decRaw / 1.5));
         const double wf = std::clamp ((10.0 * std::log10 (pf_ + 1e-12) + 62.0) / 8.0, 0.0, 1.0); // note over: let go
         const double sinceOnset = (double) (nIn_ - lastOnsetT_) / sr_;
         const double wb = std::clamp ((sinceOnset - 0.03) / 0.03, 0.0, 1.0); // the body starts after the attack
@@ -952,6 +964,7 @@ private:
     int Ns_ = 384, hopS_ = 48, kMax_ = 26;
     double olaNorm_ = 0.25, binHz_ = 10.4, pk_ = 0.0, ebb_ = 0.0, ekk_ = 0.0, activeSec_ = 0.0, polTarget_ = 1.0, polSm_ = 1.0;
     int64_t lastFrameEnd_ = -1, deltaGaps_ = 0, kickQuiet_ = 0;
+    bool selfSc_ = false;
     int krFrames_ = 0;
     std::vector<double> sw_;
     std::vector<float> dk_, dd_, wm_, eq_;

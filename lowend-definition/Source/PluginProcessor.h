@@ -56,7 +56,7 @@ public:
     }
     std::atomic<float> pitchHz { 0.0f }, bellDb { 0.0f }, defIn { -1.0f }, defOut { -1.0f }, transDb { 0.0f }, duckDb { 0.0f }, alignDb { 0.0f },
         alignLagMs { 0.0f };
-    std::atomic<bool> alignKnown { false }, flipped { false }, scConnected { false };
+    std::atomic<bool> alignKnown { false }, flipped { false }, scConnected { false }, selfSidechain { false };
     std::atomic<double> latencySeconds { 0.07 };
 
 private:

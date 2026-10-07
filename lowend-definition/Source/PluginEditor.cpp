@@ -251,8 +251,9 @@ void LowEndDefinitionEditor::paint (juce::Graphics& g)
         juce::String kickText = "kick: no sidechain";
         if (proc.scConnected.load())
         {
-            kickText = "kick: duck " + juce::String (proc.duckDb.load(), 1) + " dB";
-            if (proc.alignKnown.load())
+            kickText = proc.selfSidechain.load() ? juce::String ("sidechain is the bass itself: check the routing")
+                                                 : "kick: duck " + juce::String (proc.duckDb.load(), 1) + " dB";
+            if (proc.alignKnown.load() && ! proc.selfSidechain.load())
                 kickText += ", sum " + juce::String (proc.alignDb.load(), 1) + " dB" + (proc.flipped.load() ? " (flipped)" : "")
                             + ", " + juce::String (proc.alignLagMs.load(), 1) + " ms";
         }

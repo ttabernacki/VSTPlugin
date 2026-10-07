@@ -136,6 +136,7 @@ void LowEndDefinitionProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
     alignKnown.store (core.alignKnown());
     flipped.store (core.polarityFlipped());
     scConnected.store (scCh > 0);
+    selfSidechain.store (core.sidechainIsBass());
     defIn.store (core.meterValid() ? core.definitionIn() : -1.0f);
     defOut.store (core.meterValid() ? core.definitionOut() : -1.0f);
     sinceHist_ += n;

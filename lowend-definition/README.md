@@ -14,8 +14,8 @@ so it can tell the note from the stuff between the harmonics.
 - **Punch** (−100…+100 %): emphasise or tame the attack. A smooth gain pulse is placed *on* the detected onset
   (up to ±10 dB, strength follows how hard the level jumped).
 - **Sustain** (−100…+100 %): lengthen or shorten the body. Driven by how fast the note is dying, after the first ~30 ms,
-  and it lets go when the note is over. A muted note-off decays far faster than a natural ring-out, so the detector is
-  soft-limited and the end of notes is not pumped.
+  and it lets go when the note is over. Falls much faster than a natural ring-out (a mute, a tremolo, a wobble) count for less, so the
+  end of notes is not pumped and a tremolo is not exaggerated (at 100 % on a +-6 dB tremolo the gain stays under about 5.5 dB).
 - **Match loudness** (on by default): contrast moves energy toward the note, which by itself would just make the low
   band louder (+4.6 dB at +100 % on the test note). With Match on, the low band is trimmed back to within about ±1.5 dB, so you
   judge the definition and not the level. Switch it off if you want the raw boost.
@@ -23,7 +23,9 @@ so it can tell the note from the stuff between the harmonics.
   Low-End Definition on the bass, pick the kick track as the sidechain source). Where the kick masks the bass, the bass is
   ducked per frequency (up to 12 dB at 100 %), but the **note's own harmonics are protected** (the pitch tracker knows where
   they are), so the duck falls on the mud and on the kick's range, not on the bass note itself. It starts a few ms before the kick
-  and lets go over about 45 ms. With no sidechain connected, or at 0 %, nothing changes.
+  and lets go over about 45 ms. With no sidechain connected, or at 0 %, nothing changes. A kick that is only bleed (below about
+  -70 dBFS) is ignored, and if the sidechain turns out to carry the same signal as the input (the bass picked as its own sidechain)
+  the duck switches itself off and the footer says so.
 - **Kick mode**: *Simple* ducks each frequency in proportion to the kick's share of the energy there. *Masking* asks which bass
   components actually cover the kick up and ducks just enough to uncover it (up to 12 dB at Kick 100 %): the spectra are spread through
   auditory filters (roex, ERB widths), a tonal bass masks only about 14 dB down (5 dB if it is noisy), a kick that is only
@@ -76,7 +78,7 @@ output, plus a 5-second history) and the punch/sustain gain.
   louder than its fundamental, and a heavily driven bass: 98-100 % of note time tracked on the right octave, no octave errors.
 - Contrast +100 % on a held note with mud between its harmonics: the fundamental gains 5.8 dB and the mud loses 3.0 dB relative to the
   2nd harmonic; -100 % does the reverse. Definition 74 % to 92 %. A pure sine gets 0.00 dB of boost.
-- Punch ±100 %: attack vs body +6.7 / -6.0 dB. Sustain ±100 %: body +2.8 / -1.9 dB with the attack unchanged.
+- Punch ±100 %: attack vs body +6.6 / -5.9 dB. Sustain ±100 %: body +3.2 / -2.2 dB with the attack unchanged.
 - The gain moves at most 1.9 dB per ms (punch + sustain + contrast all up); what the plug-in adds never jumps; at default
   settings the output peak rises 1.5 to 2.9 dB on those test basses (mostly the punch pulse).
 - CPU: about 1.5 % of one core (stereo, 48 kHz).
