@@ -17,7 +17,8 @@
 //  * Kick awareness (optional sidechain): a spectral duck of the bass against the kick, per frequency bin of a short-time
 //    spectrum of the low band, with the note's own harmonics protected (the pitch tracker says where they are). It is
 //    added to the output as a difference signal, inside the look-ahead, so it costs no extra delay. A running
-//    kick/bass correlation reports whether the two partly cancel, and can flip the bass polarity.
+//    Masking mode asks instead which bass components mask the kick (roex auditory filters, tonality offset, equal-loudness
+//    weighting) and ducks just enough to uncover it. A running kick/bass correlation reports whether the two partly cancel, and can flip the bass polarity.
 //
 // All state advances sample by sample and the control logic runs every kSub samples, so the output does not
 // depend on the host's block size.
@@ -41,6 +42,7 @@ struct Params
     bool match = true;      // keep the low band's loudness: contrast moves energy around, it should not just add level
     float kick = 0.6f;      // 0..1  how far the bass is ducked (up to 12 dB) where the kick masks it; needs a sidechain
     int align = 0;          // 0 = only report the kick/bass polarity, 1 = flip the bass polarity when that helps
+    int kickMode = 0;       // 0 = Simple (kick's share of each bin), 1 = Masking (duck only what actually masks the kick)
 };
 
 // 512-point complex FFT (radix 2), in doubles
@@ -138,6 +140,21 @@ public:
         kMax_ = std::min (Fft512::N / 2 - 2, (int) std::ceil (380.0 / binHz_));
         dk_.assign (kRing, 0.0f);
         dd_.assign (kRing, 0.0f);
+        // auditory-filter spreading between analysis bins (roex, Glasberg-Moore ERB), lower side shallower
+        const int nb = kMax_ + 2;
+        wm_.assign ((size_t) nb * (size_t) nb, 0.0f);
+        eq_.assign ((size_t) nb, 1.0f);
+        for (int j = 0; j < nb; ++j)
+        {
+            const double fj = std::max (30.0, j * binHz_), erb = 24.7 * (4.37 * fj / 1000.0 + 1.0), p = 4.0 * fj / erb;
+            for (int i = 0; i < nb; ++i)
+            {
+                const double fi = i * binHz_, g = std::fabs (fi - fj) / fj, pp = fi < fj ? 0.75 * p : p;
+                wm_[(size_t) j * (size_t) nb + (size_t) i] = (float) ((1.0 + pp * g) * std::exp (-pp * g));
+            }
+            const double f4 = std::pow (80.0 / fj, 4.0);
+            eq_[(size_t) j] = (float) (0.4 + 0.6 / std::sqrt (1.0 + f4)); // the sub matters less to the ear (and to small speakers)
+        }
         antBlk_ = std::max (1, (int) std::lround (0.004 * sr_ / kSub));
         dsize_ = 1;
         while (dsize_ < lat_ + 4096)
@@ -596,21 +613,66 @@ private:
             raw[k] = pk / (pb + pk + 1e-12);
         }
         const double depth = 12.0 * std::clamp ((double) prm_.kick, 0.0, 1.0);
-        const double sigma = 0.9 * binHz_;
+        const double resHz = fsd_ / Ns_; // one resolution cell of the window: a gain feature narrower than this smears onto its neighbours
         double deepest = 0.0;
+        // Masking mode: which bass components cover up the kick? Excitation of each analysis bin through the auditory filter.
+        double need[Fft512::N / 2 + 2];
+        for (int k = 0; k <= kMax + 1; ++k)
+            need[k] = 0.0;
+        if (prm_.kickMode == 1)
+        {
+            const int nb = kMax + 2;
+            double pbv[Fft512::N / 2 + 2], pkv[Fft512::N / 2 + 2], kpeak = 0.0, sumB = 0.0, logB = 0.0;
+            for (int k = 0; k < nb; ++k)
+            {
+                pbv[k] = br[k] * br[k] + bi[k] * bi[k];
+                pkv[k] = kr[k] * kr[k] + ki[k] * ki[k];
+                kpeak = std::max (kpeak, pkv[k]);
+                if (k >= 1 && k <= kMax)
+                {
+                    sumB += pbv[k];
+                    logB += std::log (pbv[k] + 1e-9);
+                }
+            }
+            // a tonal masker covers up less than a noisy one: tone-masking-noise offset 14 dB, noise-masking-noise 5 dB
+            const double sfm = std::exp (logB / kMax) / (sumB / kMax + 1e-9);
+            const double offsetDb = 5.0 + 9.0 * (1.0 - std::clamp (sfm, 0.0, 1.0));
+            const double a = std::pow (10.0, -offsetDb / 10.0);
+            for (int j = 1; j <= kMax; ++j)
+            {
+                double eb = 0.0, ek = 0.0;
+                const float* w = &wm_[(size_t) j * (size_t) nb];
+                for (int i = 1; i <= kMax; ++i)
+                {
+                    eb += pbv[i] * w[i];
+                    ek += pkv[i] * w[i];
+                }
+                // only where the kick is really there, and only as much as is needed to uncover it (plus 3 dB)
+                const double sig = std::clamp ((10.0 * std::log10 (ek / (kpeak + 1e-12) + 1e-12) + 22.0) / 12.0, 0.0, 1.0);
+                const double red = 10.0 * std::log10 ((eb * a + 1e-12) / (ek + 1e-12)) + 3.0;
+                need[j] = std::clamp (red, 0.0, depth) * sig * sig * (3.0 - 2.0 * sig) * eq_[(size_t) j];
+            }
+        }
         for (int k = 1; k <= kMax; ++k)
         {
-            const double m = 0.25 * raw[k - 1] + 0.5 * raw[k] + 0.25 * raw[k + 1]; // a little smoothing across frequency
-            double t = std::clamp ((m - 0.30) / 0.55, 0.0, 1.0);
-            const double duck = t * t * (3.0 - 2.0 * t);
+            double duckDb;
+            if (prm_.kickMode == 1)
+                duckDb = 0.25 * need[std::max (1, k - 1)] + 0.5 * need[k] + 0.25 * need[std::min (kMax, k + 1)];
+            else
+            {
+                const double m = 0.25 * raw[k - 1] + 0.5 * raw[k] + 0.25 * raw[k + 1]; // a little smoothing across frequency
+                const double t = std::clamp ((m - 0.30) / 0.55, 0.0, 1.0);
+                duckDb = depth * t * t * (3.0 - 2.0 * t);
+            }
             double prot = 0.0;
             if (f0 > 0.0f)
                 for (int h = 1; h <= 5; ++h)
                 {
-                    const double dist = std::fabs (k * binHz_ - h * f0) / sigma;
-                    prot = std::max (prot, std::exp (-dist * dist));
+                    // flat inside about 0.6 of a resolution cell (the core of the note's own main lobe), then falling away
+                    const double over = std::max (0.0, std::fabs (k * binHz_ - h * f0) - 0.6 * resHz) / (0.5 * resHz);
+                    prot = std::max (prot, std::exp (-over * over));
                 }
-            tgt[k] = -depth * duck * (1.0 - 0.85 * prot);
+            tgt[k] = -duckDb * (1.0 - 0.95 * prot);
         }
         // in time: duck quickly, let go over ~45 ms
         const double rel = 1.0 - std::exp (-(double) hopS_ / (0.045 * fsd_));
@@ -854,7 +916,7 @@ private:
     int64_t lastFrameEnd_ = -1;
     int krFrames_ = 0;
     std::vector<double> sw_;
-    std::vector<float> dk_, dd_;
+    std::vector<float> dk_, dd_, wm_, eq_;
     std::array<double, Fft512::N / 2 + 2> gKick_ {};
     std::array<double, 2 * kLag + 1> cc_ {};
     float kickDuckDb_ = 0.0f, alignDb_ = 0.0f, alignLagMs_ = 0.0f, alignRho_ = 0.0f;

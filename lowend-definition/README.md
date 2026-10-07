@@ -24,6 +24,13 @@ so it can tell the note from the stuff between the harmonics.
   ducked per frequency (up to 12 dB at 100 %), but the **note's own harmonics are protected** (the pitch tracker knows where
   they are), so the duck falls on the mud and on the kick's range, not on the bass note itself. It starts a few ms before the kick
   and lets go over about 45 ms. With no sidechain connected, or at 0 %, nothing changes.
+- **Kick mode**: *Simple* ducks each frequency in proportion to the kick's share of the energy there. *Masking* asks which bass
+  components actually cover the kick up and ducks just enough to uncover it (up to 12 dB at Kick 100 %): the spectra are spread through
+  auditory filters (roex, ERB widths), a tonal bass masks only about 14 dB down (5 dB if it is noisy), a kick that is only
+  a few dB below the bass counts as audible, and the sub is weighted down because the ear (and AirPods) hear it less. In practice
+  Masking does **much less** than Simple when the kick is as loud as the bass, and acts mainly when the bass swamps the kick.
+  It is a textbook masking model, not Gullfoss's (which is unpublished), and I could only test it on synthetic signals, so it is
+  there to be A/B'd by ear. Default: Simple.
 - **Auto polarity**: a running correlation of kick and bass (gathered only while both play) says whether they partly cancel.
   The footer shows the summed level against the difference (positive = they add, negative = they fight) and the lag at which
   the bass would line up best. With Auto polarity on, the whole bass polarity is flipped (30 ms crossfade, with hysteresis)
@@ -71,10 +78,15 @@ output, plus a 5-second history) and the punch/sustain gain.
   settings the output peak rises 1.5 to 2.9 dB on those test basses (mostly the punch pulse).
 - CPU: about 1.5 % of one core (stereo, 48 kHz).
 - Output identical for block sizes 1 to 4096; works at 44.1-192 kHz; survives NaN, DC, silence.
-- Kick (synthetic, a 64 Hz mud on the bass against a 64 Hz kick burst): the mud is ducked 8.7 dB during the hit, the note's
-  fundamental moves -1.1 dB, and between hits the mud is untouched (-0.0 dB). Bit-exact delay at Kick 0 % and with no sidechain.
-  Through the real processor with a stereo sidechain bus: mud -9.7 dB, fundamental -1.1 dB. The duck starts about 40 ms before the
+- Kick (synthetic, a 64 Hz mud on the bass against a 64 Hz kick burst): the mud is ducked 5.7 dB during the hit, the note's
+  fundamental moves -0.3 dB, and between hits the mud is untouched (-0.0 dB). Bit-exact delay at Kick 0 % and with no sidechain.
+  Through the real processor with a stereo sidechain bus: mud -6.2 dB, fundamental -0.7 dB. The duck starts about 40 ms before the
   hit and is down by about 25 dB (re the bass) 200 ms after it.
 - Polarity: an opposite-phase bass is detected (-19 dB sum vs difference), flipped, and kick+bass then sum 18 dB louder; an
   in-phase bass is left alone; with Auto polarity off it only reports.
 - Output identical for block sizes 1 to 4096 with a sidechain.
+- Masking mode (synthetic): a 62 Hz component 30+ dB over a 62 Hz kick is ducked 6.3 dB (Simple: 0 dB); a faint component
+  that does not cover a loud kick is left alone (-0.2 dB; Simple ducks it 5.8 dB); a kick only a few dB under the bass is not
+  masked, so nothing happens (-0.6 dB). The note's own fundamental moves -1.4 dB in the first case. Bit-exact at Kick 0 %,
+  identical across block sizes. To keep the note safe, harmonics 1-5 are protected within about 8 Hz and fade out over the next 7 Hz
+  (the window cannot resolve finer than about 14 Hz), which also trims the Simple-mode duck (mud under a hit: -5.7 dB, was -8.7 dB).

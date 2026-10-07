@@ -18,6 +18,13 @@ LedLookAndFeel::LedLookAndFeel()
     setColour (juce::Slider::textBoxTextColourId, kText);
     setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
     setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
+    setColour (juce::ComboBox::backgroundColourId, kPanel2);
+    setColour (juce::ComboBox::textColourId, kText);
+    setColour (juce::ComboBox::outlineColourId, kLine);
+    setColour (juce::ComboBox::arrowColourId, kDim);
+    setColour (juce::PopupMenu::backgroundColourId, kPanel2);
+    setColour (juce::PopupMenu::textColourId, kText);
+    setColour (juce::PopupMenu::highlightedBackgroundColourId, kAccent.darker (0.5f));
     setColour (juce::TextButton::textColourOffId, kText);
     setColour (juce::TextButton::textColourOnId, juce::Colours::white);
 }
@@ -85,6 +92,9 @@ LowEndDefinitionEditor::LowEndDefinitionEditor (LowEndDefinitionProcessor& p) : 
     addKnob (range, "range", "RANGE");
     match.setClickingTogglesState (true);
     align.setClickingTogglesState (true);
+    kickMode.addItemList ({ "Kick: Simple", "Kick: Masking" }, 1);
+    addAndMakeVisible (kickMode);
+    kickModeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "kickmode", kickMode);
     addAndMakeVisible (align);
     alignAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "align", align);
     addAndMakeVisible (match);
@@ -109,6 +119,8 @@ void LowEndDefinitionEditor::resized()
     match.setBounds (head.removeFromRight (130).reduced (0, 3));
     head.removeFromRight (6);
     align.setBounds (head.removeFromRight (120).reduced (0, 3));
+    head.removeFromRight (6);
+    kickMode.setBounds (head.removeFromRight (130).reduced (0, 3));
     r.removeFromTop (8);
     auto knobs = r.removeFromTop (118);
     const int w = knobs.getWidth() / 5;

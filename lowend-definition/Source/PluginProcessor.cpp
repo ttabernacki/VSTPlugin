@@ -28,6 +28,7 @@ APVTS::ParameterLayout LowEndDefinitionProcessor::createLayout()
                                                   Attr().withStringFromValueFunction ([] (float v, int) { return String (roundToInt (v * 100.0f)) + " %"; })
                                                       .withValueFromStringFunction ([] (const String& t) { return t.getFloatValue() / 100.0f; })));
     l.add (std::make_unique<AudioParameterBool> (ParameterID { "align", 1 }, "Auto polarity", false));
+    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "kickmode", 1 }, "Kick mode", StringArray { "Simple", "Masking" }, 0));
     return l;
 }
 
@@ -45,6 +46,7 @@ LowEndDefinitionProcessor::LowEndDefinitionProcessor()
     pMatch = apvts.getRawParameterValue ("match");
     pKick = apvts.getRawParameterValue ("kick");
     pAlign = apvts.getRawParameterValue ("align");
+    pKickMode = apvts.getRawParameterValue ("kickmode");
     for (int i = 0; i < kHist; ++i)
     {
         hIn[i] = hOut[i] = -1.0f;
@@ -107,6 +109,7 @@ void LowEndDefinitionProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
     p.match = pMatch->load() > 0.5f;
     p.kick = pKick->load();
     p.align = pAlign->load() > 0.5f ? 1 : 0;
+    p.kickMode = (int) pKickMode->load();
     core.setParams (p);
     core.process (buffer.getArrayOfWritePointers(), nCh, n, scCh > 0 ? scPtr : nullptr, scCh);
 

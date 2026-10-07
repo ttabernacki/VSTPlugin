@@ -462,6 +462,83 @@ int main()
         CHECK (! dmanual.polarityFlipped() && dmanual.alignDb() < -3.0 && md < 1e-7, "align off: it reports the cancellation (%.1f dB) and changes nothing", dmanual.alignDb());
     }
 
+
+    std::printf("Kick, masking mode\n");
+    {
+        auto kickBursts = [&] (size_t n, double hz, double level) {
+            std::vector<float> k (n, 0.0f);
+            for (int b = 0; b < 6; ++b)
+            {
+                const size_t n0 = (size_t) ((0.5 + 0.6 * b) * kFs);
+                for (size_t i = 0; i < (size_t) (0.18 * kFs) && n0 + i < k.size(); ++i)
+                {
+                    const double t = (double) i / kFs;
+                    k[n0 + i] = (float) (level * std::exp (-t / 0.06) * std::sin (2 * kPi * hz * t));
+                }
+            }
+            return k;
+        };
+        Params simple = neutral, mask = neutral;
+        simple.kick = mask.kick = 1.0f;
+        mask.kickMode = 1;
+        const double f0 = 41.2, tHit = 0.5 + 0.6 * 3 + 0.04, tQuiet = 0.5 + 0.6 * 3 + 0.40;
+
+        // 1. mud at 64 Hz that is far louder than the 64 Hz kick under it (over 30 dB): it covers the kick up
+        {
+            const auto bass = held (kFs, f0, 4.0, 64.0, 0.4);
+            const auto kick = kickBursts (bass.size(), 64.0, 0.005);
+            Definition d;
+            d.prepare (kFs);
+            const int lat = d.latencySamples();
+            const auto o = run (d, bass, 480, mask, false, &kick);
+            const double sh = (double) lat / kFs;
+            const double mudHit = ampDb (o.out, kFs, 64.0, tHit + sh, 6) - ampDb (bass, kFs, 64.0, tHit, 6);
+            const double fundHit = ampDb (o.out, kFs, f0, tHit + sh, 4) - ampDb (bass, kFs, f0, tHit, 4);
+            const double mudQuiet = ampDb (o.out, kFs, 64.0, tQuiet + sh, 8) - ampDb (bass, kFs, 64.0, tQuiet, 8);
+            CHECK (mudHit < -3.0 && std::fabs (fundHit) < 1.5 && std::fabs (mudQuiet) < 1.0,
+                   "masking mode: mud under the kick %+.1f dB, the note %+.1f dB, between hits %+.1f dB", mudHit, fundHit, mudQuiet);
+            Params off = mask;
+            off.kick = 0.0f;
+            Definition d0;
+            d0.prepare (kFs);
+            const auto z = run (d0, bass, 480, off, false, &kick);
+            double md = 0;
+            for (size_t i = (size_t) lat; i < bass.size(); ++i)
+                md = std::max (md, (double) std::fabs (z.out[i] - bass[i - (size_t) lat]));
+            Definition d4;
+            d4.prepare (kFs);
+            const auto b4 = run (d4, bass, 333, mask, false, &kick);
+            double m4 = 0;
+            for (size_t i = 0; i < bass.size(); ++i)
+                m4 = std::max (m4, (double) std::fabs (b4.out[i] - o.out[i]));
+            CHECK (md < 1e-7 && m4 == 0.0, "masking mode: bit-exact at Kick 0 %% (%.1e), identical across block sizes (%.1e)", md, m4);
+        }
+
+        // 2. only what masks the kick: a component 20 dB above the kick covers it up, a faint one does not,
+        //    and a kick only a few dB below the bass is not masked either (a tone covers noise only from about 14 dB up)
+        for (int scenario = 0; scenario < 3; ++scenario)
+        {
+            const double mudAmp = scenario == 0 ? 0.4 : (scenario == 1 ? 0.05 : 0.3), kickLevel = scenario == 0 ? 0.005 : (scenario == 1 ? 0.8 : 0.3);
+            const auto bass = scenario == 1 ? held (kFs, f0, 4.0, 62.0, mudAmp, 0.0, 0.0) : held (kFs, f0, 4.0, 62.0, mudAmp);
+            const auto kick = kickBursts (bass.size(), 62.0, kickLevel);
+            Definition dm, ds;
+            dm.prepare (kFs);
+            ds.prepare (kFs);
+            const double sh = (double) dm.latencySamples() / kFs;
+            const auto om = run (dm, bass, 480, mask, false, &kick), os = run (ds, bass, 480, simple, false, &kick);
+            const double ref = ampDb (bass, kFs, 62.0, tHit, 6);
+            const double dMask = ampDb (om.out, kFs, 62.0, tHit + sh, 6) - ref, dSimple = ampDb (os.out, kFs, 62.0, tHit + sh, 6) - ref;
+            if (scenario == 0)
+                CHECK (dMask < -3.0, "a loud 62 Hz component far over the kick covers it: masking mode ducks it %+.1f dB (simple %+.1f dB)", dMask, dSimple);
+            else if (scenario == 1)
+                CHECK (std::fabs (dMask) < 1.5 && dSimple < -3.0,
+                       "a faint 62 Hz component that does not cover the kick: masking mode leaves it (%+.1f dB), simple mode ducks it (%+.1f dB)", dMask, dSimple);
+            else
+                CHECK (std::fabs (dMask) < 1.5,
+                       "a kick only a few dB under the bass is not masked: masking mode leaves it (%+.1f dB; simple mode %+.1f dB)", dMask, dSimple);
+        }
+    }
+
     std::printf ("Smoothness on note changes\n");
     {
         double total;
