@@ -81,7 +81,9 @@ output, plus a 5-second history) and the punch/sustain gain.
 - Punch ±100 %: attack vs body +6.6 / -5.9 dB. Sustain ±100 %: body +3.2 / -2.2 dB with the attack unchanged.
 - The gain moves at most 1.9 dB per ms (punch + sustain + contrast all up); what the plug-in adds never jumps; at default
   settings the output peak rises 1.5 to 2.9 dB on those test basses (mostly the punch pulse).
-- CPU: about 1.5 % of one core (stereo, 48 kHz).
+- CPU: about 0.5 % of one core with no sidechain connected and 0.8 % with one (stereo, 48 kHz; measured on a desktop CPU, so
+  read it as a ratio). The pitch tracker is the main cost; its difference function is written so the compiler can use SIMD, and the
+  spectral stage skips its transforms while there is nothing to duck.
 - Output identical for block sizes 1 to 4096; works at 44.1-192 kHz; survives NaN, DC, silence.
 - Kick (synthetic, a 64 Hz mud on the bass against a 64 Hz kick burst): the mud is ducked 6.4 dB during the hit, the note's
   fundamental moves -0.8 dB, and between hits the mud is untouched (-0.0 dB). Bit-exact delay at Kick 0 % and with no sidechain.

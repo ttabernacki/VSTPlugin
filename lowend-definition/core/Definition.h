@@ -113,7 +113,7 @@ public:
         tauMax_ = (int) std::ceil (fsd_ / 30.0) + 2;
         tauMin_ = std::max (4, (int) std::floor (fsd_ / 260.0));
         N_ = 2 * tauMax_;
-        hopD_ = std::max (4, (int) std::lround (0.002 * fsd_));
+        hopD_ = std::max (4, (int) std::lround (0.004 * fsd_));
         hopIn_ = (int64_t) hopD_ * D_;
         W_ = (int64_t) N_ * D_;
         // spectral stage: a ~72 ms window with 87.5 % overlap on the decimated low band; its output is final one window
@@ -455,13 +455,25 @@ private:
             diff_[0] = 0;
             for (int tau = 1; tau <= tauMax_; ++tau)
             {
-                double s = 0;
-                for (int j = 0; j < Wd; ++j)
+                // four independent sums: the compiler can turn this into SIMD (a single chain of additions cannot be)
+                const float* w = win_.data();
+                const float* v = w + tau;
+                float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
+                int j = 0;
+                for (; j + 4 <= Wd; j += 4)
                 {
-                    const float d = win_[(size_t) j] - win_[(size_t) (j + tau)];
-                    s += (double) d * d;
+                    const float d0 = w[j] - v[j], d1 = w[j + 1] - v[j + 1], d2 = w[j + 2] - v[j + 2], d3 = w[j + 3] - v[j + 3];
+                    s0 += d0 * d0;
+                    s1 += d1 * d1;
+                    s2 += d2 * d2;
+                    s3 += d3 * d3;
                 }
-                diff_[(size_t) tau] = (float) s;
+                for (; j < Wd; ++j)
+                {
+                    const float d0 = w[j] - v[j];
+                    s0 += d0 * d0;
+                }
+                diff_[(size_t) tau] = (s0 + s1) + (s2 + s3);
             }
             double run = 0;
             cmnd_[0] = 1.0f;
@@ -602,6 +614,25 @@ private:
     void spectralFrame (int64_t last)
     {
         const int N = Fft512::N, Ns = Ns_;
+        // Nothing to duck (Kick at 0, no kick playing, or a sidechain that is the bass) and the last duck fully released: this
+        // frame would add exactly zero, so skip the transforms (about a fifth of the work when no sidechain is connected).
+        {
+            const double lvlDb = 10.0 * std::log10 (pk_ + 1e-12);
+            const double depthNow = selfSc_ ? 0.0 : 12.0 * std::clamp ((double) prm_.kick, 0.0, 1.0) * std::clamp ((lvlDb + 72.0) / 10.0, 0.0, 1.0);
+            bool released = depthNow <= 0.0;
+            for (int k = 1; released && k <= kMax_; ++k)
+                released = gKick_[(size_t) k] == 0.0;
+            if (released)
+            {
+                for (int j = Ns - hopS_; j < Ns; ++j)
+                    dd_[(size_t) ((last - (Ns - 1) + j) & (kRing - 1))] = 0.0f;
+                kickDuckDb_ *= 0.5f;
+                if (kickDuckDb_ < 1e-3f)
+                    kickDuckDb_ = 0.0f;
+                lastFrameEnd_ = last;
+                return;
+            }
+        }
         static thread_local double br[Fft512::N], bi[Fft512::N], kr[Fft512::N], ki[Fft512::N];
         for (int j = 0; j < N; ++j)
         {
@@ -703,6 +734,9 @@ private:
         const double rel = 1.0 - std::exp (-(double) hopS_ / (0.045 * fsd_));
         for (int k = 1; k <= kMax; ++k)
             gKick_[(size_t) k] += (tgt[k] < gKick_[(size_t) k] ? 0.7 : rel) * (tgt[k] - gKick_[(size_t) k]);
+        for (int k = 1; k <= kMax; ++k)
+            if (tgt[k] == 0.0 && std::fabs (gKick_[(size_t) k]) < 1e-4)
+                gKick_[(size_t) k] = 0.0; // fully released: lets the idle shortcut above engage
         static thread_local double ds_r[Fft512::N], ds_i[Fft512::N];
         for (int j = 0; j < N; ++j)
             ds_r[j] = ds_i[j] = 0.0;
