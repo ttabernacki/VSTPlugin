@@ -2,16 +2,9 @@
 
 #include "PluginProcessor.h"
 
-#include <juce_audio_utils/juce_audio_utils.h>
+#include "../../bass-common/BassUi.h"
 
-class BnlLookAndFeel : public juce::LookAndFeel_V4
-{
-public:
-    BnlLookAndFeel();
-    void drawRotarySlider (juce::Graphics&, int x, int y, int w, int h, float pos, float startAngle, float endAngle,
-                           juce::Slider&) override;
-    void drawButtonBackground (juce::Graphics&, juce::Button&, const juce::Colour&, bool highlighted, bool down) override;
-};
+#include <juce_audio_utils/juce_audio_utils.h>
 
 class BassLevelerEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
@@ -32,15 +25,9 @@ private:
                 peer->setCurrentRenderingEngine (0);
     }
 
-    struct Knob
-    {
-        juce::Slider slider { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::TextBoxBelow };
-        juce::Label label;
-        std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
-    };
-    void addKnob (Knob&, const juce::String& id, const juce::String& text);
+    using Knob = bassui::Knob;
 
-    BnlLookAndFeel laf;
+    bassui::KnobLookAndFeel laf;
     BassLevelerProcessor& proc;
     Knob amount, boost, cut, speed;
     juce::Rectangle<int> chart;

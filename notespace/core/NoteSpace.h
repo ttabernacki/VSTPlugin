@@ -200,7 +200,8 @@ public:
                 if (! std::isfinite (x[c]))
                     x[c] = 0.0;
             }
-            trk_.push (0.5 * (x[0] + x[1]));
+            const double xm = 0.5 * (x[0] + x[1]);
+            trk_.push (xm);
             double kin = 0.0;
             if (sc != nullptr && scCh > 0)
             {
@@ -208,7 +209,8 @@ public:
                     kin += sc[c][i] / scCh;
                 if (! std::isfinite (kin))
                     kin = 0.0;
-                scSame_ += (kin == x[0] ? 1.0 : 0.0) * (1.0 / 4096.0) - scSame_ * (1.0 / 4096.0);
+                if (kin != 0.0 || xm != 0.0) // two silences say nothing about whether the tracks are the same
+                    scSame_ += ((kin == xm ? 1.0 : 0.0) - scSame_) * (1.0 / 4096.0);
             }
             else
                 scSame_ -= scSame_ * (1.0 / 4096.0);

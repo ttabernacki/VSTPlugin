@@ -2,8 +2,7 @@
 
 namespace
 {
-const juce::Colour kBg (0xff101418), kPanel (0xff171d23), kPanel2 (0xff1d252d), kLine (0xff2c3640), kAccent (0xff4fd1c5),
-    kWarm (0xfff6ad55), kText (0xffdde6ee), kDim (0xff7b8a97);
+using namespace bassui;
 
 juce::String noteName (float hz)
 {
@@ -13,63 +12,18 @@ juce::String noteName (float hz)
 }
 } // namespace
 
-NspLookAndFeel::NspLookAndFeel()
-{
-    setColour (juce::Slider::textBoxTextColourId, kText);
-    setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
-    setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
-}
-
-void NspLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h, float pos, float startAngle, float endAngle,
-                                       juce::Slider& s)
-{
-    const auto b = juce::Rectangle<float> ((float) x, (float) y, (float) w, (float) h).reduced (4.0f);
-    const float r = 0.5f * std::min (b.getWidth(), b.getHeight());
-    const auto c = b.getCentre();
-    const float arcR = r - 3.0f, angle = startAngle + pos * (endAngle - startAngle);
-    const bool bipolar = s.getMinimum() < 0.0 && s.getMaximum() > 0.0;
-    const float from = bipolar ? startAngle + 0.5f * (endAngle - startAngle) : startAngle;
-    juce::Path track, value;
-    track.addCentredArc (c.x, c.y, arcR, arcR, 0.0f, startAngle, endAngle, true);
-    value.addCentredArc (c.x, c.y, arcR, arcR, 0.0f, from, angle, true);
-    g.setColour (kLine);
-    g.strokePath (track, juce::PathStrokeType (4.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-    g.setColour (kAccent);
-    g.strokePath (value, juce::PathStrokeType (4.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-    const float ir = arcR - 7.0f;
-    g.setColour (kPanel2);
-    g.fillEllipse (c.x - ir, c.y - ir, 2 * ir, 2 * ir);
-    g.setColour (kText);
-    g.drawLine (c.x + ir * 0.35f * std::sin (angle), c.y - ir * 0.35f * std::cos (angle), c.x + ir * 0.9f * std::sin (angle),
-                c.y - ir * 0.9f * std::cos (angle), 2.0f);
-}
-
-void NoteSpaceEditor::addKnob (Knob& k, const juce::String& id, const juce::String& text)
-{
-    k.slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 72, 16);
-    auto* prm = proc.apvts.getParameter (id);
-    k.slider.setDoubleClickReturnValue (true, prm->convertFrom0to1 (prm->getDefaultValue()));
-    addAndMakeVisible (k.slider);
-    k.label.setText (text, juce::dontSendNotification);
-    k.label.setJustificationType (juce::Justification::centred);
-    k.label.setColour (juce::Label::textColourId, kDim);
-    k.label.setFont (juce::FontOptions (11.0f, juce::Font::bold));
-    addAndMakeVisible (k.label);
-    k.attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, id, k.slider);
-}
-
 NoteSpaceEditor::NoteSpaceEditor (NoteSpaceProcessor& p) : juce::AudioProcessorEditor (&p), proc (p)
 {
     setLookAndFeel (&laf);
-    addKnob (contrast, "contrast", "CONTRAST");
-    addKnob (tone, "tonelock", "TONE LOCK");
-    addKnob (fund, "fundamental", "FUNDAMENTAL");
-    addKnob (repair, "repair", "REPAIR");
-    addKnob (translate, "translate", "TRANSLATE");
-    addKnob (range, "range", "RANGE");
-    addKnob (punch, "punch", "PUNCH");
-    addKnob (sustain, "sustain", "SUSTAIN");
-    addKnob (kick, "kick", "KICK");
+    contrast.setup (*this, proc.apvts, "contrast", "CONTRAST");
+    tone.setup (*this, proc.apvts, "tonelock", "TONE LOCK");
+    fund.setup (*this, proc.apvts, "fundamental", "FUNDAMENTAL");
+    repair.setup (*this, proc.apvts, "repair", "REPAIR");
+    translate.setup (*this, proc.apvts, "translate", "TRANSLATE");
+    range.setup (*this, proc.apvts, "range", "RANGE");
+    punch.setup (*this, proc.apvts, "punch", "PUNCH");
+    sustain.setup (*this, proc.apvts, "sustain", "SUSTAIN");
+    kick.setup (*this, proc.apvts, "kick", "KICK");
     setResizable (true, true);
     setResizeLimits (720, 400, 1300, 708);
     getConstrainer()->setFixedAspectRatio (860.0 / 468.0);

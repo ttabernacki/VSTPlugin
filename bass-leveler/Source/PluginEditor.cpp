@@ -2,8 +2,7 @@
 
 namespace
 {
-const juce::Colour kBg (0xff101418), kPanel (0xff171d23), kPanel2 (0xff1d252d), kLine (0xff2c3640), kAccent (0xff4fd1c5),
-    kWarm (0xfff6ad55), kText (0xffdde6ee), kDim (0xff7b8a97);
+using namespace bassui;
 
 juce::String noteName (int midi)
 {
@@ -12,83 +11,13 @@ juce::String noteName (int midi)
 }
 } // namespace
 
-BnlLookAndFeel::BnlLookAndFeel()
-{
-    setColour (juce::Slider::textBoxTextColourId, kText);
-    setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
-    setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
-    setColour (juce::ComboBox::backgroundColourId, kPanel2);
-    setColour (juce::ComboBox::textColourId, kText);
-    setColour (juce::ComboBox::outlineColourId, kLine);
-    setColour (juce::ComboBox::arrowColourId, kDim);
-    setColour (juce::PopupMenu::backgroundColourId, kPanel2);
-    setColour (juce::PopupMenu::textColourId, kText);
-    setColour (juce::PopupMenu::highlightedBackgroundColourId, kAccent.darker (0.5f));
-    setColour (juce::TextButton::textColourOffId, kText);
-    setColour (juce::TextButton::textColourOnId, juce::Colours::white);
-}
-
-void BnlLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h, float pos, float startAngle, float endAngle,
-                                       juce::Slider&)
-{
-    const auto b = juce::Rectangle<float> ((float) x, (float) y, (float) w, (float) h).reduced (4.0f);
-    const float r = 0.5f * std::min (b.getWidth(), b.getHeight());
-    const auto c = b.getCentre();
-    const float arcR = r - 3.0f, angle = startAngle + pos * (endAngle - startAngle);
-    juce::Path track, value;
-    track.addCentredArc (c.x, c.y, arcR, arcR, 0.0f, startAngle, endAngle, true);
-    value.addCentredArc (c.x, c.y, arcR, arcR, 0.0f, startAngle, angle, true);
-    g.setColour (kLine);
-    g.strokePath (track, juce::PathStrokeType (4.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-    g.setColour (kAccent);
-    g.strokePath (value, juce::PathStrokeType (4.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-    const float ir = arcR - 7.0f;
-    g.setColour (kPanel2);
-    g.fillEllipse (c.x - ir, c.y - ir, 2 * ir, 2 * ir);
-    g.setColour (kText);
-    g.drawLine (c.x + ir * 0.35f * std::sin (angle), c.y - ir * 0.35f * std::cos (angle), c.x + ir * 0.9f * std::sin (angle),
-                c.y - ir * 0.9f * std::cos (angle), 2.0f);
-}
-
-void BnlLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& b, const juce::Colour&, bool highlighted, bool down)
-{
-    const auto r = b.getLocalBounds().toFloat().reduced (0.5f);
-    const bool on = b.getToggleState();
-    juce::Colour fill = on ? kAccent.darker (0.4f) : kPanel2;
-    if (highlighted)
-        fill = fill.brighter (0.1f);
-    if (down)
-        fill = fill.brighter (0.2f);
-    g.setColour (fill);
-    g.fillRoundedRectangle (r, 6.0f);
-    g.setColour (on ? fill.brighter (0.3f) : kLine);
-    g.drawRoundedRectangle (r, 6.0f, 1.0f);
-}
-
-void BassLevelerEditor::addKnob (Knob& k, const juce::String& id, const juce::String& text)
-{
-    k.slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 72, 16);
-    k.slider.setColour (juce::Slider::textBoxTextColourId, kText);
-    k.slider.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
-    k.slider.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
-    auto* prm = proc.apvts.getParameter (id);
-    k.slider.setDoubleClickReturnValue (true, prm->convertFrom0to1 (prm->getDefaultValue()));
-    addAndMakeVisible (k.slider);
-    k.label.setText (text, juce::dontSendNotification);
-    k.label.setJustificationType (juce::Justification::centred);
-    k.label.setColour (juce::Label::textColourId, kDim);
-    k.label.setFont (juce::FontOptions (11.0f, juce::Font::bold));
-    addAndMakeVisible (k.label);
-    k.attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, id, k.slider);
-}
-
 BassLevelerEditor::BassLevelerEditor (BassLevelerProcessor& p) : juce::AudioProcessorEditor (&p), proc (p)
 {
     setLookAndFeel (&laf);
-    addKnob (amount, "amount", "AMOUNT");
-    addKnob (boost, "boost", "MAX BOOST");
-    addKnob (cut, "cut", "MAX CUT");
-    addKnob (speed, "speed", "SPEED");
+    amount.setup (*this, proc.apvts, "amount", "AMOUNT");
+    boost.setup (*this, proc.apvts, "boost", "MAX BOOST");
+    cut.setup (*this, proc.apvts, "cut", "MAX CUT");
+    speed.setup (*this, proc.apvts, "speed", "SPEED");
     setResizable (true, true);
     setResizeLimits (560, 380, 1100, 700);
     getConstrainer()->setFixedAspectRatio (680.0 / 440.0);

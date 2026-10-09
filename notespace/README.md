@@ -24,12 +24,21 @@ a note change inside the analysis window) the processing fades out and the input
 - **Translate** (0-200 %): harmonics 2, 3 and 4 are lifted to at least 6, 9 and 12 dB below the fundamental at 100 %, and generated
   (phase-locked to the fundamental) if the bass has none, so the note keeps its pitch on small speakers and earbuds. Above 100 %
   the floor rises by up to 9 dB (+3/0/-3 dB re the fundamental at 200 %).
-- **Range** (50-1000 Hz): Contrast acts on the residual below this.
+- **Range** (50-1000 Hz): Contrast, and the kick duck, act on the residual below this.
+- **Punch** (±100 %): attacks of the low band (the note plus the residual below Range) up to +10 dB or down to -10 dB, a smooth
+  pulse (3 ms rise, 28 ms fall) placed where the attack really is although the detector fires a few ms late.
+- **Sustain** (±100 %): the body's ring-out lengthened (up to +12 dB, only while the note is really decaying, not on a mute or a
+  tremolo) or shortened. Both come from the shared `bass-common/EnvelopeShaper.h`.
+- **Kick** (0-100 %, needs the optional sidechain input): the residual is ducked up to 24 dB while the sidechain's kick plays. The
+  note is never ducked, so the kick makes room (the mud and boom around the note go) without the bass losing its pitch. The kick is
+  read 5 ms ahead, so the duck is already there at the hit; it lets go in about 80 ms. A sidechain that carries the bass itself, or a
+  kick below -70 dBFS, ducks nothing. (This replaces Low-End Definition's spectral duck: the part of that duck that mattered, keeping
+  the note's harmonics, is what the split does by construction.)
 
 The ranges are deliberately extreme, for finding the sweet spot by ear; expect to use much less.
 
 ## How it works
-1. Pitch: YIN on a decimated copy (as in Low-End Definition), read at the centre of its window. The note's phase theta(t) is the
+1. Pitch: YIN on a decimated copy (`bass-common/PitchTracker.h`, shared with the other bass plug-ins), read at the centre of its window. The note's phase theta(t) is the
    integral of the pitch (glides followed within a few ms, jumps taken at once).
 2. Each harmonic h is heterodyned down to DC (the input times e^{-j h theta}) and averaged over exactly two periods, twice (a
    triangle over four periods). An average over whole periods cancels every other harmonic exactly, and anything between harmonics
@@ -37,16 +46,23 @@ The ranges are deliberately extreme, for finding the sweet spot by ear; expect t
    The averages run on running sums, so the cost does not grow with the period.
 3. Partials = the sum of each envelope times e^{j h theta}; residual = input minus partials. Output = input + (processed partials -
    partials) + (residual gain - 1) x residual below Range, with the residual low-pass read ahead by its group delay so the cut lands
-   in phase.
+   in phase. Punch and Sustain then apply one gain to (processed note + processed residual below Range); the high residual is never
+   touched.
 
 Latency: **about 115 ms** (pitch window, the four-period average at 30 Hz, and the residual filter's alignment), reported to the host.
 CPU: about 3.5 % of one core for stereo at 48 kHz (single-core figure on a desktop CPU).
+
+## Where this sits among the other bass plug-ins
+Note Space is the flagship. Bass Note Leveler stays as a separate tool for the one thing Note Space does not do: evening out
+note-to-note level. Do not chain it before Note Space: its bells change the note's harmonics, and Note Space's Tone lock would then
+see (and undo) the changed balance. Put the Leveler after Note Space, or skip Tone lock.
 
 ## No zipper noise
 Every control value (voicing, residual gain, per-harmonic gains, attack and repair guards) glides sample by sample between control ticks
 instead of stepping every 16 samples, which would put a click train at 3 kHz on top of the bass. What the plug-in adds above 1 kHz is
 measured in the tests, against the dry signal's own energy above 1 kHz: Fundamental +6 dB -34 dB (was -14 dB before the fix), Repair 100 %
--38 dB (was -17), Contrast 100 % -79, Tone lock -45, Translate 100 % -48.
+-38 dB (was -17), Contrast 100 % -79, Tone lock -45, Translate 100 % -48. Sustain 100 % adds nothing above -30 dB, and the kick duck on
+a plucked line stays below -25 dB. Punch is gain modulation by definition (a +10 dB pulse with a 3 ms rise): about -20 dB.
 
 ## Limits
 - Monophonic bass only. Chords, or two notes ringing together, are not split (processing fades out or follows one note).
@@ -68,4 +84,10 @@ measured in the tests, against the dry signal's own energy above 1 kHz: Fundamen
 - Fundamental +6 dB: +6.00 dB, the 2nd harmonic unchanged. Repair 100 %: a fundamental beating 3 Hz against a detuned component
   wobbles 6.2 dB before, 0.3 dB after. Translate 100 % on a pure sine: harmonics 2/3/4 at -6.0/-9.0/-12.0 dB, steady.
 - A plucked line with everything on: what is added never jumps; the overall level stays put.
+- Punch +100 %: attack vs body +2 dB or more; -100 %: -1.5 dB or less. Sustain +100 %: body +1.5 dB or more with the attack within
+  1.5 dB; -100 %: the reverse.
+- Kick 100 % with a 64 Hz kick over a steady note and a 64 Hz mud tone: the residual under the hit -6 dB or more (-7.3 dB through the
+  real processor in all three layouts: stereo, mono, mono-in/stereo-out), the note's fundamental within 0.5 dB, released between hits;
+  Kick 0 or no sidechain: bit-exact delay; the bass as its own sidechain: untouched; block sizes 1 and 333 identical.
 - 44.1-192 kHz, NaN, fuzzing with random settings: finite.
+- Steinberg VST3 validator 47/47, pluginval strictness 10, ASan/UBSan clean.
