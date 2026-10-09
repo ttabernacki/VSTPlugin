@@ -13,7 +13,9 @@ a note change inside the analysis window) the processing fades out and the input
 
 ## Controls
 - **Contrast** (-100 to +100 %): the residual below **Range**, down to -40 dB (+) or up to +18 dB (-). The note's partials are not
-  touched. The first ~40 ms of each note are left alone, because a pick or finger attack is mostly residual.
+  touched. The first 40 ms of each note are left alone (then it comes in over the next 40), because a pick or finger attack is
+  mostly residual. At -100 % the residual is "the bass with its own harmonics notched out", 18 dB up: on a clean bass that sounds
+  like a comb or formant filter following the pitch. That is what the setting is, not a fault; it is meant for finding the edge.
 - **Tone lock** (0-100 %): each harmonic's share of the note is pulled toward its long-term average (±24 dB at most), so a note that
   a room or cab makes boomy or thin comes out like the others. It locks timbre, so it also flattens deliberate tone changes.
 - **Fundamental** (±18 dB): the fundamental alone.
@@ -28,11 +30,12 @@ a note change inside the analysis window) the processing fades out and the input
 - **Punch** (±100 %): attacks of the low band (the note plus the residual below Range) up to +10 dB or down to -10 dB, a smooth
   pulse (3 ms rise, 28 ms fall) placed where the attack really is although the detector fires a few ms late.
 - **Sustain** (±100 %): the body's ring-out lengthened (up to +12 dB, only while the note is really decaying, not on a mute or a
-  tremolo) or shortened. Both come from the shared `bass-common/EnvelopeShaper.h`.
+  tremolo; the gain moves with a 15 ms smoother, so it does not ride the beating between a note and the mud next to it) or
+  shortened. Both come from the shared `bass-common/EnvelopeShaper.h`.
 - **Kick** (0-100 %, needs the optional sidechain input): ducks up to 24 dB while the sidechain's kick plays. Once a note is
   tracked only the residual below Range is ducked (the mud and boom around the note go, the note keeps its pitch). On a note's
-  first ~100 ms, where a kick usually lands and the split is not trusted yet, and on notes that are not tracked, everything
-  below Range is ducked, as a plain sidechain duck would. The kick is read 5 ms ahead, so the duck is already there at the hit;
+  first 80 ms (fading out over the next 30), where a kick usually lands and needs room most, and on notes that are not
+  tracked, everything below Range is ducked, as a plain sidechain duck would. The kick is read 5 ms ahead, so the duck is already there at the hit;
   it lets go in about 80 ms. A sidechain that carries the bass itself (at any level: a post-fader send is a scaled copy), or a kick below -70 dBFS,
   ducks nothing. (Ducking only
   the residual everywhere did nothing at all on a kick that lands on the note's attack: 0.0 dB under the hit, now -11.9 dB.)
@@ -46,7 +49,14 @@ The ranges are deliberately extreme, for finding the sweet spot by ear; expect t
    triangle over four periods). An average over whole periods cancels every other harmonic exactly, and anything between harmonics
    falls in the stopband, so each partial comes out on its own, even at 30 Hz, with no FFT and no frequency-resolution limit.
    The averages run on running sums, so the cost does not grow with the period.
-3. Partials = the sum of each envelope times e^{j h theta}; residual = input minus partials. Output = input + (processed partials -
+3. At attacks. The four-period average straddles an attack (half old note, half new) and the centred pitch window only hears the
+   new note half a window after it starts, so on their own they bring the processing in 40-90 ms late (a "flabby bloom"). The
+   look-ahead already holds the new note, so at each attack (placed where the level really starts to rise, not where the
+   detector fired) the note is measured with its own pitch, read from the first pitch window after the attack, over two-period
+   boxes that start at the attack. The note before it is measured over its last two periods, if it is still sounding and steady.
+   The two cross over 5 ms at the attack. The usual measurement takes over once its window is clear of the attack. Result: full
+   effect 0-16 ms after the attack (was 42-88 ms), no added latency.
+4. Partials = the sum of each envelope times e^{j h theta}; residual = input minus partials. Output = input + (processed partials -
    partials) + (residual gain - 1) x residual below Range, with the residual low-pass read ahead by its group delay so the cut lands
    in phase. Punch and Sustain then apply one gain to (processed note + processed residual below Range); the high residual is never
    touched.
@@ -76,7 +86,10 @@ a plucked line stays below -25 dB. Punch is gain modulation by definition (a +10
   and 1 % of their energy at the fundamental and were found only after this test replaced a fundamental-only purity gate.
 - Monophonic bass only. Chords, or two notes ringing together, are not split (processing fades out or follows one note).
 - Fundamentals from about 31 Hz up. Below that nothing is processed.
-- Around a note change (about four periods either side, plus a few ms) the split is not trusted and the input passes through.
+- A note change with an attack is handled from the attack on (above). A note change with no attack the detector can see (legato, or a
+  quieter note rising out of the last one's tail) still has the slower path: the split is not trusted for about four periods either
+  side and the input passes through there. (Sustain is told about those changes, so it does not carry the last note's body into the
+  new one.)
 - The partials follow amplitude and pitch changes slower than about four periods: a very fast slap or a deep fast vibrato leaves some
   of the note in the residual, where Contrast would treat it as residual.
 - Verified on synthetic bass only. This is a prototype: listen to the split in the demo (partials alone, residual alone) and on your own
@@ -84,6 +97,10 @@ a plucked line stays below -25 dB. Punch is gain modulation by definition (a +10
 
 ## Verified (`notespace/tests`, synthetic signals)
 - Neutral: bit-exact delay, mono and stereo, at every block size.
+- Attacks (two plucked notes, the second a fifth up, at 41, 62 and 98 Hz): Fundamental +12 dB and Translate 200 % reach full effect
+  0-16 ms after the attack (42-88 ms before the attack-aligned measurement). On a staccato line nothing a control adds jumps from
+  one sample to the next by more than half the dry line's largest step, and with everything turned up at once what is added has no
+  discontinuity (Translate turned a harmonic's phase in a single sample when it crossed its floor: fixed).
 - The split, for notes at 31, 41, 62, 98 and 147 Hz: the note's harmonics left in the residual 35-39 dB down; a steady tone between the
   harmonics ends up in the residual (within 1.3 dB) and 17-26 dB down in the partials.
 - Contrast +100 %: mud between the harmonics -18.7 dB (the residual gain is -40 dB; what is left is the part of the mud the split

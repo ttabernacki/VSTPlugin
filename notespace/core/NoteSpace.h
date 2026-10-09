@@ -99,6 +99,7 @@ public:
             {
                 S1_[c][h].assign ((size_t) rsize_, Cx {});
                 S2_[c][h].assign ((size_t) rsize_, Cx {});
+                Z_[c][h].assign ((size_t) rsize_, Cx {});
             }
         zr_.assign ((size_t) rsize_, Cx { 1.0, 0.0 });
         f0r_.assign ((size_t) rsize_, 55.0f);
@@ -117,6 +118,7 @@ public:
             {
                 std::fill (S1_[c][h].begin(), S1_[c][h].end(), Cx {});
                 std::fill (S2_[c][h].begin(), S2_[c][h].end(), Cx {});
+                std::fill (Z_[c][h].begin(), Z_[c][h].end(), Cx {});
                 accS1_[c][h] = accS2_[c][h] = Cx {};
             }
         for (int c = 0; c < 2; ++c)
@@ -161,6 +163,17 @@ public:
         c1s_ = c1t_ = Cx {};
         aResF_ = 0.0;
         fresh_ = true;
+        zone_ = Zone {};
+        zAdv_ = 0;
+        nextOn_ = -1;
+        for (int i = 0; i < 32; ++i)
+            onRaw_[i] = onRef_[i] = -1000000000LL;
+        onHead_ = 0;
+        endOkFor_ = -1;
+        endOkVal_ = false;
+        for (int c = 0; c < 2; ++c)
+            for (int h = 0; h < kH; ++h)
+                csLast_[c][h] = csFrom_[c][h] = Cx {};
         repW_ = 1.0;
         pitchOut_ = 0.0f;
         partEn_ = resEn_ = resOutEn_ = 0.0;
@@ -245,18 +258,223 @@ private:
     void pitchTick (int64_t t1)
     {
         float f0 = 0.0f, pur = 0.0f;
-        const bool voiced = trk_.pickCentred (t1, f0, pur);
+        bool voiced = trk_.pickCentred (t1, f0, pur);
+        // A window centred on t1 already hears the next note when its attack is less than half a window ahead: keep the note
+        // that is playing until the attack (the split before the attack is measured with this pitch, see split()).
+        if (voicedTick_ && stillSounding (t1))
+            for (int i = 0; i < trk_.onsetCount(); ++i)
+            {
+                const int64_t o = trk_.onsetTime (i);
+                if (o > t1 && o <= t1 + W_ / 2)
+                {
+                    voiced = true;
+                    f0 = f0Tick_;
+                    break;
+                }
+            }
         if (voiced)
         {
             f0 = std::clamp (f0, 31.0f, 260.0f);
             const bool jump = ! voicedTick_ || std::fabs (12.0 * std::log2 (f0 / std::max (1.0f, f0Tick_))) > 0.7;
             if (jump)
+            {
                 jumps_[(size_t) (jumpHead_++ & 63)] = t1;
+                // a pitch change with no attack near it is still a new note: Sustain must not carry the last one's body into it
+                bool attackNear = false;
+                for (int i = 0; i < trk_.onsetCount() && ! attackNear; ++i)
+                    attackNear = std::llabs (trk_.onsetTime (i) - t1) < W_;
+                if (voicedTick_ && ! attackNear)
+                    shaper_.noteChange (t1 - W_ / 2, nIn_); // the centred window flips about half a window after the change
+            }
             f0Tick_ = f0;
         }
         else if (voicedTick_)
             jumps_[(size_t) (jumpHead_++ & 63)] = t1; // the note ends: the split is not trusted around here either
         voicedTick_ = voiced;
+    }
+
+    // An attack at o starts a measurement of the new note with its own pitch, read from the first pitch window that lies
+    // entirely after the attack (the look-ahead has it already). The usual measurement takes over again once its four-period
+    // window is clear of the attack and of the pitch tracker's own switch.
+    bool attackPitch (int64_t o, float& f0) const
+    {
+        float pur = 0.0f;
+        if (! trk_.pickCentred (o + W_ / 2 + hopIn_, f0, pur))
+            return false;
+        f0 = std::clamp (f0, 31.0f, 260.0f);
+        return true;
+    }
+
+    // The onset detector fires a few ms into an attack and places the onset a fixed 6.5 ms earlier, which can be late (a slow
+    // attack) or early. Here it is moved to where the attack really starts: walking back from the detector's estimate (at most
+    // 15 ms) while the level stays within 10 dB of the attack's own first 4 ms. A faint tail of the note before is far below
+    // that, so the new note is never started early (which would put it, and anything done to it, before the attack).
+    int64_t refinedOnset (int64_t o)
+    {
+        for (int i = 0; i < 32; ++i)
+            if (onRaw_[i] == o)
+                return onRef_[i];
+        const int mask = dsize_ - 1, seg = std::max (1, (int) (0.001 * sr_)), back = (int) (0.015 * sr_);
+        if (o + 14 * seg > nIn_)
+            return o; // the audio after the attack has not arrived yet: refine (and remember) it later
+        auto pw = [&] (int64_t a, int64_t len) {
+            double e = 0.0;
+            for (int64_t t = a; t < a + len; ++t)
+            {
+                const double v = 0.5 * ((double) dl_[0][(size_t) (t & mask)] + (double) dl_[1][(size_t) (t & mask)]);
+                e += v * v;
+            }
+            return e / (double) len;
+        };
+        int64_t r = o;
+        if (o - back - seg >= 0)
+        {
+            // the attack's level: the loudest 1 ms in the 12 ms after the estimate
+            double peak = 0.0;
+            for (int64_t a = o; a < o + 12 * seg; a += seg)
+                peak = std::max (peak, pw (a, seg));
+            // forward from the estimate first (it may be early), then back while the level is still part of the attack
+            while (r < o + 12 * seg && pw (r, seg) < 0.1 * peak)
+                r += seg;
+            if (r == o)
+                while (r - seg >= o - back && pw (r - seg, seg) >= 0.1 * peak)
+                    r -= seg;
+        }
+        onRaw_[onHead_ & 31] = o;
+        onRef_[onHead_ & 31] = r;
+        ++onHead_;
+        return r;
+    }
+
+    // A jump of the tracked pitch at time j that an attack explains, seen from time t: after the attack the attack-aligned
+    // measurement takes care of it; before it, only if the note before is measured over its last two periods (P: its period).
+    bool explainedJump (int64_t j, int64_t t, double P)
+    {
+        for (int i = 0; i < trk_.onsetCount(); ++i)
+        {
+            const int64_t raw = trk_.onsetTime (i);
+            if (j >= raw - 2 * kSub - (int64_t) (0.015 * sr_) && j <= raw + W_ / 2 + 3 * hopIn_)
+            {
+                const int64_t o = refinedOnset (raw);
+                float f = 0.0f;
+                if (! attackPitch (o, f))
+                    return false;
+                return t >= o || endFromS1Ok (o, P);
+            }
+        }
+        return false;
+    }
+
+    // the last two periods before the attack at e can be measured with the usual phase (no switch of the tracked pitch in them)
+    bool endFromS1Ok (int64_t e, double P)
+    {
+        if (e == endOkFor_)
+            return endOkVal_;
+        const int64_t a = e - (int64_t) std::ceil (2.0 * P) - kSub;
+        bool ok = vr_[(size_t) (a & (rsize_ - 1))] != 0 && stillSounding (e) && steadyBefore (e, P);
+        for (int i = 0; i < 64 && ok; ++i)
+            if (jumps_[(size_t) i] >= a && jumps_[(size_t) i] < e)
+                ok = false;
+        endOkFor_ = e;
+        endOkVal_ = ok;
+        return ok;
+    }
+
+    // Is the note steady over its last two periods before e (the second within 3 dB of the first)? Only then do those two periods
+    // stand for the note up to the attack; a note being let go is left alone there, as anywhere else the split is unsure.
+    bool steadyBefore (int64_t e, double P) const
+    {
+        const int mask = dsize_ - 1;
+        const int64_t n = std::max<int64_t> (1, (int64_t) P);
+        if (e - 2 * n < 0)
+            return false;
+        auto pw = [&] (int64_t a0, int64_t len) {
+            double s2 = 0.0;
+            for (int64_t i = a0; i < a0 + len; ++i)
+            {
+                const double v = 0.5 * ((double) dl_[0][(size_t) (i & mask)] + (double) dl_[1][(size_t) (i & mask)]);
+                s2 += v * v;
+            }
+            return s2 / (double) len;
+        };
+        const double p1 = pw (e - 2 * n, n), p2 = pw (e - n, n);
+        return p1 > 1e-12 && p2 > 0.5 * p1 && p2 < 2.0 * p1;
+    }
+
+    // Is the note still sounding at t (its last 8 ms not more than 9 dB under the 32 ms before, and above -70 dBFS)? A note that
+    // was let go before the next attack has ended: neither held nor measured up to the attack.
+    bool stillSounding (int64_t t) const
+    {
+        const int mask = dsize_ - 1;
+        const int64_t n1 = std::max<int64_t> (1, (int64_t) (0.008 * sr_)), n2 = std::max<int64_t> (1, (int64_t) (0.032 * sr_));
+        if (t - n1 - n2 < 0)
+            return false;
+        auto pw = [&] (int64_t a, int64_t len) {
+            double e = 0.0;
+            for (int64_t i = a; i < a + len; ++i)
+            {
+                const double v = 0.5 * ((double) dl_[0][(size_t) (i & mask)] + (double) dl_[1][(size_t) (i & mask)]);
+                e += v * v;
+            }
+            return e / (double) len;
+        };
+        const double recent = pw (t - n1, n1), before = pw (t - n1 - n2, n2);
+        return recent > 1e-7 && recent > 0.125 * before;
+    }
+
+    void startZone (int nCh, int64_t o)
+    {
+        float f = 0.0f;
+        if (! attackPitch (o, f))
+        {
+            zone_.on = false;
+            return;
+        }
+        zone_.on = true;
+        zone_.o = o;
+        zone_.f0 = f;
+        zone_.P = sr_ / f;
+        zone_.w = 2.0 * kPi * f / sr_;
+        const Cx z0 = zr_[(size_t) (o & (rsize_ - 1))];
+        zone_.th0 = std::atan2 (z0.im, z0.re);
+        // the usual measurement is clean again two periods after the tracker has switched to the new pitch (or after the attack)
+        int64_t j = o;
+        for (int i = 0; i < 64; ++i)
+            if (jumps_[(size_t) i] >= o - 2 * kSub && jumps_[(size_t) i] <= o + W_ / 2 + 3 * hopIn_)
+                j = std::max (j, jumps_[(size_t) i]);
+        zone_.end = j + (int64_t) (2.0 * zone_.P + 0.125 * (double) W_) + kSub;
+        zAdv_ = o;
+        zPh_ = Cx { std::cos (zone_.th0), std::sin (zone_.th0) };
+        zStep_ = Cx { std::cos (zone_.w), std::sin (zone_.w) };
+        for (int c = 0; c < 2; ++c)
+            for (int h = 0; h < kH; ++h)
+                zAcc_[c][h] = Cx {};
+        (void) nCh;
+    }
+
+    // the zone's heterodyne running sums, up to and including sample `upto`
+    void advanceZone (int nCh, int64_t upto)
+    {
+        const int mask = dsize_ - 1;
+        for (; zAdv_ <= upto; ++zAdv_)
+        {
+            const size_t k = (size_t) (zAdv_ & (rsize_ - 1));
+            const Cx zc { zPh_.re, -zPh_.im };
+            for (int c = 0; c < nCh; ++c)
+            {
+                const double x = dl_[c][(size_t) (zAdv_ & mask)];
+                Cx zh { 1.0, 0.0 };
+                for (int h = 0; h < kH; ++h)
+                {
+                    zh = zh * zc;
+                    zAcc_[c][h] = zAcc_[c][h] + zh * x;
+                    Z_[c][h][k] = zAcc_[c][h];
+                }
+            }
+            zPh_ = zPh_ * zStep_;
+            if (((zAdv_ - zone_.o) & 1023) == 0)
+                zPh_ = zPh_ * (1.0 / mag (zPh_));
+        }
     }
 
     Cx readS (const std::vector<Cx>& r, double tau) const
@@ -328,6 +546,7 @@ private:
         grP_ = gr_;
         attP_ = attW_;
         repP_ = repW_;
+        kAllP_ = kAll_;
         repAP_ = repA_;
         trP_ = tr_;
         arP_ = ar_;
@@ -336,10 +555,26 @@ private:
         rampPos_ = 0;
         const size_t k2 = (size_t) (t2 & (rsize_ - 1));
         const double f0 = f0r_[k2], P = sr_ / f0;
+        // the next attack, if one is close: the note before it is measured over its last two periods (see split())
+        nextOn_ = -1;
+        for (int i = 0; i < trk_.onsetCount(); ++i)
+        {
+            const int64_t o = refinedOnset (trk_.onsetTime (i));
+            if (o >= t2 && o <= t2 + 4 * pMax_ + kSub && (nextOn_ < 0 || o < nextOn_))
+                nextOn_ = o;
+        }
         bool stable = vr_[k2] != 0;
+        // a pitch change at an attack is handled by the attack-aligned measurement; any other one makes the split untrustworthy
+        // for about two periods either side
         for (int i = 0; i < 64 && stable; ++i)
-            if (std::llabs (jumps_[(size_t) i] - t2) < (int64_t) (2.0 * P + 0.125 * (double) W_) + kSub)
+            if (std::llabs (jumps_[(size_t) i] - t2) < (int64_t) (2.0 * P + 0.125 * (double) W_) + kSub && ! explainedJump (jumps_[(size_t) i], t2, P))
                 stable = false;
+        if (zone_.on && t2 + kSub > zone_.o && t2 < zone_.end + (int64_t) zone_.P)
+            stable = true; // a note just after its attack, measured from the attack on
+        if (zone_.on && nextOn_ >= 0 && nextOn_ - zone_.o < (int64_t) (2.0 * zone_.P) + kSub)
+            stable = false; // a note shorter than two periods cannot be measured at all
+        if (! zone_.on && nextOn_ >= 0 && vr_[k2] != 0 && t2 >= nextOn_ - (int64_t) (3.0 * P))
+            stable = stable || endFromS1Ok (nextOn_, P); // the end of a note, measured over its last two periods
         const double tick = (double) kSub / sr_;
         const double vt = stable ? 1.0 : 0.0;
         v_ += (1.0 - std::exp (-tick / 0.008)) * (vt - v_);
@@ -347,14 +582,22 @@ private:
             v_ = 0.0;
         if (vt == 1.0 && v_ > 1.0 - 1e-4)
             v_ = 1.0;
-        pitchOut_ = stable ? (float) f0 : 0.0f;
+        pitchOut_ = stable ? (float) (zone_.on && t2 + kSub > zone_.o && t2 < zone_.end ? zone_.f0 : f0) : 0.0f;
 
-        // attacks are mostly residual (pick, string noise): give them about 40 ms before the residual is touched
+        // attacks are mostly residual (pick, string noise): give them 40 ms before the residual is touched
         int64_t lastOn = -1000000000LL;
         for (int i = 0; i < trk_.onsetCount(); ++i)
-            if (trk_.onsetTime (i) <= t2 && trk_.onsetTime (i) > lastOn)
-                lastOn = trk_.onsetTime (i);
-        attW_ = std::clamp (((double) (t2 - lastOn) - 0.003 * sr_) / (0.035 * sr_), 0.0, 1.0);
+        {
+            const int64_t o = refinedOnset (trk_.onsetTime (i));
+            if (o <= t2 && o > lastOn)
+                lastOn = o;
+        }
+        // (40 ms untouched, then in over the next 40: right at an attack the split is also least exact, and a boost would bring
+        // that out)
+        attW_ = std::clamp (((double) (t2 - lastOn) - 0.04 * sr_) / (0.04 * sr_), 0.0, 1.0);
+        // the kick usually lands on the note's attack, where it needs room most: there the duck takes everything below Range
+        // (80 ms, fading out over the next 30 ms); later in the note only the residual
+        kAll_ = 1.0 - std::clamp (((double) (t2 - lastOn) - 0.08 * sr_) / (0.03 * sr_), 0.0, 1.0);
         // repair is a slow steadying of the fundamental: keep it off the attack, where it would only lag behind
         repW_ = std::clamp (((double) (t2 - lastOn) - 0.02 * sr_) / (0.12 * sr_), 0.0, 1.0);
 
@@ -396,7 +639,10 @@ private:
         }
         fresh_ = false;
 
-        // tone lock: each harmonic's share of the note, against its long-term average
+        // tone lock: each harmonic's share of the note, against its long-term average. Right after an attack the new note is
+        // measured from the attack on, so its share is followed quickly (else the last note's correction would sit on it)
+        const double sinceOn = (double) (t2 - lastOn) / sr_;
+        const double tauRel = sinceOn < 0.04 ? 0.01 : 0.08, tauG = sinceOn < 0.06 ? 0.01 : 0.03;
         double tot = 0.0, L[kH];
         for (int h = 0; h < kH; ++h)
         {
@@ -411,7 +657,7 @@ private:
             const double rel = L[h] - totDb;
             if (stable && loud)
             {
-                relSm_[h] = relSm_[h] < -99.0 ? rel : relSm_[h] + (1.0 - std::exp (-tick / 0.08)) * (rel - relSm_[h]);
+                relSm_[h] = relSm_[h] < -99.0 ? rel : relSm_[h] + (1.0 - std::exp (-tick / tauRel)) * (rel - relSm_[h]);
                 if (relSm_[h] > -50.0)
                     ref_[h] = ref_[h] < -99.0 ? relSm_[h] : ref_[h] + (1.0 - std::exp (-tick / 3.0)) * (relSm_[h] - ref_[h]);
             }
@@ -421,7 +667,7 @@ private:
             if (h == 0)
                 gDb += std::clamp ((double) prm_.fundamentalDb, -18.0, 18.0);
             const double gT = std::pow (10.0, gDb / 20.0);
-            g_[h] += (1.0 - std::exp (-tick / 0.03)) * (gT - g_[h]);
+            g_[h] += (1.0 - std::exp (-tick / tauG)) * (gT - g_[h]);
             if (std::fabs (g_[h] - gT) < 1e-6)
                 g_[h] = gT;
             if (loud && stable)
@@ -479,6 +725,7 @@ private:
         const double gD = gDs_;
 
         const double gCon = vC_ * attC_ * (grC_ - 1.0) * duck, dk = duck - 1.0; // contrast on the trusted residual; the duck
+        const double kAll = kAllC_, vRes = vC_ * (1.0 - kAll); // the duck on the residual only, or on everything below Range
         const int64_t aResI = (int64_t) std::floor (aResF_);
         const double aResFr = aResF_ - (double) aResI;
         double rOutM = 0.0;
@@ -490,10 +737,10 @@ private:
             const double rLow = lpR_[c].process (rIn); // lines up with the residual at t2
             const double xa = dl_[c][(size_t) ((t2 + aResI) & mask)], xb = dl_[c][(size_t) ((t2 + aResI + 1) & mask)];
             const double xLow = lpX_[c].process (xa + (xb - xa) * aResFr); // everything below Range, lined up the same way
-            const double lowChange = gCon * rLow + dk * (vC_ * rLow + (1.0 - vC_) * xLow);
+            const double lowChange = gCon * rLow + dk * (vRes * rLow + (1.0 - vRes) * xLow);
             const double lowOut = (x - rr_[c][k2]) + dr_[c][k2] + rLow + lowChange; // note + residual below Range, after the changes
             out[c] = x + dr_[c][k2] + lowChange + (gD - 1.0) * lowOut;
-            rOutM += (rr_[c][k2] + gCon * rLow + dk * vC_ * rLow) / nCh;
+            rOutM += (rr_[c][k2] + gCon * rLow + dk * vRes * rLow) / nCh;
         }
         tapP_ = tapPr_[k2];
         tapR_ = tapRr_[k2];
@@ -515,11 +762,63 @@ private:
         vC_ = glide (vP_, v_);
         grC_ = glide (grP_, gr_);
         attC_ = glide (attP_, attW_);
+        kAllC_ = glide (kAllP_, kAll_);
         double gC[kH];
         for (int h = 0; h < kH; ++h)
             gC[h] = glide (gP_[h], g_[h]);
+        if (nextOn_ >= 0 && t3 == nextOn_)
+        {
+            startZone (nCh, t3); // an attack: measure the new note from here on, with its own pitch
+            for (int c = 0; c < 2; ++c)
+                for (int h = 0; h < kH; ++h)
+                    csFrom_[c][h] = csLast_[c][h];
+        }
+        if (zone_.on && t3 >= zone_.end + (int64_t) zone_.P)
+            zone_.on = false;
         const double P = sr_ / (double) f0r_[k3];
         const Cx z = zr_[k3];
+        // Weights of the two attack-aware measurements against the usual four-period one (which straddles an attack):
+        //   wz  the note just after its attack (one full weight until the usual measurement is clean again, then a one-period fade)
+        //   we  the note just before the next attack: its last two periods (faded in over the period before they start)
+        double wz = 0.0, we = 0.0;
+        bool zoneEnd = false;
+        int64_t za = 0;
+        if (zone_.on && t3 >= zone_.o)
+        {
+            const int64_t lim = nextOn_ > t3 ? nextOn_ : INT64_MAX;
+            if (lim != INT64_MAX && lim - zone_.o < (int64_t) (2.0 * zone_.P) + 1)
+                wz = 0.0; // too short to measure
+            else
+            {
+                wz = t3 < zone_.end ? 1.0 : std::max (0.0, 1.0 - (double) (t3 - zone_.end) / zone_.P);
+                // five two-period boxes, centred on t3 and half a period apart (close to the usual four-period triangle), each
+                // kept inside the note: from the attack on, and ending by the next attack
+                const double P2 = 2.0 * zone_.P;
+                for (int b = 0; b < 5; ++b)
+                {
+                    double a = (double) t3 + (b - 2) * 0.5 * zone_.P - zone_.P;
+                    if (lim != INT64_MAX)
+                        a = std::min (a, (double) lim - P2 - 1.0);
+                    zBox_[b] = std::max (a, (double) zone_.o);
+                }
+                za = (int64_t) std::ceil (zBox_[4] + P2) + 2;
+                advanceZone (nCh, za);
+                if (lim != INT64_MAX && t3 >= lim - (int64_t) (2.0 * zone_.P))
+                    wz = 1.0; // up to the next attack the box is the only clean measurement left
+            }
+        }
+        else if (! zone_.on && nextOn_ > t3 && nextOn_ - t3 <= (int64_t) (3.0 * P) && endFromS1Ok (nextOn_, P))
+        {
+            zoneEnd = true;
+            we = std::clamp (1.0 - ((double) (nextOn_ - t3) - 2.0 * P) / P, 0.0, 1.0);
+        }
+        const double xfade = zone_.on && t3 >= zone_.o ? std::min (1.0, (double) (t3 - zone_.o) / (0.005 * sr_)) : 1.0;
+        Cx q { 1.0, 0.0 }; // the zone's phase reference against the usual one
+        if (wz > 0.0)
+        {
+            const double th = zone_.th0 + zone_.w * (double) (t3 - zone_.o);
+            q = Cx { std::cos (th), std::sin (th) } * Cx { z.re, -z.im };
+        }
         Cx zp[kH];
         zp[0] = z;
         for (int h = 1; h < kH; ++h)
@@ -535,18 +834,43 @@ private:
             const double x = dl_[c][(size_t) (t3 & mask)];
             Cx cs[kH], co[kH];
             double sumP = 0.0, sumPo = 0.0;
+            Cx qh { 1.0, 0.0 };
             for (int h = 0; h < kH; ++h)
             {
                 // second two-period average: the partial's complex envelope (x2 for a real signal)
                 cs[h] = (readS (S2_[c][h], (double) t3 + P) - readS (S2_[c][h], (double) t3 - P)) * (1.0 / P);
+                if (wz > 0.0)
+                {
+                    // after an attack: the note itself over two-period boxes, demodulated with its own pitch, in the usual reference
+                    qh = qh * q;
+                    Cx cz {};
+                    for (int b = 0; b < 5; ++b)
+                        cz = cz + (readS (Z_[c][h], zBox_[b] + 2.0 * zone_.P) - readS (Z_[c][h], zBox_[b]));
+                    cz = cz * (0.2 / zone_.P) * qh;
+                    cs[h] = cs[h] * (1.0 - wz) + cz * wz;
+                    // over the attack itself, cross from the note that was playing to the new one (switching would click)
+                    if (xfade < 1.0)
+                        cs[h] = csFrom_[c][h] * (1.0 - xfade) + cs[h] * xfade;
+                }
+                else if (zoneEnd && we > 0.0)
+                {
+                    // before an attack: the note's last two periods (the usual average would already hear the next note)
+                    const double e = (double) nextOn_;
+                    const Cx ce = (readS (S1_[c][h], e) - readS (S1_[c][h], e - 2.0 * P)) * (1.0 / P);
+                    cs[h] = cs[h] * (1.0 - we) + ce * we;
+                }
                 sumP += (cs[h] * zp[h]).re;
                 cMono_[h] = cMono_[h] + cs[h] * (1.0 / nCh);
+                csLast_[c][h] = cs[h];
             }
             if (c == 0)
             {
-                // the fundamental's slow part (two smoothing poles, 60 ms each): whatever beats against it rotates and averages out
-                c1s_ = c1s_ + (cs[0] - c1s_) * ar;
-                c1t_ = c1t_ + (c1s_ - c1t_) * ar;
+                // the fundamental's slow part (two smoothing poles, 60 ms each): whatever beats against it rotates and averages out.
+                // Around an attack the measurement switches reference, so there the smoother just follows it
+                // (it follows the measurement more and more tightly as the attack-aware measurements take over: no jump either way)
+                const double arE = std::max (ar, std::max (wz * xfade, we));
+                c1s_ = c1s_ + (cs[0] - c1s_) * arE;
+                c1t_ = c1t_ + (c1s_ - c1t_) * arE;
             }
             if (active)
             {
@@ -569,7 +893,9 @@ private:
                         if (m < T)
                         {
                             const double target = m + std::min (1.0, tr) * (T - m);
-                            const Cx dir = co[h] + uh * (0.1 * T);
+                            // (the pull toward the phase-locked direction fades out as the harmonic reaches the floor, so crossing
+                            // the floor never turns its phase in a single sample)
+                            const Cx dir = co[h] + uh * (0.1 * (T - m));
                             const double md = mag (dir);
                             if (md > 1e-15)
                                 co[h] = dir * (target / md);
@@ -610,7 +936,21 @@ private:
 
     int pMax_ = 1600, Lp_ = 4000, lag2_ = 3204, lat_ = 7200, rsize_ = 8192, dsize_ = 16384;
     std::vector<float> dl_[2];
-    std::vector<Cx> S1_[2][kH], S2_[2][kH], zr_;
+    std::vector<Cx> S1_[2][kH], S2_[2][kH], Z_[2][kH], zr_;
+    struct Zone
+    {
+        bool on = false;
+        int64_t o = 0, end = 0;
+        double f0 = 55.0, P = 870.0, w = 0.0, th0 = 0.0;
+    } zone_;
+    Cx zAcc_[2][kH], zPh_ { 1.0, 0.0 }, zStep_ { 1.0, 0.0 };
+    int64_t zAdv_ = 0, nextOn_ = -1;
+    double zBox_[5] {};
+    Cx csLast_[2][kH], csFrom_[2][kH];
+    int64_t onRaw_[32] {}, onRef_[32] {};
+    int onHead_ = 0;
+    int64_t endOkFor_ = -1;
+    bool endOkVal_ = false;
     Cx accS1_[2][kH], accS2_[2][kH];
     std::vector<float> f0r_;
     std::vector<unsigned char> vr_;
@@ -628,7 +968,7 @@ private:
     double repW_ = 1.0, vP_ = 0.0, grP_ = 1.0, attP_ = 1.0, repP_ = 1.0, gP_[kH] {}, vC_ = 0.0, grC_ = 1.0, attC_ = 1.0;
     int rampPos_ = 0;
     std::vector<double> dr_[2], rr_[2], tapPr_, tapRr_;
-    double attW_ = 1.0;
+    double attW_ = 1.0, kAll_ = 0.0, kAllP_ = 0.0, kAllC_ = 0.0;
     double rangeApplied_ = -1.0;
     float pitchOut_ = 0.0f, inDb_[kH] {}, outDb_[kH] {};
     double partEn_ = 0.0, resEn_ = 0.0, resOutEn_ = 0.0, tapP_ = 0.0, tapR_ = 0.0;

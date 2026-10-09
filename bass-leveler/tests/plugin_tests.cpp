@@ -210,7 +210,7 @@ int main()
                 juce::AudioBuffer<float> view (buf.getArrayOfWritePointers(), 2, n);
                 for (int i = 0; i < n; ++i)
                     view.setSample (0, i, sig[pos + (size_t) i]), view.setSample (1, i, sig[pos + (size_t) i]);
-                const bool bypassed = toggleEvery == 0 || (blk / toggleEvery) % 2 == 1;
+                const bool bypassed = toggleEvery == 0 || (toggleEvery > 0 && (blk / toggleEvery) % 2 == 1); // < 0: never
                 if (bypassed)
                     p.processBlockBypassed (view, midi);
                 else
@@ -225,14 +225,17 @@ int main()
         for (size_t i = (size_t) lat; i < sig.size(); ++i)
             md = std::max (md, (double) std::fabs (byp[i] - sig[i - (size_t) lat]));
         CHECK (lat > 0 && md == 0.0, "bypassed with Amount 100 %: the input delayed by exactly the reported %d samples (max diff %.1e)", lat, md);
-        const auto tog = go (28).first; // about 0.3 s on, 0.3 s off
-        double stepOut = 0, stepIn = 0;
+        // switching may not make a step bigger than either state makes on its own (processed, the bass can be much louder)
+        const auto tog = go (28).first, act = go (-1).first; // about 0.3 s on, 0.3 s off; and never bypassed
+        double stepOut = 0, stepIn = 0, stepAct = 0;
         for (size_t i = (size_t) lat + 1; i < sig.size(); ++i)
         {
             stepOut = std::max (stepOut, (double) std::fabs (tog[i] - tog[i - 1]));
+            stepAct = std::max (stepAct, (double) std::fabs (act[i] - act[i - 1]));
             stepIn = std::max (stepIn, (double) std::fabs (sig[i - (size_t) lat] - sig[i - 1 - (size_t) lat]));
         }
-        CHECK (stepOut < 2.0 * stepIn, "bypass toggled every 0.3 s while playing: largest sample step %.4f (dry %.4f)", stepOut, stepIn);
+        CHECK (stepOut < 1.25 * std::max (stepIn, stepAct), "bypass toggled every 0.3 s while playing: largest sample step %.4f (dry %.4f, never bypassed %.4f)",
+               stepOut, stepIn, stepAct);
     }
 
     std::printf ("State recall\n");

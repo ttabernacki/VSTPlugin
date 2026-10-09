@@ -32,7 +32,7 @@ public:
     {
         std::fill (hist_.begin(), hist_.end(), 0.0f);
         gs_ = gOut_ = dPeak_ = 0.0;
-        seenOnset_ = -1000000;
+        seenOnset_ = changeAt_ = -1000000;
         nOn_ = head_ = 0;
         times_.fill (-1000000000LL);
         amps_.fill (0.0f);
@@ -74,11 +74,27 @@ public:
         const double decRaw = std::max (-10.0 * std::log10 ((t.mediumPower() + 1e-12) / (t.longPower() + 1e-12)) * wl, 0.0);
         const double dec = decRaw / (1.0 + (decRaw / 1.5) * (decRaw / 1.5));
         const double wf = std::clamp ((10.0 * std::log10 (t.fastPower() + 1e-12) + 62.0) / 8.0, 0.0, 1.0); // note over: let go
-        const double since = (double) (nIn - t.lastOnset()) / sr_;
+        const double since = (double) (nIn - std::max (t.lastOnset(), changeAt_)) / sr_;
         const double wb = std::clamp ((since - 0.03) / 0.03, 0.0, 1.0); // the body starts after the attack
         const double raw = t.inOnset() ? 0.0 : sustain * kS * dec * wf * wb;
-        gs_ += (1.0 - std::exp (-(double) kSub / (0.006 * sr_))) * (raw - gs_);
+        // (15 ms: slow enough not to ride the beating between a note and whatever rings next to it, which wobbled the gain)
+        gs_ += (1.0 - std::exp (-(double) kSub / (0.015 * sr_))) * (raw - gs_);
         hist_[(size_t) (blk & (kHist - 1))] = (float) gs_;
+    }
+
+    // A new note that the onset detector did not see (legato, or a quieter note rising out of the last one's tail), reported
+    // by whoever tracks the pitch, at input time t (it must not lie in the past of what has been played out). The last note's
+    // body gain fades out into it, as at an attack.
+    void noteChange (int64_t t, int64_t nIn)
+    {
+        const int64_t blk = nIn / kSub, bs = std::max<int64_t> (0, (t - (int64_t) (0.003 * sr_)) / kSub);
+        if (bs >= blk || blk - bs > kHist / 2)
+            return;
+        const float gv = hist_[(size_t) (bs & (kHist - 1))];
+        for (int64_t b = bs; b < blk; ++b)
+            hist_[(size_t) (b & (kHist - 1))] = gv * (1.0f - (float) (b - bs) / (float) (blk - bs));
+        gs_ = 0.0;
+        changeAt_ = nIn;
     }
 
     // dB of gain for the audio at output time tOut (middle of the tick); call once per kSub samples after analyse()
@@ -107,7 +123,7 @@ private:
     static constexpr double kPunchDb = 10.0, kS = 8.0, kCeil = 12.0;
     double sr_ = 48000.0, gs_ = 0.0, gOut_ = 0.0, dPeak_ = 0.0;
     int latBlk_ = 0, antBlk_ = 12, nOn_ = 0, head_ = 0;
-    int64_t seenOnset_ = -1000000;
+    int64_t seenOnset_ = -1000000, changeAt_ = -1000000;
     std::vector<float> hist_;
     std::array<int64_t, 32> times_ {};
     std::array<float, 32> amps_ {};

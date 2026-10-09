@@ -17,7 +17,7 @@ public:
     void visibilityChanged() override { useSoftwareRendering(); }
 
 private:
-    void timerCallback() override { repaint(); }
+    void timerCallback() override;
     void useSoftwareRendering()
     {
         if (auto* peer = getPeer())
@@ -30,5 +30,8 @@ private:
     bassui::KnobLookAndFeel laf;
     NoteSpaceProcessor& proc;
     Knob contrast, tone, fund, repair, translate, range, punch, sustain, kick;
+    // what is on screen: the last note held (and dimmed) for a while, so fast playing does not make it flash
+    float shownPitch = 0.0f, shownIn[NoteSpaceProcessor::kH] {}, shownOut[NoteSpaceProcessor::kH] {};
+    double lastLiveMs = -1.0e9;
     juce::Rectangle<int> profileArea, meterArea;
 };

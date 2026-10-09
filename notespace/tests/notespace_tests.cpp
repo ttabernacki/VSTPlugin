@@ -183,6 +183,20 @@ static double addedStep (const std::vector<float>& x, int which, bool stepping, 
     return mx;
 }
 
+// amplitude of harmonic h of f0 over one period starting at sample i
+static double ampAt (const std::vector<float>& x, size_t i, double f0, int h)
+{
+    const int P = (int) std::lround (kFs / f0);
+    double re = 0, im = 0;
+    for (int j = 0; j < P; ++j)
+    {
+        const double ph = 2 * kPi * h * j / P;
+        re += x[i + (size_t) j] * std::cos (ph);
+        im -= x[i + (size_t) j] * std::sin (ph);
+    }
+    return 2.0 / P * std::sqrt (re * re + im * im);
+}
+
 int main()
 {
     Params neutral;
@@ -397,7 +411,9 @@ int main()
         tl.toneLock = 1.0f;
         tr.translate = 1.0f;
         const double a = hf (c), b = hf (f), d = hf (rp), e = hf (tl), h = hf (tr);
-        CHECK (a < -28.0 && b < -30.0 && d < -33.0 && e < -40.0 && h < -25.0,
+        // (Tone lock re-measures each new note within about 10 ms of its attack, instead of drifting toward it over ~80 ms, so its
+        // corrections move more early in a note: -38 dB here, down from -45; its largest sample step stays at 0.0025.)
+        CHECK (a < -28.0 && b < -30.0 && d < -33.0 && e < -36.0 && h < -25.0,
                "plucked line, above 1 kHz: Contrast %.1f, Fundamental %.1f, Repair %.1f, Tone lock %.1f, Translate %.1f dB", a, b, d, e, h);
     }
 
@@ -620,6 +636,130 @@ int main()
             const double still = std::max (addedStep (x, w, false, A[w], B[w]), addedStep (x, w, false, B[w], A[w]));
             const double step = addedStep (x, w, true, A[w], B[w]);
             CHECK (step < 1.5 * still + 1e-4, "%-11s jumping end to end every 250 ms: largest step of what is added %.5f (held still: %.5f)", names[w], step, still);
+        }
+    }
+
+    std::printf ("Attacks: the effect is there from the start of the note (no bloom)\n");
+    {
+        // Two plucked notes, the second a fifth up: how long after each attack until Fundamental +12 dB (the fundamental) and
+        // Translate 200 % (the 2nd harmonic) are within 3 dB of what they do later in the note. The four-period measurement
+        // alone took 40-90 ms ("a flabby bloom"); the attack-aligned one is there at once.
+        for (double f0 : { 41.2, 61.7, 98.0 })
+        {
+            std::vector<float> x ((size_t) (2.0 * kFs), 0.0f);
+            for (int nI = 0; nI < 2; ++nI)
+            {
+                const double fn = nI ? f0 * 1.5 : f0;
+                const size_t s0 = (size_t) ((0.6 + 0.6 * nI) * kFs);
+                for (size_t i = 0; i < (size_t) (0.55 * kFs) && s0 + i < x.size(); ++i)
+                {
+                    const double tt = (double) i / kFs, e = std::min (1.0, tt / 0.005) * std::exp (-tt / 0.8);
+                    double s = 0;
+                    for (int h = 1; h <= 5; ++h)
+                        s += std::pow (0.6, h - 1) * std::sin (2 * kPi * h * fn * tt + 0.3 * h);
+                    x[s0 + i] += (float) (0.3 * e * s);
+                }
+            }
+            for (int mode = 0; mode < 2; ++mode)
+            {
+                Params p = neutral;
+                if (mode == 0)
+                    p.fundamentalDb = 12.0f;
+                else
+                    p.translate = 2.0f;
+                const auto r = run (x, p);
+                const int h = mode == 0 ? 1 : 2;
+                double worst = 0;
+                for (int nI = 0; nI < 2; ++nI)
+                {
+                    const double fn = nI ? f0 * 1.5 : f0;
+                    const size_t s0 = (size_t) ((0.6 + 0.6 * nI) * kFs);
+                    auto gain = [&] (double tt) {
+                        return ampAt (r.out, s0 + (size_t) (tt * kFs) + (size_t) r.lat, fn, h) / (ampAt (x, s0 + (size_t) (tt * kFs), fn, h) + 1e-12);
+                    };
+                    double gs = 0;
+                    int k = 0;
+                    for (double tt = 0.2; tt < 0.4; tt += 0.01, ++k)
+                        gs += gain (tt);
+                    gs /= k;
+                    double t90 = 0.3;
+                    for (double tt = 0.0; tt < 0.3; tt += 0.002)
+                        if (20 * std::log10 (gain (tt) / gs) > -3.0)
+                        {
+                            t90 = tt;
+                            break;
+                        }
+                    worst = std::max (worst, t90);
+                }
+                CHECK (worst < 0.025, "%5.1f Hz then a fifth up, %s: full effect %2.0f ms after the attack at the latest", f0,
+                       mode == 0 ? "Fundamental +12 dB" : "Translate 200 %  ", 1000 * worst);
+            }
+        }
+    }
+
+    {
+        // Short notes with gaps, at the attacks: whatever a control adds may not jump from one sample to the next (crossing from
+        // one note's measurement to the next at an attack clicked once: steps of 0.6 against 0.05 in the dry line)
+        std::mt19937 g (3);
+        std::vector<synth::Ev> ev;
+        double tt = 0.3;
+        for (int rep = 0; rep < 2; ++rep)
+        {
+            std::vector<int> ps;
+            for (int m = 28; m <= 43; ++m)
+                ps.push_back (m);
+            std::shuffle (ps.begin(), ps.end(), g);
+            for (int m : ps)
+            {
+                ev.push_back ({ tt, 0.32, m, std::uniform_real_distribution<double> (-3, 3) (g) });
+                tt += 0.36;
+            }
+        }
+        std::array<double, 128> flat {};
+        auto x = synth::render (kFs, ev, tt + 0.5, flat, 3);
+        for (size_t i = 0; i < x.size(); ++i)
+            x[i] += (float) (0.05 * std::sin (2 * kPi * 63.0 * (double) i / kFs));
+        double dryStep = 0;
+        for (size_t i = 1; i < x.size(); ++i)
+            dryStep = std::max (dryStep, (double) std::fabs (x[i] - x[i - 1]));
+        {
+            // everything turned up at once (what is added is several times louder than the input, so steps say little): no
+            // discontinuity, i.e. its largest second difference stays small against its largest step. Translate turned a
+            // harmonic's phase in one sample when it crossed its floor: a jump of 0.96, second difference / step about 0.9.
+            Params all = neutral;
+            all.contrast = 1.0f;
+            all.toneLock = 1.0f;
+            all.fundamentalDb = 12.0f;
+            all.repair = 0.7f;
+            all.translate = 1.5f;
+            all.punch = 1.0f;
+            all.sustain = 1.0f;
+            const auto r = run (x, all);
+            const size_t L = (size_t) r.lat;
+            auto added = [&] (size_t i) { return (double) r.out[i] - (double) x[i - L]; }; // what the plug-in adds (the dry pluck has its own sharp transient)
+            double step = 0, curv = 0;
+            for (size_t i = L + 2; i < x.size(); ++i)
+            {
+                step = std::max (step, std::fabs (added (i) - added (i - 1)));
+                curv = std::max (curv, std::fabs (added (i) - 2.0 * added (i - 1) + added (i - 2)));
+            }
+            CHECK (curv < 0.25 * step, "staccato line, everything turned up: what is added has a largest second difference of %.4f against its largest step %.4f",
+                   curv, step);
+        }
+        const char* names[] = { "Fundamental +12 dB", "Translate 150 %", "Repair 70 %", "Tone lock 100 %", "Contrast +100 %" };
+        for (int w = 0; w < 5; ++w)
+        {
+            Params p = neutral;
+            if (w == 0) p.fundamentalDb = 12.0f;
+            if (w == 1) p.translate = 1.5f;
+            if (w == 2) p.repair = 0.7f;
+            if (w == 3) p.toneLock = 1.0f;
+            if (w == 4) p.contrast = 1.0f;
+            const auto r = run (x, p);
+            double mx = 0;
+            for (size_t i = (size_t) r.lat + 1; i < x.size(); ++i)
+                mx = std::max (mx, std::fabs ((double) (r.out[i] - x[i - (size_t) r.lat]) - (double) (r.out[i - 1] - x[i - 1 - (size_t) r.lat])));
+            CHECK (mx < 0.5 * dryStep, "staccato line, %-18s: largest step of what is added %.4f (dry line's largest step %.4f)", names[w], mx, dryStep);
         }
     }
 

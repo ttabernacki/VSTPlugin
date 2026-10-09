@@ -15,6 +15,8 @@ juce::String noteName (float hz)
 NoteSpaceEditor::NoteSpaceEditor (NoteSpaceProcessor& p) : juce::AudioProcessorEditor (&p), proc (p)
 {
     setLookAndFeel (&laf);
+    for (int h = 0; h < NoteSpaceProcessor::kH; ++h)
+        shownIn[h] = shownOut[h] = -100.0f;
     contrast.setup (*this, proc.apvts, "contrast", "CONTRAST");
     tone.setup (*this, proc.apvts, "tonelock", "TONE LOCK");
     fund.setup (*this, proc.apvts, "fundamental", "FUNDAMENTAL");
@@ -56,6 +58,24 @@ void NoteSpaceEditor::resized()
     profileArea = r;
 }
 
+void NoteSpaceEditor::timerCallback()
+{
+    const float pitch = proc.pitchHz.load();
+    if (pitch > 20.0f)
+    {
+        shownPitch = pitch;
+        lastLiveMs = juce::Time::getMillisecondCounterHiRes();
+        for (int h = 0; h < NoteSpaceProcessor::kH; ++h)
+        {
+            // bars move quickly toward a new note but do not jitter
+            const float vi = proc.hIn[h].load(), vo = proc.hOut[h].load();
+            shownIn[h] = shownIn[h] < -90.0f || vi < -90.0f ? vi : shownIn[h] + 0.6f * (vi - shownIn[h]);
+            shownOut[h] = shownOut[h] < -90.0f || vo < -90.0f ? vo : shownOut[h] + 0.6f * (vo - shownOut[h]);
+        }
+    }
+    repaint();
+}
+
 void NoteSpaceEditor::paint (juce::Graphics& g)
 {
     g.fillAll (kBg);
@@ -67,8 +87,12 @@ void NoteSpaceEditor::paint (juce::Graphics& g)
     g.drawText ("the note and everything that is not the note, handled separately", 130, 14, getWidth() - 144, 26,
                 juce::Justification::centredRight);
 
-    const float pitch = proc.pitchHz.load();
-    const bool live = pitch > 20.0f;
+    // the last note stays on screen for 1.5 s, dimming as it ages: with fast playing the split is only trusted for part of
+    // each note, and showing it only then made the display flash
+    const double age = juce::Time::getMillisecondCounterHiRes() - lastLiveMs;
+    const bool live = age < 1500.0 && shownPitch > 20.0f;
+    const float fade = age < 150.0 ? 1.0f : (float) juce::jmap (std::min (age, 1500.0), 150.0, 1500.0, 1.0, 0.35);
+    const float pitch = shownPitch;
 
     // ---- harmonic profile -----------------------------------------------------------------
     g.setColour (kPanel);
@@ -94,7 +118,7 @@ void NoteSpaceEditor::paint (juce::Graphics& g)
         for (int h = 0; h < H; ++h)
         {
             const float x0 = (float) a.getX() + cw * (float) h;
-            const float vin = proc.hIn[h].load(), vout = proc.hOut[h].load();
+            const float vin = shownIn[h], vout = shownOut[h];
             auto bar = [&] (float v, juce::Colour c, float x, float bw) {
                 if (! live || v < -90.0f)
                     return;
@@ -102,8 +126,8 @@ void NoteSpaceEditor::paint (juce::Graphics& g)
                 g.setColour (c);
                 g.fillRoundedRectangle (x, y, bw, std::max (2.0f, (float) a.getBottom() - y), 2.0f);
             };
-            bar (vin, kDim.withAlpha (0.7f), x0 + cw * 0.12f, cw * 0.36f);
-            bar (vout, kAccent, x0 + cw * 0.52f, cw * 0.36f);
+            bar (vin, kDim.withAlpha (0.7f * fade), x0 + cw * 0.12f, cw * 0.36f);
+            bar (vout, kAccent.withAlpha (fade), x0 + cw * 0.52f, cw * 0.36f);
             g.setColour (kDim);
             g.setFont (juce::FontOptions (10.0f));
             g.drawText (h == 0 ? juce::String ("f0") : juce::String (h + 1), (int) x0, labels.getY(), (int) cw, labels.getHeight(), juce::Justification::centred);
