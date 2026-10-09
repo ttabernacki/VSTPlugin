@@ -141,6 +141,48 @@ static std::vector<float> delayed (const std::vector<float>& x, int lat)
     return y;
 }
 
+// Step one knob between two extremes every 250 ms while a line plays; the largest sample-to-sample step of what the plug-in adds
+// (output minus the delayed dry signal). A knob applied instantly instead of eased in shows up as a jump here.
+static double addedStep (const std::vector<float>& x, int which, bool stepping, float va, float vb)
+{
+    NoteSpace d;
+    d.prepare (kFs);
+    Params p;
+    p.contrast = p.toneLock = p.fundamentalDb = p.repair = p.translate = 0.0f;
+    auto set = [&] (float v) {
+        switch (which)
+        {
+            case 0: p.contrast = v; break;
+            case 1: p.toneLock = v; break;
+            case 2: p.fundamentalDb = v; break;
+            case 3: p.repair = v; break;
+            case 4: p.translate = v; break;
+            case 5: p.rangeHz = v; p.contrast = 1.0f; break;
+            case 6: p.punch = v; break;
+            default: p.sustain = v; break;
+        }
+    };
+    set (va);
+    std::vector<float> o = x;
+    for (size_t i = 0; i < o.size(); i += 480)
+    {
+        if (stepping && (i / 480) % 25 == 24)
+            set (((i / 480) / 25) % 2 ? vb : va);
+        d.setParams (p);
+        float* c[1] = { o.data() + i };
+        d.process (c, 1, (int) std::min<size_t> (480, o.size() - i));
+    }
+    const size_t lat = (size_t) d.latencySamples(), s0 = lat + 24000;
+    double mx = 0, prev = o[s0 - 1] - x[s0 - 1 - lat];
+    for (size_t i = s0; i < o.size(); ++i)
+    {
+        const double a = o[i] - x[i - lat];
+        mx = std::max (mx, std::fabs (a - prev));
+        prev = a;
+    }
+    return mx;
+}
+
 int main()
 {
     Params neutral;
@@ -560,6 +602,25 @@ int main()
         }
         const double s = std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count();
         std::printf ("  [INFO] CPU: 20 s of stereo in %.2f s (%.1f%% of one core)\n", s, 100.0 * s / 20.0);
+    }
+
+    std::printf ("Knobs that move while a note plays\n");
+    {
+        std::vector<synth::Ev> ev;
+        for (int i = 0; i < 10; ++i)
+            ev.push_back ({ 0.3 + 0.6 * i, 0.55, 28 + (i * 5) % 16, 0.0 });
+        std::array<double, 128> flat {};
+        auto x = synth::render (kFs, ev, 6.5, flat, 3);
+        for (size_t i = 0; i < x.size(); ++i)
+            x[i] += (float) (0.05 * std::sin (2 * kPi * 63.0 * (double) i / kFs)); // mud, so the residual controls have work
+        const char* names[] = { "Contrast", "Tone lock", "Fundamental", "Repair", "Translate", "Range", "Punch", "Sustain" };
+        const float A[] = { -1, 0, -18, 0, 0, 50, -1, -1 }, B[] = { 1, 1, 18, 1, 2, 1000, 1, 1 };
+        for (int w = 0; w < 8; ++w)
+        {
+            const double still = std::max (addedStep (x, w, false, A[w], B[w]), addedStep (x, w, false, B[w], A[w]));
+            const double step = addedStep (x, w, true, A[w], B[w]);
+            CHECK (step < 1.5 * still + 1e-4, "%-11s jumping end to end every 250 ms: largest step of what is added %.5f (held still: %.5f)", names[w], step, still);
+        }
     }
 
     std::printf ("Weak or missing fundamental\n");

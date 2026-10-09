@@ -102,7 +102,8 @@ public:
         zr_.assign ((size_t) rsize_, Cx { 1.0, 0.0 });
         f0r_.assign ((size_t) rsize_, 55.0f);
         vr_.assign ((size_t) rsize_, 0);
-        rangeApplied_ = -1.0f;
+        rangeApplied_ = -1.0;
+        aPar_ = 1.0 - std::exp (-(double) kSub / (0.03 * sr_));
         reset();
     }
 
@@ -155,11 +156,12 @@ public:
             inDb_[h] = outDb_[h] = -100.0f;
         }
         c1s_ = c1t_ = Cx {};
-        aRes_ = 0;
+        aResF_ = 0.0;
+        fresh_ = true;
         repW_ = 1.0;
         pitchOut_ = 0.0f;
         partEn_ = resEn_ = resOutEn_ = 0.0;
-        rangeApplied_ = -1.0f;
+        rangeApplied_ = -1.0;
     }
 
     int latencySamples() const { return lat_; }
@@ -318,6 +320,9 @@ private:
         grP_ = gr_;
         attP_ = attW_;
         repP_ = repW_;
+        repAP_ = repA_;
+        trP_ = tr_;
+        arP_ = ar_;
         for (int h = 0; h < kH; ++h)
             gP_[h] = g_[h];
         rampPos_ = 0;
@@ -351,14 +356,35 @@ private:
         if (std::fabs (gr_ - grT) < 1e-6)
             gr_ = grT;
 
-        if ((float) prm_.rangeHz != rangeApplied_)
+        // Repair, Translate and Range ease toward a knob that moved instead of jumping (a jump is a click on the note)
+        const double repT = std::clamp ((double) prm_.repair, 0.0, 1.0), trT = std::clamp ((double) prm_.translate, 0.0, 2.0);
+        const double fcT = std::clamp ((double) prm_.rangeHz, 50.0, 1000.0);
+        if (fresh_)
         {
-            rangeApplied_ = prm_.rangeHz;
-            const double fc = std::clamp ((double) prm_.rangeHz, 50.0, 1000.0);
-            for (auto& l : lpR_)
-                l.setLowpass (fc, sr_);
-            aRes_ = std::min (aMax_, (int) std::lround (0.45 / fc * sr_));
+            repA_ = repAP_ = repT;
+            tr_ = trP_ = trT;
+            rangeSm_ = fcT;
         }
+        repA_ += aPar_ * (repT - repA_);
+        if (std::fabs (repA_ - repT) < 1e-6)
+            repA_ = repT;
+        tr_ += aPar_ * (trT - tr_);
+        if (std::fabs (tr_ - trT) < 1e-6)
+            tr_ = trT;
+        ar_ = 1.0 - std::exp (-1.0 / ((0.06 + 0.28 * std::max (0.0, repA_ - 0.5)) * sr_)); // 60 ms, stretching to 200 ms above 50 %
+        if (fresh_)
+            arP_ = ar_;
+        rangeSm_ = std::exp (std::log (rangeSm_) + aPar_ * (std::log (fcT) - std::log (rangeSm_)));
+        if (std::fabs (rangeSm_ / fcT - 1.0) < 1e-5)
+            rangeSm_ = fcT;
+        if (rangeSm_ != rangeApplied_)
+        {
+            rangeApplied_ = rangeSm_;
+            for (auto& l : lpR_)
+                l.setLowpass (rangeSm_, sr_);
+            aResF_ = std::min ((double) aMax_ - 1.0, 0.45 / rangeSm_ * sr_); // the residual low-pass's group delay, read ahead
+        }
+        fresh_ = false;
 
         // tone lock: each harmonic's share of the note, against its long-term average
         double tot = 0.0, L[kH];
@@ -440,11 +466,14 @@ private:
         const double gD = gDs_;
 
         const double gRes = vC_ * ((1.0 + attC_ * (grC_ - 1.0)) * duck - 1.0);
+        const int64_t aResI = (int64_t) std::floor (aResF_);
+        const double aResFr = aResF_ - (double) aResI;
         double rOutM = 0.0;
         for (int c = 0; c < nCh; ++c)
         {
             const double x = dl_[c][(size_t) (t2 & mask)];
-            const double rIn = rr_[c][(size_t) ((t2 + aRes_) & (rsize_ - 1))];
+            const double ra = rr_[c][(size_t) ((t2 + aResI) & (rsize_ - 1))], rb = rr_[c][(size_t) ((t2 + aResI + 1) & (rsize_ - 1))];
+            const double rIn = ra + (rb - ra) * aResFr;
             const double rLow = lpR_[c].process (rIn); // lines up with the residual at t2
             const double lowOut = (x - rr_[c][k2]) + dr_[c][k2] + (1.0 + gRes) * rLow; // note + residual below Range, after the split's changes
             out[c] = x + dr_[c][k2] + gRes * rLow + (gD - 1.0) * lowOut;
@@ -479,9 +508,8 @@ private:
         zp[0] = z;
         for (int h = 1; h < kH; ++h)
             zp[h] = zp[h - 1] * z;
-        const double repAmt = std::clamp ((double) prm_.repair, 0.0, 1.0);
-        const double ar = 1.0 - std::exp (-1.0 / ((0.06 + 0.28 * std::max (0.0, repAmt - 0.5)) * sr_)); // 60 ms, stretching to 200 ms above 50 %
-        const double rep = std::min (1.0, 2.0 * repAmt) * glide (repP_, repW_), tr = std::clamp ((double) prm_.translate, 0.0, 2.0);
+        const double repAmt = glide (repAP_, repA_), ar = glide (arP_, ar_);
+        const double rep = std::min (1.0, 2.0 * repAmt) * glide (repP_, repW_), tr = glide (trP_, tr_);
         const bool active = vC_ > 0.0;
         double pM = 0.0, rM = 0.0;
         for (int h = 0; h < kH; ++h)
@@ -578,12 +606,14 @@ private:
 
     double v_ = 0.0, gr_ = 1.0, g_[kH] {}, ref_[kH] {}, relSm_[kH] {};
     Cx c1s_, c1t_, cMono_[kH], cOutMono_[kH];
-    int aMax_ = 300, aRes_ = 0;
+    int aMax_ = 300;
+    double aResF_ = 0.0, rangeSm_ = 300.0, repA_ = 0.0, repAP_ = 0.0, tr_ = 0.0, trP_ = 0.0, ar_ = 0.001, arP_ = 0.001, aPar_ = 0.01;
+    bool fresh_ = true;
     double repW_ = 1.0, vP_ = 0.0, grP_ = 1.0, attP_ = 1.0, repP_ = 1.0, gP_[kH] {}, vC_ = 0.0, grC_ = 1.0, attC_ = 1.0;
     int rampPos_ = 0;
     std::vector<double> dr_[2], rr_[2], tapPr_, tapRr_;
     double attW_ = 1.0;
-    float rangeApplied_ = -1.0f;
+    double rangeApplied_ = -1.0;
     float pitchOut_ = 0.0f, inDb_[kH] {}, outDb_[kH] {};
     double partEn_ = 0.0, resEn_ = 0.0, resOutEn_ = 0.0, tapP_ = 0.0, tapR_ = 0.0;
 };
