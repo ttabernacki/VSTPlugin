@@ -275,6 +275,34 @@ int main()
         CHECK (mdc > 0.05f, "control: free-running orbit would differ (max diff %.2f)", mdc);
     }
 
+    std::printf ("Bypass\n");
+    {
+        // bypassed, the dry signal is delayed by the reported latency (a host compensates it either way), across odd block sizes
+        OrbitPanAudioProcessor p;
+        prepare (p, 48000.0, 512);
+        const auto l = noise (20000, 5), r = noise (20000, 6);
+        std::vector<float> oL (l.size()), oR (r.size());
+        juce::MidiBuffer midi;
+        juce::AudioBuffer<float> buf (2, 1024);
+        size_t pos = 0;
+        for (int k = 0; pos < l.size(); ++k)
+        {
+            const int n = (int) std::min<size_t> ((size_t) (1 + (k * 37) % 700), l.size() - pos);
+            juce::AudioBuffer<float> view (buf.getArrayOfWritePointers(), 2, n);
+            for (int i = 0; i < n; ++i)
+                view.setSample (0, i, l[pos + (size_t) i]), view.setSample (1, i, r[pos + (size_t) i]);
+            p.processBlockBypassed (view, midi);
+            for (int i = 0; i < n; ++i)
+                oL[pos + (size_t) i] = view.getSample (0, i), oR[pos + (size_t) i] = view.getSample (1, i);
+            pos += (size_t) n;
+        }
+        const size_t lat = (size_t) p.getLatencySamples();
+        double md = 0;
+        for (size_t i = lat; i < l.size(); ++i)
+            md = std::max ({ md, (double) std::fabs (oL[i] - l[i - lat]), (double) std::fabs (oR[i] - r[i - lat]) });
+        CHECK (lat > 0 && md == 0.0, "bypassed: the input delayed by exactly the reported %zu samples (max diff %.1e)", lat, md);
+    }
+
     std::printf ("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASSED" : "FAILED", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }

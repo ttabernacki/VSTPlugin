@@ -125,6 +125,26 @@ void OrbitPanAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     setLatencySamples (spatializer.latencySamples());
     havePrevParams = false;
     wasPlaying = false;
+    for (auto& ch : bypassHist)
+        std::fill (std::begin (ch), std::end (ch), 0.0f);
+    bypassPos = 0;
+}
+
+// Bypassed, the dry signal still has to be delayed by the latency the plug-in reports (2 samples), or the host's latency
+// compensation would put it that much early.
+void OrbitPanAudioProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    const int n = buffer.getNumSamples(), nCh = std::min (2, buffer.getNumChannels()), lat = getLatencySamples();
+    jassert (lat >= 0 && lat < 8);
+    if (getTotalNumInputChannels() == 1 && nCh == 2)
+        buffer.copyFrom (1, 0, buffer, 0, 0, n);
+    for (int i = 0; i < n; ++i, ++bypassPos)
+        for (int c = 0; c < nCh; ++c)
+        {
+            float* d = buffer.getWritePointer (c);
+            bypassHist[c][bypassPos & 7u] = d[i];
+            d[i] = bypassHist[c][(bypassPos - (uint32_t) lat) & 7u];
+        }
 }
 
 void OrbitPanAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)

@@ -15,7 +15,9 @@ public:
     void releaseResources() override {}
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    void processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     using juce::AudioProcessor::processBlock;
+    using juce::AudioProcessor::processBlockBypassed;
 
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
@@ -47,6 +49,8 @@ private:
     spat::Spatializer spatializer;
     juce::AudioBuffer<float> scratch; // copy of the input so we never process in place
     bool tableLoaded = false;
+    float bypassHist[2][8] {}; // the dry signal, delayed by the reported latency while bypassed
+    uint32_t bypassPos = 0;
 
     spat::SpatParams prevParams;
     bool havePrevParams = false, wasPlaying = false;
