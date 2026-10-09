@@ -28,9 +28,13 @@
 #include <cstdlib>
 #include <vector>
 
+#include "../../bass-common/PitchTracker.h"
+
 namespace nsp
 {
-constexpr double kPi = 3.14159265358979323846;
+using bass::Cx;
+using bass::mag;
+constexpr double kPi = bass::kPi;
 
 struct Params
 {
@@ -42,16 +46,6 @@ struct Params
     float rangeHz = 300.0f;     // residual cleanup acts below this (50..1000 Hz)
 };
 
-struct Cx
-{
-    double re = 0.0, im = 0.0;
-};
-inline Cx operator+ (Cx a, Cx b) { return { a.re + b.re, a.im + b.im }; }
-inline Cx operator- (Cx a, Cx b) { return { a.re - b.re, a.im - b.im }; }
-inline Cx operator* (Cx a, Cx b) { return { a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re }; }
-inline Cx operator* (Cx a, double s) { return { a.re * s, a.im * s }; }
-inline double mag (Cx a) { return std::sqrt (a.re * a.re + a.im * a.im); }
-
 class NoteSpace
 {
 public:
@@ -60,23 +54,9 @@ public:
     void prepare (double sampleRate)
     {
         sr_ = sampleRate;
-        // pitch tracker on a decimated, low-passed mono copy (as in Low-End Definition)
-        D_ = std::max (1, (int) std::floor (sr_ / 5000.0));
-        fsd_ = sr_ / D_;
-        tauMax_ = (int) std::ceil (fsd_ / 30.0) + 2;
-        tauMin_ = std::max (4, (int) std::floor (fsd_ / 260.0));
-        N_ = 2 * tauMax_;
-        hopD_ = std::max (4, (int) std::lround (0.004 * fsd_));
-        hopIn_ = (int64_t) hopD_ * D_;
-        W_ = (int64_t) N_ * D_;
-        win_.assign ((size_t) N_, 0.0f);
-        diff_.assign ((size_t) tauMax_ + 2, 0.0f);
-        cmnd_.assign ((size_t) tauMax_ + 2, 0.0f);
-        din_.assign (kRing, 0.0f);
-        setLp (lpA_, 400.0);
-        af_ = 1.0 - std::exp (-1.0 / (0.008 * sr_));
-        as_ = 1.0 - std::exp (-1.0 / (0.060 * sr_));
-
+        trk_.prepare (sr_);
+        W_ = trk_.windowSamples();
+        hopIn_ = trk_.hopSamples();
         // the split runs 2 * Pmax behind the pitch, which runs Lp behind the input
         pMax_ = (int) std::ceil (sr_ / 30.0);
         Lp_ = (int) (W_ / 2 + hopIn_ + 64);
@@ -117,7 +97,6 @@ public:
     {
         for (auto& d : dl_)
             std::fill (d.begin(), d.end(), 0.0f);
-        std::fill (din_.begin(), din_.end(), 0.0f);
         for (int c = 0; c < 2; ++c)
             for (int h = 0; h < kH; ++h)
             {
@@ -135,18 +114,10 @@ public:
         std::fill (zr_.begin(), zr_.end(), Cx { 1.0, 0.0 });
         std::fill (f0r_.begin(), f0r_.end(), 55.0f);
         std::fill (vr_.begin(), vr_.end(), 0);
-        lpA_.z[0] = lpA_.z[1] = St {};
         for (auto& l : lpR_)
-            l.z[0] = l.z[1] = St {};
+            l.reset();
+        trk_.reset();
         nIn_ = 0;
-        m_ = 0;
-        frames_.fill (Frame {});
-        frameCount_ = 0;
-        onsets_.fill (-1000000000LL);
-        onsetN_ = onsetHead_ = 0;
-        inOnset_ = false;
-        lastOnsetT_ = -1000000;
-        pf_ = ps_ = 0.0;
         theta_ = 0.0;
         f0s_ = 55.0;
         f0Tick_ = 0.0f;
@@ -197,7 +168,7 @@ public:
         for (int i = 0; i < n; ++i)
         {
             if (nIn_ % kSub == 0)
-                controlInput();
+                trk_.control();
             double x[2];
             for (int c = 0; c < 2; ++c)
             {
@@ -205,7 +176,7 @@ public:
                 if (! std::isfinite (x[c]))
                     x[c] = 0.0;
             }
-            analyse (0.5 * (x[0] + x[1]));
+            trk_.push (0.5 * (x[0] + x[1]));
             const int wr = (int) (nIn_ & mask);
             for (int c = 0; c < nCh; ++c)
                 dl_[c][(size_t) wr] = (float) x[c];
@@ -220,276 +191,11 @@ public:
     }
 
 private:
-    static constexpr int kRing = 4096, kFrames = 1024;
-
-    struct Svf
-    {
-        double g = 0, k = 0, a1 = 0, a2 = 0, a3 = 0;
-    };
-    struct St
-    {
-        double ic1 = 0, ic2 = 0;
-    };
-    struct Lr4
-    {
-        Svf s;
-        St z[2];
-        double process (double x)
-        {
-            double v1, v2;
-            tick (s, z[0], x, v1, v2);
-            tick (s, z[1], v2, v1, v2);
-            return v2;
-        }
-    };
-    static inline void tick (const Svf& s, St& z, double x, double& v1, double& v2)
-    {
-        const double v3 = x - z.ic2;
-        v1 = s.a1 * z.ic1 + s.a2 * v3;
-        v2 = z.ic2 + s.a2 * z.ic1 + s.a3 * v3;
-        z.ic1 = 2.0 * v1 - z.ic1;
-        z.ic2 = 2.0 * v2 - z.ic2;
-        if (std::fabs (z.ic1) < 1e-20)
-            z.ic1 = 0;
-        if (std::fabs (z.ic2) < 1e-20)
-            z.ic2 = 0;
-    }
-    void setLp (Lr4& l, double fc)
-    {
-        fc = std::min (fc, 0.45 * sr_);
-        l.s.g = std::tan (kPi * fc / sr_);
-        l.s.k = 1.4142135623730951;
-        l.s.a1 = 1.0 / (1.0 + l.s.g * (l.s.g + l.s.k));
-        l.s.a2 = l.s.g * l.s.a1;
-        l.s.a3 = l.s.g * l.s.a2;
-    }
-    struct Frame
-    {
-        int64_t end = 0;
-        float f0 = 0.0f, conf = 0.0f, purity = 0.0f;
-    };
-
-    // ---------------- pitch tracking (input time) ------------------------------------------
-    void analyse (double a)
-    {
-        const double lo = lpA_.process (a);
-        pf_ += af_ * (lo * lo - pf_);
-        ps_ += as_ * (lo * lo - ps_);
-        if (nIn_ % D_ == 0)
-        {
-            din_[(size_t) (m_ & (kRing - 1))] = (float) lo;
-            ++m_;
-            if (m_ % hopD_ == 0 && m_ >= N_)
-                frame();
-        }
-    }
-
-    bool purityAt (const std::vector<float>& ring, int64_t last, float f0, int maxL, double& purity) const
-    {
-        const double period = fsd_ / f0;
-        int K = std::max (2, (int) std::ceil (0.05 * f0));
-        K = std::min (K, (int) std::floor (maxL / period));
-        if (K < 1)
-            return false;
-        const int L = (int) std::lround (K * period);
-        if (L < 4 || last - L + 1 < 0)
-            return false;
-        const double w = 2.0 * kPi * K / L, c = std::cos (w), s = std::sin (w);
-        double pr = 1.0, pi = 0.0, re = 0.0, im = 0.0, e2 = 0.0;
-        for (int j = 0; j < L; ++j)
-        {
-            const double x = ring[(size_t) ((last - (L - 1) + j) & (kRing - 1))];
-            re += x * pr;
-            im -= x * pi;
-            e2 += x * x;
-            const double nr = pr * c - pi * s;
-            pi = pr * s + pi * c;
-            pr = nr;
-        }
-        if (e2 / L < 1e-10)
-            return false;
-        const double amp = 2.0 / L * std::sqrt (re * re + im * im);
-        purity = std::min (1.0, 0.5 * amp * amp / (e2 / L));
-        return true;
-    }
-
-
-    void frame()
-    {
-        const int64_t last = m_ - 1;
-        double mean = 0.0;
-        for (int j = 0; j < N_; ++j)
-        {
-            win_[(size_t) j] = din_[(size_t) ((last - (N_ - 1) + j) & (kRing - 1))];
-            mean += win_[(size_t) j];
-        }
-        mean /= N_;
-        double e2 = 0.0;
-        for (int j = 0; j < N_; ++j)
-        {
-            win_[(size_t) j] -= (float) mean;
-            e2 += (double) win_[(size_t) j] * win_[(size_t) j];
-        }
-        Frame fr;
-        fr.end = last * D_;
-        if (std::sqrt (e2 / N_) > 1e-4)
-        {
-            const int Wd = tauMax_;
-            diff_[0] = 0;
-            for (int tau = 1; tau <= tauMax_; ++tau)
-            {
-                // four independent sums: the compiler can turn this into SIMD (a single chain of additions cannot be)
-                const float* w = win_.data();
-                const float* v = w + tau;
-                float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
-                int j = 0;
-                for (; j + 4 <= Wd; j += 4)
-                {
-                    const float d0 = w[j] - v[j], d1 = w[j + 1] - v[j + 1], d2 = w[j + 2] - v[j + 2], d3 = w[j + 3] - v[j + 3];
-                    s0 += d0 * d0;
-                    s1 += d1 * d1;
-                    s2 += d2 * d2;
-                    s3 += d3 * d3;
-                }
-                for (; j < Wd; ++j)
-                {
-                    const float d0 = w[j] - v[j];
-                    s0 += d0 * d0;
-                }
-                diff_[(size_t) tau] = (s0 + s1) + (s2 + s3);
-            }
-            double run = 0;
-            cmnd_[0] = 1.0f;
-            for (int tau = 1; tau <= tauMax_; ++tau)
-            {
-                run += diff_[(size_t) tau];
-                cmnd_[(size_t) tau] = run > 0 ? (float) (diff_[(size_t) tau] * tau / run) : 1.0f;
-            }
-            int best = -1;
-            for (int tau = tauMin_; tau < tauMax_; ++tau)
-                if (cmnd_[(size_t) tau] < 0.20f)
-                {
-                    while (tau + 1 < tauMax_ && cmnd_[(size_t) tau + 1] < cmnd_[(size_t) tau])
-                        ++tau;
-                    best = tau;
-                    break;
-                }
-            if (best < 0)
-            {
-                float lo = 1e9f;
-                for (int tau = tauMin_; tau < tauMax_; ++tau)
-                    if (cmnd_[(size_t) tau] < lo)
-                    {
-                        lo = cmnd_[(size_t) tau];
-                        best = tau;
-                    }
-                if (lo > 0.45f)
-                    best = -1;
-            }
-            if (best > 0)
-            {
-                float tau = (float) best;
-                const float a = cmnd_[(size_t) best - 1], b = cmnd_[(size_t) best], c = cmnd_[(size_t) best + 1];
-                const float den = a - 2.0f * b + c;
-                if (std::fabs (den) > 1e-9f)
-                    tau += 0.5f * (a - c) / den;
-                fr.f0 = (float) fsd_ / tau;
-                fr.conf = std::max (0.0f, 1.0f - cmnd_[(size_t) best]);
-                double p = 0.0;
-                if (purityAt (din_, last, fr.f0, N_, p))
-                    fr.purity = (float) p;
-            }
-        }
-        frames_[(size_t) (frameCount_ & (kFrames - 1))] = fr;
-        ++frameCount_;
-    }
-
-
-    // The note under output time t. A window that ends at t sees only the past, one that starts at t only
-    // the future; near a note change one of them is mixed, and an onset between them says which one is pure.
-    bool pickPitch (int64_t t, float& f0, float& purity) const
-    {
-        if (frameCount_ == 0)
-            return false;
-        const int64_t latest = frameCount_ - 1, oldest = std::max<int64_t> (0, frameCount_ - kFrames + 1);
-        const Frame& L = frames_[(size_t) (latest & (kFrames - 1))];
-        const Frame *B = nullptr, *F = nullptr;
-        if (t <= L.end)
-        {
-            const int64_t k = latest - (L.end - t + hopIn_ - 1) / hopIn_;
-            if (k >= oldest)
-                B = &frames_[(size_t) (k & (kFrames - 1))];
-        }
-        if (t + W_ <= L.end)
-        {
-            const int64_t k = latest - (L.end - (t + W_)) / hopIn_;
-            if (k >= oldest)
-                F = &frames_[(size_t) (k & (kFrames - 1))];
-        }
-        // a pitch that has no energy at its own frequency is a trick of the tracker (a chord's common period), not a note
-        auto voiced = [] (const Frame* f) { return f != nullptr && f->f0 > 0.0f && f->conf >= 0.75f && f->purity >= 0.03f; };
-        const Frame* use = nullptr;
-        if (voiced (B) && voiced (F))
-        {
-            const double st = std::fabs (12.0 * std::log2 ((double) F->f0 / B->f0));
-            if (st < 0.7)
-                use = F->conf >= B->conf ? F : B;
-            else
-            {
-                int64_t best = 0;
-                bool found = false;
-                for (int i = 0; i < onsetN_ && i < (int) onsets_.size(); ++i)
-                {
-                    const int64_t o = onsets_[(size_t) i];
-                    if (o >= t - W_ && o <= t + W_ && (! found || std::llabs (o - t) < std::llabs (best - t)))
-                    {
-                        best = o;
-                        found = true;
-                    }
-                }
-                if (found)
-                    use = best <= t ? F : B;
-                else if (std::fabs (F->conf - B->conf) > 0.08f)
-                    use = F->conf > B->conf ? F : B;
-            }
-        }
-        else if (voiced (B) && B->conf >= 0.88f) // a lone window has to be very sure: noise is rarely periodic twice
-            use = B;
-        else if (voiced (F) && F->conf >= 0.88f)
-            use = F;
-        if (! use)
-            return false;
-        f0 = use->f0;
-        purity = use->purity;
-        return true;
-    }
-
-
-    // onsets, for telling which pitch window is the pure one at a note change, and for protecting attacks
-    void controlInput()
-    {
-        const double lvl = 10.0 * std::log10 (ps_ + 1e-12);
-        const double wgt = std::clamp ((lvl + 72.0) / 12.0, 0.0, 1.0);
-        const double d = 10.0 * std::log10 ((pf_ + 1e-12) / (ps_ + 1e-12)) * wgt;
-        if (d > 4.5)
-        {
-            if (! inOnset_ && nIn_ - lastOnsetT_ > (int64_t) (0.04 * sr_))
-            {
-                lastOnsetT_ = nIn_;
-                onsets_[(size_t) (onsetHead_++ & 31)] = nIn_ - (int64_t) (0.0065 * sr_);
-                onsetN_ = std::min (onsetN_ + 1, 32);
-            }
-            inOnset_ = true;
-        }
-        else if (d < 2.0)
-            inOnset_ = false;
-    }
-
     // ---------------- stage A: pitch, phase, heterodyne (Lp_ behind the input) -------------
     void pitchTick (int64_t t1)
     {
         float f0 = 0.0f, pur = 0.0f;
-        const bool voiced = pickCentred (t1, f0, pur);
+        const bool voiced = trk_.pickCentred (t1, f0, pur);
         if (voiced)
         {
             f0 = std::clamp (f0, 31.0f, 260.0f);
@@ -501,27 +207,6 @@ private:
         else if (voicedTick_)
             jumps_[(size_t) (jumpHead_++ & 63)] = t1; // the note ends: the split is not trusted around here either
         voicedTick_ = voiced;
-    }
-
-    // the pitch frame whose window is centred on t (the split around a note change is faded out anyway)
-    bool pickCentred (int64_t t, float& f0, float& purity) const
-    {
-        if (frameCount_ == 0)
-            return false;
-        const int64_t latest = frameCount_ - 1, oldest = std::max<int64_t> (0, frameCount_ - kFrames + 1);
-        const Frame& L = frames_[(size_t) (latest & (kFrames - 1))];
-        const int64_t want = t + W_ / 2;
-        if (want > L.end)
-            return false;
-        const int64_t k = latest - (L.end - want + hopIn_ / 2) / hopIn_;
-        if (k < oldest)
-            return false;
-        const Frame& F = frames_[(size_t) (k & (kFrames - 1))];
-        if (! (F.f0 > 0.0f && F.conf >= 0.8f && F.purity >= 0.03f))
-            return false;
-        f0 = F.f0;
-        purity = F.purity;
-        return true;
     }
 
     Cx readS (const std::vector<Cx>& r, double tau) const
@@ -613,9 +298,9 @@ private:
 
         // attacks are mostly residual (pick, string noise): give them about 40 ms before the residual is touched
         int64_t lastOn = -1000000000LL;
-        for (int i = 0; i < onsetN_; ++i)
-            if (onsets_[(size_t) i] <= t2 && onsets_[(size_t) i] > lastOn)
-                lastOn = onsets_[(size_t) i];
+        for (int i = 0; i < trk_.onsetCount(); ++i)
+            if (trk_.onsetTime (i) <= t2 && trk_.onsetTime (i) > lastOn)
+                lastOn = trk_.onsetTime (i);
         attW_ = std::clamp (((double) (t2 - lastOn) - 0.003 * sr_) / (0.035 * sr_), 0.0, 1.0);
         // repair is a slow steadying of the fundamental: keep it off the attack, where it would only lag behind
         repW_ = std::clamp (((double) (t2 - lastOn) - 0.02 * sr_) / (0.12 * sr_), 0.0, 1.0);
@@ -631,7 +316,7 @@ private:
             rangeApplied_ = prm_.rangeHz;
             const double fc = std::clamp ((double) prm_.rangeHz, 50.0, 1000.0);
             for (auto& l : lpR_)
-                setLp (l, fc);
+                l.setLowpass (fc, sr_);
             aRes_ = std::min (aMax_, (int) std::lround (0.45 / fc * sr_));
         }
 
@@ -801,18 +486,10 @@ private:
     }
 
     Params prm_;
-    double sr_ = 48000.0, fsd_ = 4800.0;
-    int D_ = 10, tauMax_ = 170, tauMin_ = 18, N_ = 340, hopD_ = 20;
-    int64_t hopIn_ = 200, W_ = 3400;
-    std::vector<float> din_, win_, diff_, cmnd_;
-    Lr4 lpA_, lpR_[2];
-    std::array<Frame, kFrames> frames_;
-    int64_t frameCount_ = 0, m_ = 0, nIn_ = 0;
-    std::array<int64_t, 32> onsets_ {};
-    int onsetN_ = 0, onsetHead_ = 0;
-    bool inOnset_ = false;
-    int64_t lastOnsetT_ = -1000000;
-    double pf_ = 0.0, ps_ = 0.0, af_ = 0.01, as_ = 0.001;
+    double sr_ = 48000.0;
+    int64_t hopIn_ = 200, W_ = 3400, nIn_ = 0;
+    bass::PitchTracker trk_;
+    bass::Lr4 lpR_[2];
 
     int pMax_ = 1600, Lp_ = 4000, lag2_ = 3204, lat_ = 7200, rsize_ = 8192, dsize_ = 16384;
     std::vector<float> dl_[2];
