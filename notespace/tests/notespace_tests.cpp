@@ -397,10 +397,10 @@ int main()
             Params p;
             p.contrast = u (g) * 2 - 1;
             p.toneLock = u (g);
-            p.fundamentalDb = u (g) * 12 - 6;
+            p.fundamentalDb = u (g) * 36 - 18;
             p.repair = u (g);
-            p.translate = u (g);
-            p.rangeHz = 100.0f + 400.0f * u (g);
+            p.translate = 2.0f * u (g);
+            p.rangeHz = 50.0f + 950.0f * u (g);
             d.setParams (p);
             float* c[1] = { a.data() };
             d.process (c, 1, n);
@@ -410,7 +410,7 @@ int main()
                 peak = std::max (peak, std::fabs (a[(size_t) i]));
             }
         }
-        CHECK (fin && peak < 8.0f, "fuzz (800 random blocks and settings): finite, peak %.2f", peak);
+        CHECK (fin && peak < 40.0f, "fuzz (800 random blocks and settings): finite, peak %.2f", peak);
     }
     {
         // CPU

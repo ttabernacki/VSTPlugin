@@ -20,14 +20,14 @@ APVTS::ParameterLayout NoteSpaceProcessor::createLayout()
                                                   Attr().withStringFromValueFunction (pctSigned).withValueFromStringFunction (pctIn)));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "tonelock", 1 }, "Tone lock", Range (0.0f, 1.0f), 0.0f,
                                                   Attr().withStringFromValueFunction (pct).withValueFromStringFunction (pctIn)));
-    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "fundamental", 1 }, "Fundamental", Range (-6.0f, 6.0f), 0.0f,
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "fundamental", 1 }, "Fundamental", Range (-18.0f, 18.0f), 0.0f,
                                                   Attr().withStringFromValueFunction ([] (float v, int) { return String (v > 0 ? "+" : "") + String (v, 1) + " dB"; })
                                                       .withValueFromStringFunction (num)));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "repair", 1 }, "Repair", Range (0.0f, 1.0f), 0.0f,
                                                   Attr().withStringFromValueFunction (pct).withValueFromStringFunction (pctIn)));
-    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "translate", 1 }, "Translate", Range (0.0f, 1.0f), 0.0f,
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "translate", 1 }, "Translate", Range (0.0f, 2.0f), 0.0f,
                                                   Attr().withStringFromValueFunction (pct).withValueFromStringFunction (pctIn)));
-    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "range", 1 }, "Range", Range (100.0f, 500.0f, 0.0f, 0.6f), 300.0f,
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "range", 1 }, "Range", Range (50.0f, 1000.0f, 0.0f, 0.4f), 300.0f,
                                                   Attr().withStringFromValueFunction ([] (float v, int) { return String (roundToInt (v)) + " Hz"; })
                                                       .withValueFromStringFunction (num)));
     return l;

@@ -34,12 +34,12 @@ constexpr double kPi = 3.14159265358979323846;
 
 struct Params
 {
-    float contrast = 0.4f;      // -1..1  residual +6 dB .. -12 dB
+    float contrast = 0.4f;      // -1..1  residual +18 dB .. -40 dB (deliberately extreme: find the sweet spot by ear)
     float toneLock = 0.0f;      // 0..1
-    float fundamentalDb = 0.0f; // -6..+6
-    float repair = 0.0f;        // 0..1
-    float translate = 0.0f;     // 0..1
-    float rangeHz = 300.0f;     // residual cleanup acts below this
+    float fundamentalDb = 0.0f; // -18..+18
+    float repair = 0.0f;        // 0..1   blend to 100 % at 0.5, then the smoothing stretches from 60 to 200 ms
+    float translate = 0.0f;     // 0..2   1 = harmonics 2-4 at -6/-9/-12 dB re the fundamental, 2 = +3/0/-3 dB
+    float rangeHz = 300.0f;     // residual cleanup acts below this (50..1000 Hz)
 };
 
 struct Cx
@@ -80,7 +80,7 @@ public:
         // the split runs 2 * Pmax behind the pitch, which runs Lp behind the input
         pMax_ = (int) std::ceil (sr_ / 30.0);
         Lp_ = (int) (W_ / 2 + hopIn_ + 64);
-        aMax_ = (int) std::ceil (0.45 / 80.0 * sr_) + 2; // the residual low-pass's group delay at the lowest Range
+        aMax_ = (int) std::ceil (0.45 / 50.0 * sr_) + 2; // the residual low-pass's group delay at the lowest Range
         lag2_ = 2 * pMax_ + aMax_;
         lat_ = Lp_ + lag2_;
         lat_ = ((lat_ + kSub - 1) / kSub) * kSub;
@@ -610,7 +610,7 @@ private:
         repW_ = std::clamp (((double) (t2 - lastOn) - 0.02 * sr_) / (0.12 * sr_), 0.0, 1.0);
 
         const double c = std::clamp ((double) prm_.contrast, -1.0, 1.0);
-        const double grT = std::pow (10.0, (c > 0.0 ? -12.0 * c : -6.0 * c) / 20.0);
+        const double grT = std::pow (10.0, (c > 0.0 ? -40.0 * c : -18.0 * c) / 20.0);
         gr_ += (1.0 - std::exp (-tick / 0.02)) * (grT - gr_);
         if (std::fabs (gr_ - grT) < 1e-6)
             gr_ = grT;
@@ -618,7 +618,7 @@ private:
         if ((float) prm_.rangeHz != rangeApplied_)
         {
             rangeApplied_ = prm_.rangeHz;
-            const double fc = std::clamp ((double) prm_.rangeHz, 80.0, 600.0);
+            const double fc = std::clamp ((double) prm_.rangeHz, 50.0, 1000.0);
             for (auto& l : lpR_)
                 setLp (l, fc);
             aRes_ = std::min (aMax_, (int) std::lround (0.45 / fc * sr_));
@@ -645,9 +645,9 @@ private:
             }
             double gDb = 0.0;
             if (stable && loud && relSm_[h] > -45.0 && ref_[h] > -99.0)
-                gDb = std::clamp ((double) prm_.toneLock, 0.0, 1.0) * std::clamp (ref_[h] - relSm_[h], -9.0, 9.0);
+                gDb = std::clamp ((double) prm_.toneLock, 0.0, 1.0) * std::clamp (ref_[h] - relSm_[h], -24.0, 24.0);
             if (h == 0)
-                gDb += std::clamp ((double) prm_.fundamentalDb, -12.0, 12.0);
+                gDb += std::clamp ((double) prm_.fundamentalDb, -18.0, 18.0);
             const double gT = std::pow (10.0, gDb / 20.0);
             g_[h] += (1.0 - std::exp (-tick / 0.03)) * (gT - g_[h]);
             if (std::fabs (g_[h] - gT) < 1e-6)
@@ -705,8 +705,9 @@ private:
         zp[0] = z;
         for (int h = 1; h < kH; ++h)
             zp[h] = zp[h - 1] * z;
-        const double ar = 1.0 - std::exp (-1.0 / (0.06 * sr_));
-        const double rep = std::clamp ((double) prm_.repair, 0.0, 1.0) * repW_, tr = std::clamp ((double) prm_.translate, 0.0, 1.0);
+        const double repAmt = std::clamp ((double) prm_.repair, 0.0, 1.0);
+        const double ar = 1.0 - std::exp (-1.0 / ((0.06 + 0.28 * std::max (0.0, repAmt - 0.5)) * sr_)); // 60 ms, stretching to 200 ms above 50 %
+        const double rep = std::min (1.0, 2.0 * repAmt) * repW_, tr = std::clamp ((double) prm_.translate, 0.0, 2.0);
         const bool active = v_ > 0.0;
         double pM = 0.0, rM = 0.0;
         for (int h = 0; h < kH; ++h)
@@ -737,18 +738,19 @@ private:
                     co[0] = (cs[0] * (1.0 - rep) + c1t_ * rep) * g_[0];
                 if (tr > 0.0)
                 {
-                    // harmonics 2-4 kept at least 6, 9, 12 dB below the fundamental, generated phase-locked to it if absent
+                    // harmonics 2-4 kept at least 6, 9, 12 dB below the fundamental (raised by up to 9 dB above 100 %),
+                    // generated phase-locked to it if absent
                     const double m1 = mag (co[0]);
                     const Cx u1 = m1 > 1e-12 ? co[0] * (1.0 / m1) : Cx { 1.0, 0.0 };
                     Cx uh = u1;
                     for (int h = 1; h <= 3; ++h)
                     {
                         uh = uh * u1; // e^{j (h+1) arg c1}
-                        const double T = m1 * std::pow (10.0, -(6.0 + 3.0 * (h - 1)) / 20.0);
+                        const double T = m1 * std::pow (10.0, (-(6.0 + 3.0 * (h - 1)) + 9.0 * std::max (0.0, tr - 1.0)) / 20.0);
                         const double m = mag (co[h]);
                         if (m < T)
                         {
-                            const double target = m + tr * (T - m);
+                            const double target = m + std::min (1.0, tr) * (T - m);
                             const Cx dir = co[h] + uh * (0.1 * T);
                             const double md = mag (dir);
                             if (md > 1e-15)
