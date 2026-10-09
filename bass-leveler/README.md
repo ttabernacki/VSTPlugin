@@ -14,7 +14,12 @@ There is nothing to learn or set up: put it on a mono bass track and play.
   The delay is reported to the host (plug-in delay compensation applies); it is not for live monitoring.
 - **Reference:** the median of the last 24 notes. It is trusted after about 4 notes and keeps adapting, so
   it follows the part. Each note is moved toward it by **Amount**.
-- **What is leveled:** the absolute level of the note's fundamental. It evens out everything, dynamics included.
+- **What is leveled:** the level of the whole note (harmonics 1-4 together), evened out across notes, dynamics included.
+  The correction is still a bell on the fundamental, so the plug-in works out the fundamental gain that moves the whole note
+  by the right amount: a resonance on the fundamental is corrected fully. A note whose fundamental carries under 5 % of its
+  energy cannot be moved by its fundamental and is left alone (the correction fades in between 5 and 20 %).
+  Measuring the fundamental alone (as before) went wrong on a real recording: notes whose energy sat on the 2nd to 4th
+  harmonics looked quiet, and the healthy notes around them were cut by 8 dB.
   (An earlier *Balance* mode and a *+ 2nd harmonic* bell were removed: Note Space's **Tone lock** does the
   harmonic-balance job on the separated partials, without bells on the full signal.)
 
@@ -34,8 +39,9 @@ There is nothing to learn or set up: put it on a mono bass track and play.
 ## Verified (synthetic bass with injected resonances; `bass-leveler/tests`)
 - 48/48 notes found and pitched correctly, no phantom notes; fast 8th notes, hammer-ons (8/8) and a slide
   (one note) handled.
-- No learning pass: resonance spread between pitches **-79%** (Amount 1.0, 3.6 dB to 0.8 dB);
-  playing dynamics are evened out too (2.2 dB to 0.7 dB note-to-note).
+- No learning pass: resonance spread between pitches **-75%** (Amount 1.0, 3.6 dB to 0.9 dB);
+  playing dynamics are evened out too (2.2 dB to 0.8 dB note-to-note). Equally loud notes, some with weak
+  fundamentals: no correction (was up to 8.8 dB).
 - Natural behaviour: the correction curve is monotonic, steepest slope < 1, no slope jump larger than
   0.02 per 0.01 dB step; the bell gain moves at most 0.35 dB in any millisecond; only 1.1% of what the
   plug-in adds to the signal lies above 600 Hz (no clicks or splatter).

@@ -243,6 +243,43 @@ int main()
                "the first two notes are left alone while the reference forms");
     }
 
+    {
+        // Notes whose energy sits on the 2nd-4th harmonics (weak fundamental) next to notes with a strong fundamental, all
+        // equally loud. Measured by the fundamental alone, the strong notes looked 8 dB too loud and were cut by that much
+        // (found on a real recording); measured as whole notes, nothing here needs correcting.
+        std::vector<float> x ((size_t) (14.0 * kFs), 0.0f);
+        const double strong[4] = { 1.0, 0.55, 0.32, 0.18 }, weak[4] = { 0.12, 0.9, 1.0, 0.7 };
+        auto energy = [] (const double* h) { double e = 0; for (int i = 0; i < 4; ++i) e += h[i] * h[i]; return e; };
+        const double ks = 0.3 / std::sqrt (energy (strong)), kw = 0.3 / std::sqrt (energy (weak));
+        int count = 0;
+        for (double t0 = 0.3; t0 + 0.5 < 14.0; t0 += 0.6, ++count)
+        {
+            const bool isStrong = count % 3 == 0; // the weak-fundamental notes are the majority, as on the recording
+            const double f0 = isStrong ? 77.8 : 41.2;
+            const double* h = isStrong ? strong : weak;
+            const double k = isStrong ? ks : kw;
+            for (size_t i = 0; i < (size_t) (0.5 * kFs); ++i)
+            {
+                const double t = (double) i / kFs, env = std::min (1.0, t / 0.005) * std::exp (-t / 0.8);
+                double s = 0;
+                for (int j = 0; j < 4; ++j)
+                    s += h[j] * std::sin (2 * kPi * (j + 1) * f0 * t + 0.4 * j);
+                x[(size_t) (t0 * kFs) + i] += (float) (k * env * s);
+            }
+        }
+        Leveler l;
+        l.prepare (kFs);
+        l.logNotes = true;
+        Params p;
+        p.amount = 1.0f;
+        run (l, x, 512, p);
+        float worst = 0.0f;
+        for (const auto& n : l.notesLog)
+            worst = std::max (worst, std::fabs (n.corrDb));
+        CHECK (l.notesLog.size() > 15 && worst < 2.0f, "equally loud notes, some with weak fundamentals: largest correction %.1f dB over %zu notes", worst,
+               l.notesLog.size());
+    }
+
     std::printf ("Natural-sounding correction (no brick wall)\n");
     {
         // (1) the correction curve is smooth everywhere: no corner where it suddenly stops

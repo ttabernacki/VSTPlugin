@@ -36,7 +36,7 @@ struct Params
 struct NoteInfo
 {
     double startSec;
-    float midi, levelDb, targetDb, corrDb;
+    float midi, levelDb, targetDb, corrDb, fundShare;
 };
 
 // compact record of a recent note, for displays
@@ -136,6 +136,21 @@ public:
         return ceiling * std::tanh (amount * eased / ceiling);
     }
 
+    // The correction is a bell on the fundamental, so a note that is devDb away from typical needs whatever fundamental gain
+    // moves the whole note by devDb: with the fundamental holding a share s of the note's energy, 10 log10((10^(dev/10) - 1 + s) / s).
+    // A resonance on the fundamental is then corrected fully. A note whose fundamental is weak (s small) cannot be moved by its
+    // fundamental at all (a 9 dB cut on 1 % of the energy changes nothing but the timbre, a boost lifts what is mostly not there),
+    // so the correction fades out as the share falls from 20 % to 5 %: the bell is the wrong tool for that note.
+    float fundamentalCorrection (float devDb, float share) const
+    {
+        const double s = std::clamp ((double) share, 1e-4, 1.0);
+        const double arg = (std::pow (10.0, devDb / 10.0) - 1.0 + s) / s;
+        const float devF = arg > 1e-3 ? (float) (10.0 * std::log10 (arg)) : -30.0f;
+        float c = softCorrection (devF, prm_.amount, prm_.maxBoostDb, prm_.maxCutDb);
+        c *= (float) std::clamp ((s - 0.05) / 0.15, 0.0, 1.0);
+        return c;
+    }
+
     // The most recent notes, oldest first (for displays). Returns how many were copied.
     int copyRecent (RecentNote* out, int maxCount) const
     {
@@ -222,13 +237,13 @@ private:
     {
         int64_t start = 0, lastVoiced = 0;
         bool done = false, known = false;
-        float hz = 0.0f, midi = 0.0f, level = 0.0f, target = 0.0f, corr = 0.0f;
+        float hz = 0.0f, midi = 0.0f, level = 0.0f, share = 1.0f, target = 0.0f, corr = 0.0f;
         int n = 0;
-        std::array<float, 24> aMidi {}, aLvl {}, aConf {};
+        std::array<float, 24> aMidi {}, aLvl {}, aShare {}, aConf {};
     };
     struct Measure
     {
-        float lvl = 0.0f;
+        float lvl = 0.0f, share = 1.0f; // the note's level, and the fundamental's share of its energy
         int lenIn = 0; // measurement window length, input samples
         bool ok = false;
     };
@@ -398,7 +413,10 @@ private:
         track ((int64_t) last * D_, fr, me);
     }
 
-    // Level of the fundamental over a window of exactly K periods (so nothing leaks into it).
+    // Level of the note: harmonics 1-4 together, over a window of exactly K periods (so the harmonics are orthogonal and
+    // nothing leaks between them). The fundamental alone is not the note's level: real bass often carries most of its energy
+    // on the 2nd to 4th harmonics (a cab or amp that rolls off the lowest octave), and measuring only the fundamental cut a
+    // healthy note by 8 dB because the quieter-looking notes around it simply had weak fundamentals.
     Measure measure (float f0) const
     {
         Measure r;
@@ -408,21 +426,28 @@ private:
         if (K < 1)
             return r;
         const int L = std::min (N_, (int) std::lround (K * period));
-        const double w1 = 2.0 * kPi * K / L;
         const int64_t last = m_ - 1;
-        const double c = std::cos (w1), sn = std::sin (w1);
-        double pr = 1.0, pi = 0.0, re = 0.0, im = 0.0;
-        for (int j = 0; j < L; ++j)
+        double e = 0.0, e1 = 0.0;
+        for (int h = 1; h <= 4 && h * f0 < 1100.0f && h * f0 < 0.45 * fsd_; ++h)
         {
-            const double x = dbuf_[(size_t) ((last - (L - 1) + j) & 4095)];
-            re += x * pr;
-            im -= x * pi;
-            const double nr = pr * c - pi * sn;
-            pi = pr * sn + pi * c;
-            pr = nr;
+            const double w = 2.0 * kPi * K * h / L, c = std::cos (w), sn = std::sin (w);
+            double pr = 1.0, pi = 0.0, re = 0.0, im = 0.0;
+            for (int j = 0; j < L; ++j)
+            {
+                const double x = dbuf_[(size_t) ((last - (L - 1) + j) & 4095)];
+                re += x * pr;
+                im -= x * pi;
+                const double nr = pr * c - pi * sn;
+                pi = pr * sn + pi * c;
+                pr = nr;
+            }
+            const double amp = 2.0 / L * std::sqrt (re * re + im * im);
+            e += amp * amp;
+            if (h == 1)
+                e1 = amp * amp;
         }
-        const double amp1 = 2.0 / L * std::sqrt (re * re + im * im);
-        r.lvl = (float) (20.0 * std::log10 (amp1 + 1e-9));
+        r.lvl = (float) (10.0 * std::log10 (e + 1e-18));
+        r.share = (float) (e1 / (e + 1e-18));
         r.lenIn = L * D_;
         r.ok = true;
         return r;
@@ -506,6 +531,7 @@ private:
             n->aConf[(size_t) n->n] = fr.conf;
             n->aMidi[(size_t) n->n] = midi;
             n->aLvl[(size_t) n->n] = me.lvl;
+            n->aShare[(size_t) n->n] = me.share;
             ++n->n;
         }
         if (! n->done && tEnd > from + span)
@@ -536,6 +562,7 @@ private:
             {
                 n.aMidi[(size_t) k] = n.aMidi[(size_t) i];
                 n.aLvl[(size_t) k] = n.aLvl[(size_t) i];
+                n.aShare[(size_t) k] = n.aShare[(size_t) i];
                 ++k;
             }
         n.n = k;
@@ -553,6 +580,9 @@ private:
         for (int i = 0; i < n.n; ++i)
             t[i] = n.aLvl[(size_t) i];
         n.level = medianOf (t, n.n);
+        for (int i = 0; i < n.n; ++i)
+            t[i] = n.aShare[(size_t) i];
+        n.share = medianOf (t, n.n);
         if (n.level < -68.0f)
             return; // noise / ring-out rather than a played note
         n.midi = midi;
@@ -572,14 +602,14 @@ private:
         }
         n.target = refVal;
         const float trust = std::max (0.0f, std::min (1.0f, (float) (histN_ - 2) / 3.0f));
-        n.corr = trust * softCorrection (refVal - n.level, prm_.amount, prm_.maxBoostDb, prm_.maxCutDb);
+        n.corr = trust * fundamentalCorrection (refVal - n.level, n.share);
         hist_[(size_t) (histN_ % kHist)] = n.level;
         ++histN_;
 
         recent_[(size_t) (recentN_ % (int) recent_.size())] = { midi, n.level - refVal, n.corr };
         ++recentN_;
         if (logNotes)
-            notesLog.push_back ({ (double) n.start / sr_, midi, n.level, refVal, n.corr });
+            notesLog.push_back ({ (double) n.start / sr_, midi, n.level, refVal, n.corr, n.share });
     }
 
     // ---------------- control (what the bell should do at the output time) ----------------------------
