@@ -69,6 +69,9 @@ a plucked line stays below -25 dB. Punch is gain modulation by definition (a +10
 - The kick duck acts on the residual, and the residual only exists where the split is trusted: a note with no clear pitch (below about
   31 Hz, an 808 mid-glide, a chord) is not ducked. Punch and Sustain do not depend on pitch and always act.
 - A kick above -50 dBFS ducks by the full Kick amount whatever its level relative to the bass; there is no level-dependent scaling.
+- A note is only trusted if at least 35 % of its energy sits on harmonics 1-4 of the tracked pitch (noise scores 0.45 at most, 0.33 at the
+  99th percentile; a note 0.65 or more). The fundamental itself may be weak or missing: on a real recording, notes at 41.6 and 46.4 Hz had 3 %
+  and 1 % of their energy at the fundamental and were found only after this test replaced a fundamental-only purity gate.
 - Monophonic bass only. Chords, or two notes ringing together, are not split (processing fades out or follows one note).
 - Fundamentals from about 31 Hz up. Below that nothing is processed.
 - Around a note change (about four periods either side, plus a few ms) the split is not trusted and the input passes through.

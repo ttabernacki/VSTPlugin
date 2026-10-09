@@ -562,6 +562,40 @@ int main()
         std::printf ("  [INFO] CPU: 20 s of stereo in %.2f s (%.1f%% of one core)\n", s, 100.0 * s / 20.0);
     }
 
+    std::printf ("Weak or missing fundamental\n");
+    {
+        // Real bass often has little energy at its fundamental (an amp or cab that cuts the lowest octave, a filtered sub): a
+        // 41.6 Hz note measured on a real recording had 3 % of its energy there and 90 % on harmonics 2-4. It must be tracked.
+        const double weak[6] = { 0.12, 0.9, 1.0, 0.7, 0.1, 0.05 };
+        for (double f0 : { 41.6, 46.4, 58.3 })
+        {
+            const auto x = held (f0, 3.0, 0, 0, weak);
+            NoteSpace d;
+            d.prepare (kFs);
+            d.setParams (neutral);
+            std::vector<float> y = x;
+            double pitchSum = 0;
+            int voiced = 0, total = 0;
+            for (size_t i = 0; i + 480 <= y.size(); i += 480)
+            {
+                float* c[1] = { y.data() + i };
+                d.process (c, 1, 480);
+                if (i > (size_t) (1.5 * kFs) + (size_t) d.latencySamples() && i < (size_t) (2.9 * kFs))
+                {
+                    ++total;
+                    if (d.pitchHz() > 20.0f)
+                    {
+                        ++voiced;
+                        pitchSum += d.pitchHz();
+                    }
+                }
+            }
+            CHECK (total > 0 && voiced == total && std::fabs (pitchSum / std::max (1, voiced) - f0) < 0.3,
+                   "%.1f Hz note, fundamental 18 dB under the 2nd-4th harmonics: tracked in %d of %d blocks at %.2f Hz", f0, voiced, total,
+                   pitchSum / std::max (1, voiced));
+        }
+    }
+
     std::printf ("Punch, sustain, kick\n");
     {
         std::vector<synth::Ev> ev;

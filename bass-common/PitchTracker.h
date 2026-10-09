@@ -128,7 +128,7 @@ public:
         if (k < oldest)
             return false;
         const Frame& F = frames_[(size_t) (k & (kFrames - 1))];
-        if (! (F.f0 > 0.0f && F.conf >= 0.8f && F.purity >= 0.03f))
+        if (! (F.f0 > 0.0f && F.conf >= 0.8f && F.purity >= kMinPurity))
             return false;
         f0 = F.f0;
         purity = F.purity;
@@ -156,7 +156,7 @@ public:
             if (k >= oldest)
                 F = &frames_[(size_t) (k & (kFrames - 1))];
         }
-        auto voiced = [] (const Frame* f) { return f != nullptr && f->f0 > 0.0f && f->conf >= 0.75f && f->purity >= 0.03f; };
+        auto voiced = [] (const Frame* f) { return f != nullptr && f->f0 > 0.0f && f->conf >= 0.75f && f->purity >= kMinPurity; };
         const Frame* use = nullptr;
         if (voiced (B) && voiced (F))
         {
@@ -195,13 +195,17 @@ public:
 
 private:
     static constexpr int kRing = 4096, kFrames = 1024;
+    static constexpr float kMinPurity = 0.35f;
     struct Frame
     {
         int64_t end = 0;
         float f0 = 0.0f, conf = 0.0f, purity = 0.0f;
     };
 
-    // Share of the window's energy that sits on f0 (exactly K periods, so nothing leaks).
+    // Share of the window's energy that sits on harmonics 1..4 of f0 (exactly K periods, so nothing leaks and the harmonics
+    // are orthogonal). Counting the fundamental alone would throw out real bass notes whose fundamental is weak or missing
+    // (an amp or a cab that cuts the lowest octave, a sub that was filtered away): their energy sits on the 2nd to 4th.
+    // Noise scores 0.45 at most (p99 0.33), a note 0.65 or more.
     bool purityAt (int64_t last, float f0, int maxL, double& purity) const
     {
         const double period = fsd_ / f0;
@@ -212,22 +216,31 @@ private:
         const int L = (int) std::lround (K * period);
         if (L < 4 || last - L + 1 < 0)
             return false;
-        const double w = 2.0 * kPi * K / L, c = std::cos (w), s = std::sin (w);
-        double pr = 1.0, pi = 0.0, re = 0.0, im = 0.0, e2 = 0.0;
+        double e2 = 0.0, share = 0.0;
         for (int j = 0; j < L; ++j)
         {
             const double x = din_[(size_t) ((last - (L - 1) + j) & (kRing - 1))];
-            re += x * pr;
-            im -= x * pi;
             e2 += x * x;
-            const double nr = pr * c - pi * s;
-            pi = pr * s + pi * c;
-            pr = nr;
         }
         if (e2 / L < 1e-10)
             return false;
-        const double amp = 2.0 / L * std::sqrt (re * re + im * im);
-        purity = std::min (1.0, 0.5 * amp * amp / (e2 / L));
+        for (int h = 1; h <= 4; ++h)
+        {
+            const double w = 2.0 * kPi * K * h / L, c = std::cos (w), s = std::sin (w);
+            double pr = 1.0, pi = 0.0, re = 0.0, im = 0.0;
+            for (int j = 0; j < L; ++j)
+            {
+                const double x = din_[(size_t) ((last - (L - 1) + j) & (kRing - 1))];
+                re += x * pr;
+                im -= x * pi;
+                const double nr = pr * c - pi * s;
+                pi = pr * s + pi * c;
+                pr = nr;
+            }
+            const double amp = 2.0 / L * std::sqrt (re * re + im * im);
+            share += 0.5 * amp * amp / (e2 / L);
+        }
+        purity = std::min (1.0, share);
         return true;
     }
 
