@@ -153,11 +153,13 @@ public:
         voicedTick_ = false;
         jumps_.fill (-1000000000LL);
         jumpHead_ = 0;
-        v_ = 0.0;
-        gr_ = 1.0;
+        v_ = vP_ = vC_ = 0.0;
+        gr_ = grP_ = grC_ = 1.0;
+        attP_ = attC_ = repP_ = 1.0;
+        rampPos_ = 0;
         for (int h = 0; h < kH; ++h)
         {
-            g_[h] = 1.0;
+            g_[h] = gP_[h] = 1.0;
             ref_[h] = -100.0;
             relSm_[h] = -100.0;
             inDb_[h] = outDb_[h] = -100.0f;
@@ -585,6 +587,15 @@ private:
     // ---------------- stage B: the split and the processing (at the output) ----------------
     void controlOutput (int64_t t2)
     {
+        // every control value glides from where it was to where this tick puts it, over the kSub samples that follow: stepping
+        // them once per tick is a zipper (a click train at sr/16) on the low band
+        vP_ = v_;
+        grP_ = gr_;
+        attP_ = attW_;
+        repP_ = repW_;
+        for (int h = 0; h < kH; ++h)
+            gP_[h] = g_[h];
+        rampPos_ = 0;
         const size_t k2 = (size_t) (t2 & (rsize_ - 1));
         const double f0 = f0r_[k2], P = sr_ / f0;
         bool stable = vr_[k2] != 0;
@@ -675,7 +686,7 @@ private:
             return;
         }
         const size_t k2 = (size_t) (t2 & (rsize_ - 1));
-        const double gRes = v_ * attW_ * (gr_ - 1.0);
+        const double gRes = vC_ * attC_ * (grC_ - 1.0);
         double rOutM = 0.0;
         for (int c = 0; c < nCh; ++c)
         {
@@ -699,6 +710,15 @@ private:
         if ((t3 & (kSub - 1)) == 0)
             controlOutput (t3);
         const size_t k3 = (size_t) (t3 & (rsize_ - 1));
+        const double rr = (double) std::min (rampPos_ + 1, kSub) / kSub;
+        ++rampPos_;
+        auto glide = [rr] (double a, double b) { return a + (b - a) * rr; };
+        vC_ = glide (vP_, v_);
+        grC_ = glide (grP_, gr_);
+        attC_ = glide (attP_, attW_);
+        double gC[kH];
+        for (int h = 0; h < kH; ++h)
+            gC[h] = glide (gP_[h], g_[h]);
         const double P = sr_ / (double) f0r_[k3];
         const Cx z = zr_[k3];
         Cx zp[kH];
@@ -707,8 +727,8 @@ private:
             zp[h] = zp[h - 1] * z;
         const double repAmt = std::clamp ((double) prm_.repair, 0.0, 1.0);
         const double ar = 1.0 - std::exp (-1.0 / ((0.06 + 0.28 * std::max (0.0, repAmt - 0.5)) * sr_)); // 60 ms, stretching to 200 ms above 50 %
-        const double rep = std::min (1.0, 2.0 * repAmt) * repW_, tr = std::clamp ((double) prm_.translate, 0.0, 2.0);
-        const bool active = v_ > 0.0;
+        const double rep = std::min (1.0, 2.0 * repAmt) * glide (repP_, repW_), tr = std::clamp ((double) prm_.translate, 0.0, 2.0);
+        const bool active = vC_ > 0.0;
         double pM = 0.0, rM = 0.0;
         for (int h = 0; h < kH; ++h)
             cMono_[h] = cOutMono_[h] = Cx {};
@@ -733,9 +753,9 @@ private:
             if (active)
             {
                 for (int h = 0; h < kH; ++h)
-                    co[h] = cs[h] * g_[h];
+                    co[h] = cs[h] * gC[h];
                 if (rep > 0.0)
-                    co[0] = (cs[0] * (1.0 - rep) + c1t_ * rep) * g_[0];
+                    co[0] = (cs[0] * (1.0 - rep) + c1t_ * rep) * gC[0];
                 if (tr > 0.0)
                 {
                     // harmonics 2-4 kept at least 6, 9, 12 dB below the fundamental (raised by up to 9 dB above 100 %),
@@ -772,7 +792,7 @@ private:
             }
             const double r = x - sumP;
             rr_[c][k3] = r;
-            dr_[c][k3] = v_ * (sumPo - sumP);
+            dr_[c][k3] = vC_ * (sumPo - sumP);
             pM += sumP / nCh;
             rM += r / nCh;
         }
@@ -809,7 +829,8 @@ private:
     double v_ = 0.0, gr_ = 1.0, g_[kH] {}, ref_[kH] {}, relSm_[kH] {}, refN_ = 0.0;
     Cx c1s_, c1t_, cMono_[kH], cOutMono_[kH];
     int aMax_ = 300, aRes_ = 0;
-    double repW_ = 1.0;
+    double repW_ = 1.0, vP_ = 0.0, grP_ = 1.0, attP_ = 1.0, repP_ = 1.0, gP_[kH] {}, vC_ = 0.0, grC_ = 1.0, attC_ = 1.0;
+    int rampPos_ = 0;
     std::vector<double> dr_[2], rr_[2], tapPr_, tapRr_;
     double fundG_ = 1.0, vTarget_ = 0.0, attW_ = 1.0;
     float rangeApplied_ = -1.0f;

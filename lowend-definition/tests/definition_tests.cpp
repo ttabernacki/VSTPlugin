@@ -68,6 +68,47 @@ static std::vector<float> lowpass (const std::vector<float>& x, double fs, doubl
     return y;
 }
 
+
+// what a plug-in adds above 1 kHz, against the dry signal's own energy above 1 kHz (dB): a zipper or click train shows up here
+static double highAddedDb (const std::vector<float>& dry, const std::vector<float>& out, int lat, double fs)
+{
+    const size_t N = dry.size();
+    std::vector<double> add (N, 0.0), in (N, 0.0);
+    for (size_t i = (size_t) lat; i < N; ++i)
+    {
+        add[i] = (double) out[i] - dry[i - (size_t) lat];
+        in[i] = dry[i - (size_t) lat];
+    }
+    auto hp = [&] (std::vector<double> y) {
+        for (int pass = 0; pass < 2; ++pass)
+        {
+            for (int st = 0; st < 2; ++st)
+            {
+                const double q = st ? 1.3065630 : 0.5411961, w = 2 * 3.14159265358979 * 1000.0 / fs, cw = std::cos (w), al = std::sin (w) / (2 * q), a0 = 1 + al;
+                const double b0 = (1 + cw) / 2 / a0, b1 = -(1 + cw) / a0, a1 = -2 * cw / a0, a2 = (1 - al) / a0;
+                double z1 = 0, z2 = 0;
+                for (auto& v : y)
+                {
+                    const double o = b0 * v + z1;
+                    z1 = b1 * v - a1 * o + z2;
+                    z2 = b0 * v - a2 * o;
+                    v = o;
+                }
+            }
+            std::reverse (y.begin(), y.end());
+        }
+        return y;
+    };
+    const auto H = hp (add), Hin = hp (in);
+    double e = 0, ei = 0;
+    for (size_t i = (size_t) lat + 4800; i + 4800 < N; ++i)
+    {
+        e += H[i] * H[i];
+        ei += Hin[i] * Hin[i];
+    }
+    return 10.0 * std::log10 (e / (ei + 1e-30) + 1e-20);
+}
+
 static std::array<double, 128> flat() { return {}; }
 
 static std::vector<synth::Ev> line (double spacing, double dur, int repeats, unsigned seed, double& total)
@@ -537,6 +578,49 @@ int main()
                 CHECK (std::fabs (dMask) < 1.5,
                        "a kick only a few dB under the bass is not masked: masking mode leaves it (%+.1f dB; simple mode %+.1f dB)", dMask, dSimple);
         }
+    }
+
+
+    std::printf ("No zipper noise (what is added above 1 kHz)\n");
+    {
+        double total;
+        const auto ev = line (0.25, 0.22, 3, 5, total);
+        std::array<double, 128> res {};
+        std::mt19937 gr (11);
+        for (auto& r : res)
+            r = std::uniform_real_distribution<double> (-1.0, 1.0) (gr) * 6.0;
+        const auto sig = synth::render (kFs, ev, total, res);
+        auto hf = [&] (const std::vector<float>& x, const Params& p) {
+            Definition d;
+            d.prepare (kFs);
+            const auto t = run (d, x, 480, p);
+            return highAddedDb (x, t.out, d.latencySamples(), kFs);
+        };
+        Params c1 = neutral, c5 = neutral;
+        c1.contrast = 1.0f;
+        c5.contrast = 0.5f;
+        const double a = hf (sig, c1), b = hf (sig, c5);
+        CHECK (a < -36.0 && b < -42.0, "plucked line: Contrast 100 %% adds %.1f dB, 50 %% adds %.1f dB above 1 kHz (re the dry's own)", a, b);
+        // a bass whose pitch wanders by +-20 cents: the bells follow it, and must do so without a click train
+        std::vector<float> w ((size_t) (8 * kFs));
+        std::mt19937 g (2);
+        std::normal_distribution<double> nd;
+        double ph = 0, wob = 0;
+        for (size_t i = 0; i < w.size(); ++i)
+        {
+            const double t = (double) i / kFs, f0 = 41.2 * std::pow (2.0, (double) (((int) (t / 0.5)) % 4) * 3 / 12.0);
+            wob += 0.002 * (nd (g) - wob);
+            ph += 2 * kPi * f0 * std::pow (2.0, (wob * 0.8 + 0.003 * std::sin (2 * kPi * 5.5 * t)) / 12.0) / kFs;
+            const double env = std::min (1.0, std::fmod (t, 0.5) / 0.01) * std::exp (-std::fmod (t, 0.5) / 0.4);
+            w[i] = (float) (0.3 * env * (std::sin (ph) + 0.6 * std::sin (2 * ph + 0.3) + 0.4 * std::sin (3 * ph + 0.9) + 0.25 * std::sin (4 * ph)) + 0.01 * nd (g));
+        }
+        const double jw = hf (w, c1);
+        CHECK (jw < -52.0, "a wandering pitch: Contrast 100 %% adds %.1f dB above 1 kHz", jw);
+        Params all = neutral;
+        all.contrast = 0.5f;
+        all.punch = 0.3f;
+        const double def = hf (sig, all);
+        CHECK (def < -40.0, "default settings: %.1f dB above 1 kHz", def);
     }
 
     std::printf ("Smoothness on note changes\n");

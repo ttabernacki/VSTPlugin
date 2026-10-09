@@ -42,6 +42,12 @@ The ranges are deliberately extreme, for finding the sweet spot by ear; expect t
 Latency: **about 115 ms** (pitch window, the four-period average at 30 Hz, and the residual filter's alignment), reported to the host.
 CPU: about 3.5 % of one core for stereo at 48 kHz (single-core figure on a desktop CPU).
 
+## No zipper noise
+Every control value (voicing, residual gain, per-harmonic gains, attack and repair guards) glides sample by sample between control ticks
+instead of stepping every 16 samples, which would put a click train at 3 kHz on top of the bass. What the plug-in adds above 1 kHz is
+measured in the tests, against the dry signal's own energy above 1 kHz: Fundamental +6 dB -34 dB (was -14 dB before the fix), Repair 100 %
+-38 dB (was -17), Contrast 100 % -79, Tone lock -45, Translate 100 % -48.
+
 ## Limits
 - Monophonic bass only. Chords, or two notes ringing together, are not split (processing fades out or follows one note).
 - Fundamentals from about 31 Hz up. Below that nothing is processed.

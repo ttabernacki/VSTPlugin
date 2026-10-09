@@ -90,6 +90,47 @@ static std::vector<float> held (double f0, double secs, double mudHz = 0, double
     return x;
 }
 
+
+// what a plug-in adds above 1 kHz, against the dry signal's own energy above 1 kHz (dB): a zipper or click train shows up here
+static double highAddedDb (const std::vector<float>& dry, const std::vector<float>& out, int lat, double fs)
+{
+    const size_t N = dry.size();
+    std::vector<double> add (N, 0.0), in (N, 0.0);
+    for (size_t i = (size_t) lat; i < N; ++i)
+    {
+        add[i] = (double) out[i] - dry[i - (size_t) lat];
+        in[i] = dry[i - (size_t) lat];
+    }
+    auto hp = [&] (std::vector<double> y) {
+        for (int pass = 0; pass < 2; ++pass)
+        {
+            for (int st = 0; st < 2; ++st)
+            {
+                const double q = st ? 1.3065630 : 0.5411961, w = 2 * 3.14159265358979 * 1000.0 / fs, cw = std::cos (w), al = std::sin (w) / (2 * q), a0 = 1 + al;
+                const double b0 = (1 + cw) / 2 / a0, b1 = -(1 + cw) / a0, a1 = -2 * cw / a0, a2 = (1 - al) / a0;
+                double z1 = 0, z2 = 0;
+                for (auto& v : y)
+                {
+                    const double o = b0 * v + z1;
+                    z1 = b1 * v - a1 * o + z2;
+                    z2 = b0 * v - a2 * o;
+                    v = o;
+                }
+            }
+            std::reverse (y.begin(), y.end());
+        }
+        return y;
+    };
+    const auto H = hp (add), Hin = hp (in);
+    double e = 0, ei = 0;
+    for (size_t i = (size_t) lat + 4800; i + 4800 < N; ++i)
+    {
+        e += H[i] * H[i];
+        ei += Hin[i] * Hin[i];
+    }
+    return 10.0 * std::log10 (e / (ei + 1e-30) + 1e-20);
+}
+
 static std::vector<float> delayed (const std::vector<float>& x, int lat)
 {
     std::vector<float> y (x.size(), 0.0f);
@@ -281,6 +322,39 @@ int main()
         const double a2b = ampDb (rt.out, 2 * f0, 2.3 + st, 40) - ampDb (rt.out, f0, 2.3 + st, 20);
         CHECK (std::fabs (a2 + 6.0) < 1.5 && std::fabs (a3 + 9.0) < 1.5 && std::fabs (a4 + 12.0) < 1.5 && std::fabs (a2b - a2) < 0.3,
                "Translate on a pure sine: harmonics 2/3/4 at %.1f / %.1f / %.1f dB re the fundamental, steady (%.2f dB later)", a2, a3, a4, a2b - a2);
+    }
+
+
+    std::printf ("No zipper noise (what is added above 1 kHz)\n");
+    {
+        std::vector<synth::Ev> ev;
+        double t = 0.3;
+        std::mt19937 g (5);
+        std::uniform_real_distribution<double> u (-1.0, 1.0);
+        for (int rep = 0; rep < 3; ++rep)
+            for (int m : { 28, 28, 35, 31, 33, 33, 40, 36, 38, 38, 31, 43, 41, 40, 36, 33 })
+            {
+                ev.push_back ({ t, 0.30, m, u (g) * 2.0 });
+                t += 0.35;
+            }
+        std::array<double, 128> res {};
+        std::mt19937 gr (11);
+        for (auto& r : res)
+            r = u (gr) * 6.0;
+        const auto sig = synth::render (kFs, ev, t + 1.0, res);
+        auto hf = [&] (const Params& p) {
+            const auto r = run (sig, p);
+            return highAddedDb (sig, r.out, r.lat, kFs);
+        };
+        Params c = neutral, f = neutral, rp = neutral, tl = neutral, tr = neutral;
+        c.contrast = 1.0f;
+        f.fundamentalDb = 6.0f;
+        rp.repair = 1.0f;
+        tl.toneLock = 1.0f;
+        tr.translate = 1.0f;
+        const double a = hf (c), b = hf (f), d = hf (rp), e = hf (tl), h = hf (tr);
+        CHECK (a < -28.0 && b < -30.0 && d < -33.0 && e < -40.0 && h < -25.0,
+               "plucked line, above 1 kHz: Contrast %.1f, Fundamental %.1f, Repair %.1f, Tone lock %.1f, Translate %.1f dB", a, b, d, e, h);
     }
 
     std::printf ("Note changes\n");
