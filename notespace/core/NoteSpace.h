@@ -130,6 +130,8 @@ public:
         std::fill (vr_.begin(), vr_.end(), 0);
         for (auto& l : lpR_)
             l.reset();
+        for (auto& l : lpX_)
+            l.reset();
         trk_.reset();
         shaper_.reset();
         lpK_.reset();
@@ -382,6 +384,8 @@ private:
             rangeApplied_ = rangeSm_;
             for (auto& l : lpR_)
                 l.setLowpass (rangeSm_, sr_);
+            for (auto& l : lpX_)
+                l.setLowpass (rangeSm_, sr_);
             aResF_ = std::min ((double) aMax_ - 1.0, 0.45 / rangeSm_ * sr_); // the residual low-pass's group delay, read ahead
         }
         fresh_ = false;
@@ -438,8 +442,11 @@ private:
         }
         const size_t k2 = (size_t) (t2 & (rsize_ - 1));
 
-        // Kick duck of the residual: the kick is read a few ms ahead of the audio leaving the delay, so the duck is already
-        // there when the kick hits. A sidechain that carries the bass itself has no kick to make room for.
+        // Kick duck: the kick is read a few ms ahead of the audio leaving the delay, so the duck is already there when the kick
+        // hits. Where the split is trusted only the residual below Range is ducked and the note is left alone; where it is not
+        // (the first ~100 ms of a note, which is exactly where a kick usually lands, or a note that is not tracked) everything
+        // below Range is ducked, as a plain sidechain duck would. A sidechain that carries the bass itself has no kick to make
+        // room for.
         const double kdepth = scSame_ > 0.5 ? 0.0 : 24.0 * std::clamp ((double) prm_.kick, 0.0, 1.0);
         double dT = 0.0;
         if (kdepth > 0.0)
@@ -465,7 +472,7 @@ private:
         gDs_ += aDyn_ * (gDynP_ + (gDyn_ - gDynP_) * (double) std::min (rampB_, kSub) / kSub - gDs_);
         const double gD = gDs_;
 
-        const double gRes = vC_ * ((1.0 + attC_ * (grC_ - 1.0)) * duck - 1.0);
+        const double gCon = vC_ * attC_ * (grC_ - 1.0) * duck, dk = duck - 1.0; // contrast on the trusted residual; the duck
         const int64_t aResI = (int64_t) std::floor (aResF_);
         const double aResFr = aResF_ - (double) aResI;
         double rOutM = 0.0;
@@ -475,9 +482,12 @@ private:
             const double ra = rr_[c][(size_t) ((t2 + aResI) & (rsize_ - 1))], rb = rr_[c][(size_t) ((t2 + aResI + 1) & (rsize_ - 1))];
             const double rIn = ra + (rb - ra) * aResFr;
             const double rLow = lpR_[c].process (rIn); // lines up with the residual at t2
-            const double lowOut = (x - rr_[c][k2]) + dr_[c][k2] + (1.0 + gRes) * rLow; // note + residual below Range, after the split's changes
-            out[c] = x + dr_[c][k2] + gRes * rLow + (gD - 1.0) * lowOut;
-            rOutM += (rr_[c][k2] + gRes * rLow) / nCh;
+            const double xa = dl_[c][(size_t) ((t2 + aResI) & mask)], xb = dl_[c][(size_t) ((t2 + aResI + 1) & mask)];
+            const double xLow = lpX_[c].process (xa + (xb - xa) * aResFr); // everything below Range, lined up the same way
+            const double lowChange = gCon * rLow + dk * (vC_ * rLow + (1.0 - vC_) * xLow);
+            const double lowOut = (x - rr_[c][k2]) + dr_[c][k2] + rLow + lowChange; // note + residual below Range, after the changes
+            out[c] = x + dr_[c][k2] + lowChange + (gD - 1.0) * lowOut;
+            rOutM += (rr_[c][k2] + gCon * rLow + dk * vC_ * rLow) / nCh;
         }
         tapP_ = tapPr_[k2];
         tapR_ = tapRr_[k2];
@@ -587,7 +597,7 @@ private:
     int64_t hopIn_ = 200, W_ = 3400, nIn_ = 0;
     bass::PitchTracker trk_;
     bass::EnvelopeShaper shaper_;
-    bass::Lr4 lpR_[2], lpK_;
+    bass::Lr4 lpR_[2], lpX_[2], lpK_;
     std::vector<float> kpow_;
     double pk_ = 0.0, ak_ = 0.01, scSame_ = 0.0, duckDb_ = 0.0, gDyn_ = 1.0, gDynP_ = 1.0, gDs_ = 1.0, aDyn_ = 0.05, aDuckAtt_ = 0.01, aDuckRel_ = 0.001, dynDbT_ = 0.0;
     int rampB_ = 0;

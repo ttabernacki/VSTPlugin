@@ -791,6 +791,44 @@ int main()
         CHECK (md == 0.0, "kick duck: block size 1 and 333 are identical (%.1e)", md);
     }
     {
+        // The usual case: the kick lands on the bass note's attack, where the split is not trusted yet. The duck must still
+        // make room there (it ducks everything below Range until the note is tracked), and let go between hits.
+        std::vector<synth::Ev> ev;
+        for (int i = 0; i < 10; ++i)
+            ev.push_back ({ 0.3 + 0.6 * i, 0.5, 28 + (i * 5) % 16, 0.0 });
+        std::array<double, 128> flat {};
+        const auto sig = synth::render (kFs, ev, 6.5, flat, 3);
+        std::vector<float> kick (sig.size(), 0.0f);
+        for (const auto& e : ev)
+            for (size_t i = 0; i < (size_t) (0.15 * kFs); ++i)
+            {
+                const size_t n = (size_t) (e.t * kFs) + i;
+                const double tt = (double) i / kFs;
+                if (n < kick.size())
+                    kick[n] = (float) (0.8 * std::exp (-tt / 0.05) * std::sin (2 * kPi * 50.0 * tt));
+            }
+        Params on = neutral;
+        on.kick = 1.0f;
+        const auto r = run (sig, on, 480, kFs, false, &kick);
+        double eIn = 0, eOut = 0, qIn = 0, qOut = 0;
+        for (size_t k = 2; k < ev.size(); ++k)
+        {
+            const size_t s0 = (size_t) (ev[k].t * kFs);
+            for (size_t i = s0 + (size_t) (0.005 * kFs); i < s0 + (size_t) (0.06 * kFs); ++i) // under the hit
+            {
+                eIn += (double) sig[i] * sig[i];
+                eOut += (double) r.out[i + (size_t) r.lat] * r.out[i + (size_t) r.lat];
+            }
+            for (size_t i = s0 + (size_t) (0.4 * kFs); i < s0 + (size_t) (0.5 * kFs); ++i) // well after it
+            {
+                qIn += (double) sig[i] * sig[i];
+                qOut += (double) r.out[i + (size_t) r.lat] * r.out[i + (size_t) r.lat];
+            }
+        }
+        const double hit = 10 * std::log10 (eOut / eIn), quiet = 10 * std::log10 (qOut / qIn);
+        CHECK (hit < -6.0 && std::fabs (quiet) < 1.0, "kick on every note's attack: the bass under the hit %+.1f dB, later in the note %+.1f dB", hit, quiet);
+    }
+    {
         // a plucked line, the kick on every beat: the duck must not add a click train
         std::vector<synth::Ev> ev;
         for (int i = 0; i < 12; ++i)

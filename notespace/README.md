@@ -29,11 +29,12 @@ a note change inside the analysis window) the processing fades out and the input
   pulse (3 ms rise, 28 ms fall) placed where the attack really is although the detector fires a few ms late.
 - **Sustain** (±100 %): the body's ring-out lengthened (up to +12 dB, only while the note is really decaying, not on a mute or a
   tremolo) or shortened. Both come from the shared `bass-common/EnvelopeShaper.h`.
-- **Kick** (0-100 %, needs the optional sidechain input): the residual is ducked up to 24 dB while the sidechain's kick plays. The
-  note is never ducked, so the kick makes room (the mud and boom around the note go) without the bass losing its pitch. The kick is
-  read 5 ms ahead, so the duck is already there at the hit; it lets go in about 80 ms. A sidechain that carries the bass itself, or a
-  kick below -70 dBFS, ducks nothing. (This replaces Low-End Definition's spectral duck: the part of that duck that mattered, keeping
-  the note's harmonics, is what the split does by construction.)
+- **Kick** (0-100 %, needs the optional sidechain input): ducks up to 24 dB while the sidechain's kick plays. Once a note is
+  tracked only the residual below Range is ducked (the mud and boom around the note go, the note keeps its pitch). On a note's
+  first ~100 ms, where a kick usually lands and the split is not trusted yet, and on notes that are not tracked, everything
+  below Range is ducked, as a plain sidechain duck would. The kick is read 5 ms ahead, so the duck is already there at the hit;
+  it lets go in about 80 ms. A sidechain that carries the bass itself, or a kick below -70 dBFS, ducks nothing. (Ducking only
+  the residual everywhere did nothing at all on a kick that lands on the note's attack: 0.0 dB under the hit, now -11.9 dB.)
 
 The ranges are deliberately extreme, for finding the sweet spot by ear; expect to use much less.
 
@@ -66,8 +67,8 @@ a plucked line stays below -25 dB. Punch is gain modulation by definition (a +10
 (which is tiny, and depends on how many attacks there are), and -54 dB or lower re the whole signal.
 
 ## Limits
-- The kick duck acts on the residual, and the residual only exists where the split is trusted: a note with no clear pitch (below about
-  31 Hz, an 808 mid-glide, a chord) is not ducked. Punch and Sustain do not depend on pitch and always act.
+- Where the split is not trusted (attacks, no clear pitch, an 808 mid-glide, a chord) the kick duck falls back to ducking everything
+  below Range, note included. Punch and Sustain do not depend on pitch and always act.
 - A kick above -50 dBFS ducks by the full Kick amount whatever its level relative to the bass; there is no level-dependent scaling.
 - A note is only trusted if at least 35 % of its energy sits on harmonics 1-4 of the tracked pitch (noise scores 0.45 at most, 0.33 at the
   99th percentile; a note 0.65 or more). The fundamental itself may be weak or missing: on a real recording, notes at 41.6 and 46.4 Hz had 3 %
