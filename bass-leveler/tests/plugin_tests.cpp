@@ -113,7 +113,7 @@ int main()
     std::printf ("Parameters and layouts\n");
     {
         BassLevelerProcessor p;
-        const char* ids[] = { "amount", "mode", "focus", "boost", "cut", "speed" };
+        const char* ids[] = { "amount", "boost", "cut", "speed" };
         bool present = true, automatable = true;
         for (auto* id : ids)
         {
@@ -121,7 +121,7 @@ int main()
             present = present && prm != nullptr;
             automatable = automatable && prm != nullptr && prm->isAutomatable();
         }
-        CHECK (present && automatable && p.getParameters().size() == 6, "6 automatable parameters");
+        CHECK (present && automatable && p.getParameters().size() == 4, "4 automatable parameters");
         using L = juce::AudioProcessor::BusesLayout;
         auto layout = [] (juce::AudioChannelSet in, juce::AudioChannelSet out) {
             L l;
@@ -190,8 +190,6 @@ int main()
     {
         BassLevelerProcessor a, b;
         setPlain (a, "amount", 0.33f);
-        setPlain (a, "mode", 1.0f);
-        setPlain (a, "focus", 1.0f);
         setPlain (a, "boost", 4.5f);
         setPlain (a, "cut", 13.0f);
         setPlain (a, "speed", 77.0f);
@@ -199,7 +197,7 @@ int main()
         a.getStateInformation (mb);
         b.setStateInformation (mb.getData(), (int) mb.getSize());
         bool same = true;
-        for (auto* id : { "amount", "mode", "focus", "boost", "cut", "speed" })
+        for (auto* id : { "amount", "boost", "cut", "speed" })
             same = same && std::abs (a.apvts.getParameter (id)->getValue() - b.apvts.getParameter (id)->getValue()) < 1e-5f;
         CHECK (same, "all parameters survive a state round trip (%zu bytes)", mb.getSize());
         b.setStateInformation ("garbage", 7);
@@ -215,7 +213,6 @@ int main()
             BassLevelerProcessor p;
             prepare (p, kFs, 4096);
             setPlain (p, "amount", 1.0f);
-            setPlain (p, "focus", 1.0f);
             return render (p, sig, blocks);
         };
         const auto ref = go ({ 512 });
@@ -261,7 +258,7 @@ int main()
         bool finite = true;
         for (int blk = 0; blk < 800; ++blk)
         {
-            for (auto* id : { "amount", "mode", "focus", "boost", "cut", "speed" })
+            for (auto* id : { "amount", "boost", "cut", "speed" })
                 if (u (g) < 0.25f)
                     p.apvts.getParameter (id)->setValueNotifyingHost (u (g));
             const int n = 1 + (int) (u (g) * 3000);

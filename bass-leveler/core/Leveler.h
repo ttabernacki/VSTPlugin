@@ -26,8 +26,6 @@ constexpr double kPi = 3.14159265358979323846;
 struct Params
 {
     float amount = 0.6f;       // 0..1   how much of each note's distance from the typical level is corrected
-    int mode = 0;              // 0 Balance (fundamental vs its harmonics), 1 Level (absolute fundamental)
-    bool focus2 = false;       // also put a bell on the 2nd harmonic
     float maxBoostDb = 6.0f;   // soft ceilings: the correction eases toward them, it never stops dead
     float maxCutDb = 9.0f;
     float speedMs = 30.0f;     // how fast the gain moves (release; attack is about 40% of this)
@@ -38,7 +36,7 @@ struct Params
 struct NoteInfo
 {
     double startSec;
-    float midi, balanceDb, levelDb, metricDb, targetDb, corrDb;
+    float midi, levelDb, targetDb, corrDb;
 };
 
 // compact record of a recent note, for displays
@@ -108,8 +106,7 @@ public:
         candRun_ = 0;
         lastMidi_ = candMidi_ = 0.0f;
         histN_ = 0;
-        hist_[0].fill (0.0f);
-        hist_[1].fill (0.0f);
+        hist_.fill (0.0f);
         for (auto& v : v_)
             v = Voice {};
         cur_ = 0;
@@ -182,11 +179,7 @@ public:
                     v.s1.a1 = mix (v.s1p.a1, v.s1n.a1);
                     v.s1.a2 = mix (v.s1p.a2, v.s1n.a2);
                     v.s1.a3 = mix (v.s1p.a3, v.s1n.a3);
-                    v.s2.a1 = mix (v.s2p.a1, v.s2n.a1);
-                    v.s2.a2 = mix (v.s2p.a2, v.s2n.a2);
-                    v.s2.a3 = mix (v.s2p.a3, v.s2n.a3);
                     v.m1 = mix (v.m1p, v.m1n);
-                    v.m2 = mix (v.m2p, v.m2n);
                 }
             }
             for (int c = 0; c < nCh; ++c)
@@ -197,19 +190,14 @@ public:
                 {
                     if (! v.active)
                     {
-                        v.st[c][0] = v.st[c][1] = {};
+                        v.st[c] = {};
                         continue;
                     }
-                    y = bellStep (v.s1, v.st[c][0], v.m1, y);
-                    if (prm_.focus2)
-                        y = bellStep (v.s2, v.st[c][1], v.m2, y);
-                    for (auto& st : v.st[c])
-                    {
-                        if (std::fabs (st.z1) < 1e-20)
-                            st.z1 = 0;
-                        if (std::fabs (st.z2) < 1e-20)
-                            st.z2 = 0;
-                    }
+                    y = bellStep (v.s1, v.st[c], v.m1, y);
+                    if (std::fabs (v.st[c].z1) < 1e-20)
+                        v.st[c].z1 = 0;
+                    if (std::fabs (v.st[c].z2) < 1e-20)
+                        v.st[c].z2 = 0;
                 }
                 ch[c][i] = (float) y;
             }
@@ -234,13 +222,13 @@ private:
     {
         int64_t start = 0, lastVoiced = 0;
         bool done = false, known = false;
-        float hz = 0.0f, midi = 0.0f, balance = 0.0f, level = 0.0f, metric = 0.0f, target = 0.0f, corr = 0.0f;
+        float hz = 0.0f, midi = 0.0f, level = 0.0f, target = 0.0f, corr = 0.0f;
         int n = 0;
-        std::array<float, 24> aMidi {}, aBal {}, aLvl {}, aConf {};
+        std::array<float, 24> aMidi {}, aLvl {}, aConf {};
     };
     struct Measure
     {
-        float lvl = 0.0f, bal = 0.0f;
+        float lvl = 0.0f;
         int lenIn = 0; // measurement window length, input samples
         bool ok = false;
     };
@@ -410,8 +398,7 @@ private:
         track ((int64_t) last * D_, fr, me);
     }
 
-    // Level of the fundamental and of harmonics 2..4 over a window of exactly K periods
-    // (so the harmonics are orthogonal and nothing leaks between them).
+    // Level of the fundamental over a window of exactly K periods (so nothing leaks into it).
     Measure measure (float f0) const
     {
         Measure r;
@@ -423,30 +410,19 @@ private:
         const int L = std::min (N_, (int) std::lround (K * period));
         const double w1 = 2.0 * kPi * K / L;
         const int64_t last = m_ - 1;
-        int H = 1;
-        while (H < 4 && (H + 1) * f0 < 1100.0f && (H + 1) * f0 < 0.45 * fsd_)
-            ++H;
-        double amp[5] = {};
-        for (int h = 1; h <= H; ++h)
+        const double c = std::cos (w1), sn = std::sin (w1);
+        double pr = 1.0, pi = 0.0, re = 0.0, im = 0.0;
+        for (int j = 0; j < L; ++j)
         {
-            const double c = std::cos (w1 * h), s = std::sin (w1 * h);
-            double pr = 1.0, pi = 0.0, re = 0.0, im = 0.0;
-            for (int j = 0; j < L; ++j)
-            {
-                const double x = dbuf_[(size_t) ((last - (L - 1) + j) & 4095)];
-                re += x * pr;
-                im -= x * pi;
-                const double nr = pr * c - pi * s;
-                pi = pr * s + pi * c;
-                pr = nr;
-            }
-            amp[h] = 2.0 / L * std::sqrt (re * re + im * im);
+            const double x = dbuf_[(size_t) ((last - (L - 1) + j) & 4095)];
+            re += x * pr;
+            im -= x * pi;
+            const double nr = pr * c - pi * sn;
+            pi = pr * sn + pi * c;
+            pr = nr;
         }
-        double hs = 0.0;
-        for (int h = 2; h <= H; ++h)
-            hs += amp[h] * amp[h];
-        r.lvl = (float) (20.0 * std::log10 (amp[1] + 1e-9));
-        r.bal = r.lvl - (float) (10.0 * std::log10 (hs + 1e-12));
+        const double amp1 = 2.0 / L * std::sqrt (re * re + im * im);
+        r.lvl = (float) (20.0 * std::log10 (amp1 + 1e-9));
         r.lenIn = L * D_;
         r.ok = true;
         return r;
@@ -529,7 +505,6 @@ private:
         {
             n->aConf[(size_t) n->n] = fr.conf;
             n->aMidi[(size_t) n->n] = midi;
-            n->aBal[(size_t) n->n] = me.bal;
             n->aLvl[(size_t) n->n] = me.lvl;
             ++n->n;
         }
@@ -560,7 +535,6 @@ private:
             if (n.aConf[(size_t) i] >= cmin)
             {
                 n.aMidi[(size_t) k] = n.aMidi[(size_t) i];
-                n.aBal[(size_t) k] = n.aBal[(size_t) i];
                 n.aLvl[(size_t) k] = n.aLvl[(size_t) i];
                 ++k;
             }
@@ -577,9 +551,6 @@ private:
         if (agree * 10 < n.n * 7)
             return; // pitch unstable inside the measurement window
         for (int i = 0; i < n.n; ++i)
-            t[i] = n.aBal[(size_t) i];
-        n.balance = medianOf (t, n.n);
-        for (int i = 0; i < n.n; ++i)
             t[i] = n.aLvl[(size_t) i];
         n.level = medianOf (t, n.n);
         if (n.level < -68.0f)
@@ -590,28 +561,25 @@ private:
 
         // The reference is the typical level of the recent notes (their running median), taken BEFORE
         // this note joins them. It needs a few notes first, then is trusted more and more.
-        const int metricIdx = prm_.mode == 1 ? 1 : 0;
-        n.metric = metricIdx == 1 ? n.level : n.balance;
-        float refVal = n.metric;
+        float refVal = n.level;
         const int cnt = std::min (histN_, kHist);
         if (cnt > 0)
         {
             float h[kHist];
             for (int i = 0; i < cnt; ++i)
-                h[i] = hist_[metricIdx][(size_t) i];
+                h[i] = hist_[(size_t) i];
             refVal = medianOf (h, cnt);
         }
         n.target = refVal;
         const float trust = std::max (0.0f, std::min (1.0f, (float) (histN_ - 2) / 3.0f));
-        n.corr = trust * softCorrection (refVal - n.metric, prm_.amount, prm_.maxBoostDb, prm_.maxCutDb);
-        hist_[0][(size_t) (histN_ % kHist)] = n.balance;
-        hist_[1][(size_t) (histN_ % kHist)] = n.level;
+        n.corr = trust * softCorrection (refVal - n.level, prm_.amount, prm_.maxBoostDb, prm_.maxCutDb);
+        hist_[(size_t) (histN_ % kHist)] = n.level;
         ++histN_;
 
-        recent_[(size_t) (recentN_ % (int) recent_.size())] = { midi, n.metric - refVal, n.corr };
+        recent_[(size_t) (recentN_ % (int) recent_.size())] = { midi, n.level - refVal, n.corr };
         ++recentN_;
         if (logNotes)
-            notesLog.push_back ({ (double) n.start / sr_, midi, n.balance, n.level, n.metric, refVal, n.corr });
+            notesLog.push_back ({ (double) n.start / sr_, midi, n.level, refVal, n.corr });
     }
 
     // ---------------- control (what the bell should do at the output time) ----------------------------
@@ -717,15 +685,11 @@ private:
             v.active = std::fabs (v.gain) > 1e-3f || std::fabs (v.lastGain) > 1e-3f;
             v.lastGain = v.gain;
             const double A = std::pow (10.0, (double) v.gain / 40.0);
-            const double q1 = prm_.bellQ, q2 = prm_.bellQ * 1.2;
+            const double q1 = prm_.bellQ;
             v.s1p = v.s1;
-            v.s2p = v.s2;
             v.m1p = v.m1;
-            v.m2p = v.m2;
             setSvf (v.s1n, v.freq, sr_, 1.0 / (q1 * A));
-            setSvf (v.s2n, std::min (2.0 * v.freq, 0.45 * sr_), sr_, 1.0 / (q2 * A));
             v.m1n = (A - 1.0 / A) / q1;
-            v.m2n = (A - 1.0 / A) / q2;
         }
     }
 
@@ -754,15 +718,15 @@ private:
     int unvoicedRun_ = 0, candRun_ = 0;
     float lastMidi_ = 0.0f, candMidi_ = 0.0f;
     static constexpr int kHist = 24;
-    std::array<float, kHist> hist_[2] {};
+    std::array<float, kHist> hist_ {};
     int histN_ = 0;
     struct Voice
     {
         float gain = 0.0f, lastGain = 0.0f, freq = 80.0f;
         bool active = false;
-        Svf s1, s2, s1p, s2p, s1n, s2n; // running coefficients, and at the start and end of the control block
-        double m1 = 0, m2 = 0, m1p = 0, m2p = 0, m1n = 0, m2n = 0;
-        State st[2][2] {};
+        Svf s1, s1p, s1n; // running coefficients, and at the start and end of the control block
+        double m1 = 0, m1p = 0, m1n = 0;
+        State st[2] {};
     };
     Voice v_[2];
     int rampPos_ = 0;

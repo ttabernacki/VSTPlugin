@@ -85,12 +85,6 @@ void BassLevelerEditor::addKnob (Knob& k, const juce::String& id, const juce::St
 BassLevelerEditor::BassLevelerEditor (BassLevelerProcessor& p) : juce::AudioProcessorEditor (&p), proc (p)
 {
     setLookAndFeel (&laf);
-    focus.setClickingTogglesState (true);
-    addAndMakeVisible (focus);
-    mode.addItemList ({ "Balance", "Level" }, 1);
-    addAndMakeVisible (mode);
-    focusAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "focus", focus);
-    modeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "mode", mode);
     addKnob (amount, "amount", "AMOUNT");
     addKnob (boost, "boost", "MAX BOOST");
     addKnob (cut, "cut", "MAX CUT");
@@ -113,9 +107,6 @@ void BassLevelerEditor::resized()
     auto r = getLocalBounds().reduced (14);
     auto head = r.removeFromTop (34);
     head.removeFromLeft (190); // title
-    mode.setBounds (head.removeFromLeft (110));
-    head.removeFromLeft (8);
-    focus.setBounds (head.removeFromLeft (130));
     r.removeFromTop (8);
     auto knobs = r.removeFromTop (118);
     const int w = knobs.getWidth() / 4;

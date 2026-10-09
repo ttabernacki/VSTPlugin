@@ -15,7 +15,7 @@ static int failures = 0;
     } while (0)
 
 static constexpr double kFs = 48000.0;
-static const char* kIds[] = { "contrast", "tonelock", "fundamental", "repair", "translate", "range" };
+static const char* kIds[] = { "contrast", "tonelock", "fundamental", "repair", "translate", "range", "punch", "sustain", "kick" };
 
 static void setPlain (NoteSpaceProcessor& p, const char* id, float v)
 {
@@ -92,18 +92,22 @@ int main()
         bool ok = true;
         for (auto* id : kIds)
             ok = ok && p.apvts.getParameter (id) != nullptr && p.apvts.getParameter (id)->isAutomatable();
-        CHECK (ok && p.getParameters().size() == 6, "6 automatable parameters");
+        CHECK (ok && p.getParameters().size() == 9, "9 automatable parameters");
         using L = juce::AudioProcessor::BusesLayout;
         auto layout = [] (juce::AudioChannelSet in, juce::AudioChannelSet out) {
             L l;
             l.inputBuses.add (in);
+            l.inputBuses.add (juce::AudioChannelSet::disabled()); // the optional sidechain, not connected
             l.outputBuses.add (out);
             return l;
         };
         const auto M = juce::AudioChannelSet::mono(), S = juce::AudioChannelSet::stereo();
         CHECK (p.checkBusesLayoutSupported (layout (S, S)) && p.checkBusesLayoutSupported (layout (M, M)) && p.checkBusesLayoutSupported (layout (M, S)),
-               "stereo, mono and mono-in/stereo-out are supported");
+               "stereo, mono and mono-in/stereo-out are supported (sidechain off)");
         CHECK (! p.checkBusesLayoutSupported (layout (S, M)), "stereo-in/mono-out is rejected");
+        L l5 = layout (S, S);
+        l5.inputBuses.set (1, juce::AudioChannelSet::create5point1());
+        CHECK (! p.checkBusesLayoutSupported (l5), "a 5.1 sidechain is rejected");
         auto* f = p.apvts.getParameter ("fundamental");
         CHECK (f->getText (f->convertTo0to1 (3.0f), 0) == "+3.0 dB", "knob readouts are readable (%s)", f->getText (f->convertTo0to1 (3.0f), 0).toRawUTF8());
     }
@@ -133,6 +137,96 @@ int main()
         CHECK (q.pitchHz.load() >= 0.0f && q.noteResIn.load() > -60.0f, "the editor gets pitch and note/residual readings (%.1f dB in, %.1f dB out)",
                q.noteResIn.load(), q.noteResOut.load());
     }
+
+    std::printf ("Sidechain layouts\n");
+    {
+        // The audio channels are those of the main bus; the sidechain must not be mistaken for audio, must survive a
+        // mono-in / stereo-out layout (where the host shares a channel between them), and must not be altered.
+        const double f0 = 41.2, mudHz = 64.0;
+        std::vector<float> bass ((size_t) (3 * kFs)), kick (bass.size(), 0.0f);
+        for (size_t i = 0; i < bass.size(); ++i)
+        {
+            const double t = (double) i / kFs, env = std::min (1.0, t / 0.03);
+            bass[i] = (float) (0.3 * env * (std::sin (2 * 3.14159265 * f0 * t) + 0.5 * std::sin (2 * 3.14159265 * 2 * f0 * t + 0.4) + 0.3 * std::sin (2 * 3.14159265 * mudHz * t + 0.7)));
+        }
+        for (int b = 0; b < 4; ++b)
+            for (size_t i = 0; i < (size_t) (0.18 * kFs); ++i)
+            {
+                const double t = (double) i / kFs;
+                kick[(size_t) ((0.5 + 0.6 * b) * kFs) + i] = (float) (0.8 * std::exp (-t / 0.06) * std::sin (2 * 3.14159265 * mudHz * t));
+            }
+        struct Cfg
+        {
+            const char* name;
+            juce::AudioChannelSet in, sc, out;
+        };
+        const auto M = juce::AudioChannelSet::mono(), S = juce::AudioChannelSet::stereo();
+        double ref[3] = {};
+        int idx = 0;
+        for (const Cfg& cfg : { Cfg { "stereo + stereo sidechain", S, S, S }, Cfg { "mono + stereo sidechain, mono out", M, S, M },
+                                Cfg { "mono + mono sidechain, stereo out", M, M, S } })
+        {
+            NoteSpaceProcessor p;
+            juce::AudioProcessor::BusesLayout l;
+            l.inputBuses.add (cfg.in);
+            l.inputBuses.add (cfg.sc);
+            l.outputBuses.add (cfg.out);
+            const bool okLayout = p.setBusesLayout (l);
+            p.getBus (true, 1)->enable();
+            prepare (p, kFs, 512);
+            for (auto* id : { "contrast", "punch", "sustain" })
+                setPlain (p, id, 0.0f);
+            setPlain (p, "kick", 1.0f);
+            const int nIn = p.getTotalNumInputChannels(), nOut = p.getTotalNumOutputChannels(), nBuf = std::max (nIn, nOut);
+            const int mainIn = p.getMainBusNumInputChannels(), scN = nIn - mainIn;
+            juce::AudioBuffer<float> buf (nBuf, 512);
+            juce::MidiBuffer midi;
+            std::vector<float> out (bass.size()), out1 (bass.size());
+            bool scIntact = true;
+            for (size_t pos = 0; pos < bass.size(); pos += 512)
+            {
+                const int n = (int) std::min<size_t> (512, bass.size() - pos);
+                juce::AudioBuffer<float> view (buf.getArrayOfWritePointers(), nBuf, n);
+                for (int i = 0; i < n; ++i)
+                {
+                    for (int c = 0; c < mainIn; ++c)
+                        view.setSample (c, i, bass[pos + (size_t) i]);
+                    for (int c = 0; c < scN; ++c)
+                        view.setSample (mainIn + c, i, kick[pos + (size_t) i]);
+                }
+                p.processBlock (view, midi);
+                for (int i = 0; i < n; ++i)
+                {
+                    out[pos + (size_t) i] = view.getSample (0, i);
+                    out1[pos + (size_t) i] = nOut > 1 ? view.getSample (1, i) : view.getSample (0, i);
+                    // an input-only sidechain channel (not shared with an output) must come back as it went in
+                    for (int c = 0; c < scN; ++c)
+                        if (mainIn + c >= nOut && view.getSample (mainIn + c, i) != kick[pos + (size_t) i])
+                            scIntact = false;
+                }
+            }
+            auto amp = [&] (const std::vector<float>& x, double f, double t0, double cycles) {
+                const size_t i0 = (size_t) (t0 * kFs), L = (size_t) std::llround (cycles * kFs / f);
+                double re = 0, im = 0;
+                for (size_t j = 0; j < L; ++j)
+                {
+                    re += x[i0 + j] * std::cos (2 * 3.14159265358979 * cycles * (double) j / (double) L);
+                    im -= x[i0 + j] * std::sin (2 * 3.14159265358979 * cycles * (double) j / (double) L);
+                }
+                return 20.0 * std::log10 (2.0 / (double) L * std::sqrt (re * re + im * im) + 1e-12);
+            };
+            const double sh = (double) p.getLatencySamples() / kFs, tHit = 0.5 + 0.6 * 2 + 0.04;
+            const double mud = amp (out, mudHz, tHit + sh, 6) - amp (bass, mudHz, tHit, 6);
+            ref[idx] = mud;
+            double chDiff = 0;
+            for (size_t i = 0; i < out.size(); ++i)
+                chDiff = std::max (chDiff, (double) std::fabs (out[i] - out1[i]));
+            CHECK (okLayout && mud < -3.0 && scIntact && chDiff < 1e-6, "%s: layout accepted, mud under the kick %+.1f dB, sidechain left intact, outputs agree (%.1e)", cfg.name, mud, chDiff);
+            ++idx;
+        }
+        CHECK (std::fabs (ref[0] - ref[1]) < 0.5 && std::fabs (ref[0] - ref[2]) < 0.5, "the duck is the same whatever the layout (%.1f / %.1f / %.1f dB)", ref[0], ref[1], ref[2]);
+    }
+
 
     std::printf ("State, blocks, rates, stress\n");
     {

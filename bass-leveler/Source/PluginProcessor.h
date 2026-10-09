@@ -56,7 +56,7 @@ private:
     std::atomic<float> recMidi[kRecent], recDev[kRecent], recCorr[kRecent];
     std::atomic<int> recentCount { 0 };
 
-    std::atomic<float>*pAmount = nullptr, *pMode = nullptr, *pFocus = nullptr, *pBoost = nullptr, *pCut = nullptr, *pSpeed = nullptr;
+    std::atomic<float>*pAmount = nullptr, *pBoost = nullptr, *pCut = nullptr, *pSpeed = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BassLevelerProcessor)
 };

@@ -14,8 +14,6 @@ APVTS::ParameterLayout BassLevelerProcessor::createLayout()
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "amount", 1 }, "Amount", Range (0.0f, 1.0f), 0.6f,
                                                   Attr().withStringFromValueFunction ([] (float v, int) { return String (roundToInt (v * 100.0f)) + " %"; })
                                                       .withValueFromStringFunction ([] (const String& t) { return t.getFloatValue() / 100.0f; })));
-    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "mode", 1 }, "Mode", StringArray { "Balance", "Level" }, 0));
-    l.add (std::make_unique<AudioParameterBool> (ParameterID { "focus", 1 }, "Focus 2nd harmonic", false));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "boost", 1 }, "Max boost", Range (0.0f, 12.0f), 6.0f,
                                                   Attr().withStringFromValueFunction (dbText).withValueFromStringFunction (numberFrom)));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "cut", 1 }, "Max cut", Range (0.0f, 18.0f), 9.0f,
@@ -33,8 +31,6 @@ BassLevelerProcessor::BassLevelerProcessor()
       apvts (*this, nullptr, "STATE", createLayout())
 {
     pAmount = apvts.getRawParameterValue ("amount");
-    pMode = apvts.getRawParameterValue ("mode");
-    pFocus = apvts.getRawParameterValue ("focus");
     pBoost = apvts.getRawParameterValue ("boost");
     pCut = apvts.getRawParameterValue ("cut");
     pSpeed = apvts.getRawParameterValue ("speed");
@@ -73,8 +69,6 @@ void BassLevelerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
 
     bnl::Params p;
     p.amount = pAmount->load();
-    p.mode = (int) pMode->load();
-    p.focus2 = pFocus->load() > 0.5f;
     p.maxBoostDb = pBoost->load();
     p.maxCutDb = pCut->load();
     p.speedMs = pSpeed->load();

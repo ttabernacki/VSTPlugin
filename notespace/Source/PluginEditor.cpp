@@ -67,10 +67,13 @@ NoteSpaceEditor::NoteSpaceEditor (NoteSpaceProcessor& p) : juce::AudioProcessorE
     addKnob (repair, "repair", "REPAIR");
     addKnob (translate, "translate", "TRANSLATE");
     addKnob (range, "range", "RANGE");
+    addKnob (punch, "punch", "PUNCH");
+    addKnob (sustain, "sustain", "SUSTAIN");
+    addKnob (kick, "kick", "KICK");
     setResizable (true, true);
-    setResizeLimits (600, 390, 1100, 715);
-    getConstrainer()->setFixedAspectRatio (720.0 / 468.0);
-    setSize (720, 468);
+    setResizeLimits (720, 400, 1300, 708);
+    getConstrainer()->setFixedAspectRatio (860.0 / 468.0);
+    setSize (860, 468);
     startTimerHz (15);
 }
 
@@ -86,8 +89,8 @@ void NoteSpaceEditor::resized()
     r.removeFromTop (34);
     r.removeFromTop (8);
     auto knobs = r.removeFromTop (118);
-    const int w = knobs.getWidth() / 6;
-    for (auto* k : { &contrast, &tone, &fund, &repair, &translate, &range })
+    const int w = knobs.getWidth() / 9;
+    for (auto* k : { &contrast, &tone, &fund, &repair, &translate, &range, &punch, &sustain, &kick })
     {
         auto cell = knobs.removeFromLeft (w);
         k->label.setBounds (cell.removeFromTop (16));
@@ -200,7 +203,9 @@ void NoteSpaceEditor::paint (juce::Graphics& g)
         g.setFont (juce::FontOptions (11.0f));
         g.drawFittedText ("How far the note stands above the mud, rumble and noise around it (partials vs residual energy).", a,
                           juce::Justification::topLeft, 4);
-        g.drawFittedText ("residual " + juce::String (proc.residualDb.load(), 1) + " dB  |  latency "
+        g.drawFittedText ("residual " + juce::String (proc.residualDb.load(), 1) + " dB  |  low band " + juce::String (proc.dynDb.load(), 1)
+                              + " dB  |  duck " + juce::String (proc.scConnected.load() ? juce::String (-proc.duckDb.load(), 1) + " dB" : juce::String ("no sc"))
+                              + "  |  latency "
                               + juce::String ((int) std::lround (proc.latencySeconds.load() * 1000.0)) + " ms",
                           foot, juce::Justification::centredLeft, 1, 0.7f);
     }

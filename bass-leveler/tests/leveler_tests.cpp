@@ -187,33 +187,23 @@ int main()
     }
 
     std::printf ("Automatic leveling (no learning pass)\n");
-    for (int mode = 0; mode < 2; ++mode)
     {
         double total;
         const auto ev = makeLine (5, 4, 3.0, total);
         const auto sig = synth::render (kFs, ev, total, makeResonances (11, 7.0), 2);
-        for (float amount : { 1.0f, 0.6f })
-        {
-            if (mode == 1 && amount < 1.0f)
-                continue;
-            Leveler l;
-            l.prepare (kFs);
-            Params p;
-            p.mode = mode;
-            p.amount = amount;
-            p.maxBoostDb = 12.0f;
-            p.maxCutDb = 18.0f;
-            const auto out = run (l, sig, 512, p);
-            const bool bal = mode == 0;
-            const double before = stddev (perPitch (sig, 0, ev, bal, 8));
-            const double after = stddev (perPitch (out, l.latencySamples(), ev, bal, 8));
-            const double want = mode == 0 ? (amount == 1.0f ? 0.40 : 0.70) : 0.65;
-            CHECK (after < before * want, "%s mode, amount %.1f: spread between pitches %.2f dB -> %.2f dB (-%.0f%%)", bal ? "Balance" : "Level",
-                   amount, before, after, 100.0 * (1.0 - after / before));
-        }
+        Leveler l;
+        l.prepare (kFs);
+        Params p;
+        p.amount = 1.0f;
+        p.maxBoostDb = 12.0f;
+        p.maxCutDb = 18.0f;
+        const auto out = run (l, sig, 512, p);
+        const double before = stddev (perPitch (sig, 0, ev, false, 8));
+        const double after = stddev (perPitch (out, l.latencySamples(), ev, false, 8));
+        CHECK (after < before * 0.65, "spread between pitches %.2f dB -> %.2f dB (-%.0f%%)", before, after, 100.0 * (1.0 - after / before));
     }
     {
-        // within-pitch variation (playing dynamics) in Level mode
+        // within-pitch variation (playing dynamics)
         std::mt19937 g (21);
         std::uniform_real_distribution<double> u (-1.0, 1.0);
         std::vector<synth::Ev> ev;
@@ -227,7 +217,6 @@ int main()
         Leveler l;
         l.prepare (kFs);
         Params p;
-        p.mode = 1;
         p.amount = 1.0f;
         const auto out = run (l, sig, 512, p);
         auto noteStd = [&] (const std::vector<float>& s, int shift) {
@@ -237,7 +226,7 @@ int main()
             return stddev (v);
         };
         const double before = noteStd (sig, 0), after = noteStd (out, l.latencySamples());
-        CHECK (after < before * 0.6, "Level mode evens out playing dynamics: note-to-note spread %.2f dB -> %.2f dB", before, after);
+        CHECK (after < before * 0.6, "evens out playing dynamics: note-to-note spread %.2f dB -> %.2f dB", before, after);
     }
     {
         // the reference needs a few notes before it is trusted
@@ -389,7 +378,6 @@ int main()
             l.prepare (kFs);
             Params p;
             p.amount = 1.0f;
-            p.focus2 = true;
             return run (l, sig, block, p);
         };
         const auto ref = go (512);

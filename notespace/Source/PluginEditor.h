@@ -41,6 +41,6 @@ private:
 
     NspLookAndFeel laf;
     NoteSpaceProcessor& proc;
-    Knob contrast, tone, fund, repair, translate, range;
+    Knob contrast, tone, fund, repair, translate, range, punch, sustain, kick;
     juce::Rectangle<int> profileArea, meterArea;
 };

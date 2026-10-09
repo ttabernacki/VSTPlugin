@@ -42,10 +42,6 @@ private:
 
     BnlLookAndFeel laf;
     BassLevelerProcessor& proc;
-    juce::TextButton focus { "+ 2nd harmonic" };
-    juce::ComboBox mode;
     Knob amount, boost, cut, speed;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> focusAtt;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> modeAtt;
     juce::Rectangle<int> chart;
 };

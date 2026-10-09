@@ -41,13 +41,15 @@ public:
     // --- for the editor (thread-safe; a torn read of display data is harmless) ---
     static constexpr int kH = nsp::NoteSpace::kH;
     std::atomic<float> hIn[kH], hOut[kH];
-    std::atomic<float> pitchHz { 0.0f }, voicing { 0.0f }, noteResIn { 0.0f }, noteResOut { 0.0f }, residualDb { 0.0f };
+    std::atomic<float> pitchHz { 0.0f }, voicing { 0.0f }, noteResIn { 0.0f }, noteResOut { 0.0f }, residualDb { 0.0f }, duckDb { 0.0f }, dynDb { 0.0f };
+    std::atomic<bool> scConnected { false };
     std::atomic<double> latencySeconds { 0.11 };
 
 private:
     nsp::NoteSpace core;
     bool prepared_ = false;
-    std::atomic<float>*pContrast = nullptr, *pTone = nullptr, *pFund = nullptr, *pRepair = nullptr, *pTranslate = nullptr, *pRange = nullptr;
+    std::atomic<float>*pContrast = nullptr, *pTone = nullptr, *pFund = nullptr, *pRepair = nullptr, *pTranslate = nullptr, *pRange = nullptr, *pPunch = nullptr, *pSustain = nullptr, *pKick = nullptr;
+    juce::AudioBuffer<float> scratch;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NoteSpaceProcessor)
 };
