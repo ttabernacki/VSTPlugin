@@ -27,7 +27,7 @@ struct Run
     int lat = 0;
 };
 
-static Run run (const std::vector<float>& in, const Params& p, int block = 480, double fs = kFs, bool taps = false)
+static Run run (const std::vector<float>& in, const Params& p, int block = 480, double fs = kFs, bool taps = false, const std::vector<float>* sc = nullptr)
 {
     NoteSpace d;
     d.prepare (fs);
@@ -54,7 +54,8 @@ static Run run (const std::vector<float>& in, const Params& p, int block = 480, 
     for (size_t i = 0; i < in.size(); i += (size_t) block)
     {
         float* c[1] = { r.out.data() + i };
-        d.process (c, 1, (int) std::min<size_t> ((size_t) block, in.size() - i));
+        const float* s[1] = { sc ? sc->data() + i : nullptr };
+        d.process (c, 1, (int) std::min<size_t> ((size_t) block, in.size() - i), sc ? s : nullptr, sc ? 1 : 0);
     }
     return r;
 }
@@ -506,6 +507,159 @@ int main()
         }
         const double s = std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count();
         std::printf ("  [INFO] CPU: 20 s of stereo in %.2f s (%.1f%% of one core)\n", s, 100.0 * s / 20.0);
+    }
+
+    std::printf ("Punch, sustain, kick\n");
+    {
+        std::vector<synth::Ev> ev;
+        std::mt19937 g (9);
+        std::vector<int> pitches;
+        for (int p = 28; p <= 43; ++p)
+            pitches.push_back (p);
+        std::shuffle (pitches.begin(), pitches.end(), g);
+        double t = 0.3;
+        for (int p : pitches)
+        {
+            ev.push_back ({ t, 0.45, p, 0.0 });
+            t += 0.55;
+        }
+        std::array<double, 128> flat {};
+        const auto sig = synth::render (kFs, ev, t + 0.5, flat, 3);
+        auto lowp = [] (std::vector<float> y, double fc) {
+            for (int stage = 0; stage < 2; ++stage)
+            {
+                const double q = stage == 0 ? 0.5411961 : 1.3065630, w = 2.0 * kPi * fc / kFs, cw = std::cos (w), al = std::sin (w) / (2.0 * q), a0 = 1.0 + al;
+                const double b0 = (1 - cw) / 2 / a0, b1 = (1 - cw) / a0, b2 = b0, a1 = -2 * cw / a0, a2 = (1 - al) / a0;
+                double z1 = 0, z2 = 0;
+                for (auto& v : y)
+                {
+                    const double o = b0 * v + z1;
+                    z1 = b1 * v - a1 * o + z2;
+                    z2 = b2 * v - a2 * o;
+                    v = (float) o;
+                }
+            }
+            return y;
+        };
+        const int lat = run (sig, neutral).lat;
+        auto score = [&] (const Params& p) {
+            const auto o = lowp (run (sig, p).out, 200.0);
+            double early = 0, late = 0;
+            int n = 0;
+            for (size_t i = 3; i < ev.size(); ++i)
+            {
+                const size_t s0 = (size_t) (ev[i].t * kFs) + (size_t) lat;
+                const size_t na = (size_t) (0.030 * kFs);
+                double pk = 0, e2 = 0;
+                for (size_t j = 0; j < na; ++j)
+                    pk += (double) o[s0 + j] * o[s0 + j];
+                pk = std::sqrt (pk / (double) na);
+                const size_t a = s0 + (size_t) (0.15 * kFs), b = s0 + (size_t) (0.35 * kFs);
+                for (size_t j = a; j < b; ++j)
+                    e2 += (double) o[j] * o[j];
+                early += 20 * std::log10 (pk + 1e-9);
+                late += 10 * std::log10 (e2 / (double) (b - a) + 1e-12);
+                ++n;
+            }
+            return std::array<double, 2> { early / n, late / n };
+        };
+        const auto base = score (neutral);
+        Params pp = neutral, pm = neutral, sp = neutral, sm = neutral;
+        pp.punch = 1.0f;
+        pm.punch = -1.0f;
+        sp.sustain = 1.0f;
+        sm.sustain = -1.0f;
+        const auto a = score (pp), b = score (pm), c = score (sp), e = score (sm);
+        const double br = base[0] - base[1] / 2.0;
+        auto ratio = [&] (const std::array<double, 2>& v) { return v[0] - v[1] / 2.0 - br; };
+        CHECK (ratio (a) > 2.0, "punch +100%%: attack vs body %+.1f dB", ratio (a));
+        CHECK (ratio (b) < -1.5, "punch -100%%: attack vs body %+.1f dB", ratio (b));
+        CHECK (c[1] - base[1] > 1.5 && std::fabs (c[0] - base[0]) < 1.5, "sustain +100%%: body %+.1f dB, attack %+.1f dB", c[1] - base[1], c[0] - base[0]);
+        CHECK (e[1] - base[1] < -1.5 && std::fabs (e[0] - base[0]) < 1.5, "sustain -100%%: body %+.1f dB, attack %+.1f dB", e[1] - base[1], e[0] - base[0]);
+
+        Params all = neutral;
+        all.punch = 1.0f;
+        all.sustain = 1.0f;
+        // a +10 dB pulse with a 3 ms rise modulates the low band, which has to put some energy into the upper harmonics
+        // (about -20 dB re the dry line's own); sustain moves slowly and adds nearly none. Neither may click.
+        const auto ra = run (sig, all), rs = run (sig, sp);
+        CHECK (highAddedDb (sig, rs.out, rs.lat, kFs) < -30.0, "sustain at 100%%: %.1f dB added above 1 kHz (re the dry's own)", highAddedDb (sig, rs.out, rs.lat, kFs));
+        CHECK (highAddedDb (sig, ra.out, ra.lat, kFs) < -15.0, "punch + sustain at 100%%: %.1f dB added above 1 kHz (re the dry's own)", highAddedDb (sig, ra.out, ra.lat, kFs));
+
+        // block-size independence
+        const auto r1 = run (sig, all, 1), r2 = run (sig, all, 333);
+        double md = 0;
+        for (size_t i = 0; i < sig.size(); ++i)
+            md = std::max (md, (double) std::fabs (r1.out[i] - r2.out[i]));
+        CHECK (md == 0.0, "punch + sustain: block size 1 and 333 are identical (%.1e)", md);
+    }
+    {
+        // kick: a steady note and a steady mud tone; a 64 Hz kick burst every 0.6 s. The residual (mud) ducks, the note does not.
+        const double f0 = 41.2, mudHz = 64.0;
+        const auto bass = held (f0, 4.0, mudHz, 0.1);
+        std::vector<float> kick (bass.size(), 0.0f);
+        for (int bI = 0; bI < 6; ++bI)
+        {
+            const size_t n0 = (size_t) ((0.5 + 0.6 * bI) * kFs);
+            for (size_t i = 0; i < (size_t) (0.18 * kFs) && n0 + i < kick.size(); ++i)
+            {
+                const double t = (double) i / kFs;
+                kick[n0 + i] = (float) (0.8 * std::exp (-t / 0.06) * std::sin (2 * kPi * mudHz * t));
+            }
+        }
+        Params off = neutral, on = neutral;
+        on.kick = 1.0f;
+        const auto base = run (bass, off, 480, kFs, false, &kick);
+        const auto duck = run (bass, on, 160, kFs, false, &kick);
+        const int lat = base.lat;
+        double md = 0;
+        for (size_t i = (size_t) lat; i < bass.size(); ++i)
+            md = std::max (md, (double) std::fabs (base.out[i] - bass[i - (size_t) lat]));
+        CHECK (md == 0.0, "kick amount 0 with a sidechain playing: bit-exact delay (%.1e)", md);
+        const auto nosc = run (bass, on);
+        md = 0;
+        for (size_t i = (size_t) lat; i < bass.size(); ++i)
+            md = std::max (md, (double) std::fabs (nosc.out[i] - bass[i - (size_t) lat]));
+        CHECK (md == 0.0, "kick amount 100%% but no sidechain connected: bit-exact delay (%.1e)", md);
+        const double tHit = 0.5 + 0.6 * 3 + 0.04, tQuiet = 0.5 + 0.6 * 3 + 0.50, dl = (double) lat / kFs;
+        const double mudHit = ampDb (duck.out, mudHz, tHit + dl, 6) - ampDb (bass, mudHz, tHit, 6);
+        const double fundHit = ampDb (duck.out, f0, tHit + dl, 4) - ampDb (bass, f0, tHit, 4);
+        const double mudQuiet = ampDb (duck.out, mudHz, tQuiet + dl, 4) - ampDb (bass, mudHz, tQuiet, 4);
+        CHECK (mudHit < -6.0, "the residual under a kick hit is ducked by %.1f dB", -mudHit);
+        CHECK (std::fabs (fundHit) < 0.5, "the note's own fundamental is never ducked (%+.1f dB)", fundHit);
+        CHECK (std::fabs (mudQuiet) < 1.5, "it lets go between hits (%+.1f dB)", mudQuiet);
+        // the bass as its own sidechain: nothing to make room for
+        const auto self = run (bass, on, 480, kFs, false, &bass);
+        double mdS = 0;
+        for (size_t i = (size_t) lat; i < bass.size(); ++i)
+            mdS = std::max (mdS, (double) std::fabs (self.out[i] - bass[i - (size_t) lat]));
+        CHECK (mdS < 1e-6, "the bass track as its own sidechain: left alone (%.1e)", mdS);
+        const auto r1 = run (bass, on, 1, kFs, false, &kick), r2 = run (bass, on, 333, kFs, false, &kick);
+        md = 0;
+        for (size_t i = 0; i < bass.size(); ++i)
+            md = std::max (md, (double) std::fabs (r1.out[i] - r2.out[i]));
+        CHECK (md == 0.0, "kick duck: block size 1 and 333 are identical (%.1e)", md);
+    }
+    {
+        // a plucked line, the kick on every beat: the duck must not add a click train
+        std::vector<synth::Ev> ev;
+        for (int i = 0; i < 12; ++i)
+            ev.push_back ({ 0.3 + 0.5 * i, 0.4, 28 + (i * 5) % 16, 0.0 });
+        std::array<double, 128> flat {};
+        const auto sig = synth::render (kFs, ev, 6.5, flat, 3);
+        std::vector<float> kick (sig.size(), 0.0f);
+        for (int bI = 0; bI < 12; ++bI)
+            for (size_t i = 0; i < (size_t) (0.2 * kFs); ++i)
+            {
+                const size_t n = (size_t) ((0.3 + 0.5 * bI) * kFs) + i;
+                if (n < kick.size())
+                    kick[n] = (float) (0.8 * std::exp (-(double) i / kFs / 0.06) * std::sin (2 * kPi * 60.0 * (double) i / kFs));
+            }
+        Params p = neutral;
+        p.kick = 1.0f;
+        p.contrast = 1.0f;
+        const auto r = run (sig, p, 480, kFs, false, &kick);
+        CHECK (highAddedDb (sig, r.out, r.lat, kFs) < -25.0, "kick duck + contrast on a plucked line: nothing added above 1 kHz (%.1f dB)", highAddedDb (sig, r.out, r.lat, kFs));
     }
 
     std::printf ("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASSED" : "FAILED", failures, failures == 1 ? "" : "s");

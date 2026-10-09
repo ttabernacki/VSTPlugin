@@ -44,6 +44,8 @@ public:
         lp_.setLowpass (400.0, sr_);
         af_ = 1.0 - std::exp (-1.0 / (0.008 * sr_));
         as_ = 1.0 - std::exp (-1.0 / (0.060 * sr_));
+        am_ = 1.0 - std::exp (-1.0 / (0.030 * sr_));
+        al_ = 1.0 - std::exp (-1.0 / (0.120 * sr_));
         reset();
     }
 
@@ -59,7 +61,7 @@ public:
         onsetN_ = onsetHead_ = 0;
         inOnset_ = false;
         lastOnsetT_ = -1000000;
-        pf_ = ps_ = 0.0;
+        pf_ = ps_ = pm_ = pl_ = 0.0;
     }
 
     int64_t samples() const { return nIn_; }
@@ -67,10 +69,13 @@ public:
     int64_t hopSamples() const { return hopIn_; }
     double fastPower() const { return pf_; }       // 8 ms envelope of the low band's power
     double slowPower() const { return ps_; }       // 60 ms envelope
+    double mediumPower() const { return pm_; }     // 30 ms
+    double longPower() const { return pl_; }       // 120 ms
     bool inOnset() const { return inOnset_; }
     int64_t lastOnset() const { return lastOnsetT_; }   // input sample at which the detector last fired
     int onsetCount() const { return onsetN_; }
     int64_t onsetTime (int i) const { return onsets_[(size_t) i]; } // estimated start of the attack (input samples)
+    int64_t newestOnsetTime() const { return onsets_[(size_t) ((onsetHead_ - 1) & 31)]; }
 
     // call once every kSub samples, before push() of the sample at which nIn == multiple of kSub
     void control()
@@ -97,6 +102,8 @@ public:
         const double lo = lp_.process (a);
         pf_ += af_ * (lo * lo - pf_);
         ps_ += as_ * (lo * lo - ps_);
+        pm_ += am_ * (lo * lo - pm_);
+        pl_ += al_ * (lo * lo - pl_);
         if (nIn_ % D_ == 0)
         {
             din_[(size_t) (m_ & (kRing - 1))] = (float) lo;
@@ -325,6 +332,6 @@ private:
     int onsetN_ = 0, onsetHead_ = 0;
     bool inOnset_ = false;
     int64_t lastOnsetT_ = -1000000;
-    double pf_ = 0.0, ps_ = 0.0, af_ = 0.01, as_ = 0.001;
+    double pf_ = 0.0, ps_ = 0.0, pm_ = 0.0, pl_ = 0.0, af_ = 0.01, as_ = 0.001, am_ = 0.002, al_ = 0.0005;
 };
 } // namespace bass

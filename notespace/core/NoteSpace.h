@@ -17,6 +17,9 @@
 //   Fundamental the fundamental alone, up or down.
 //   Repair      the fundamental replaced by its slow part (two 60 ms poles on its complex envelope): beating and wobble
 //               rotate against the note and average out, so what is left is a steady sine locked to the note.
+//   Punch, Sustain   the low band's envelope: attacks and the body's ring-out (bass-common/EnvelopeShaper.h).
+//   Kick        optional sidechain: the residual (mud, boom) ducks while the kick plays. The note is the one thing that is
+//               never ducked, so the kick makes room without the bass losing its pitch.
 //   Translate   harmonics 2-4 lifted (or generated, phase-locked to the fundamental) to a floor below the fundamental,
 //               so the note keeps its pitch on small speakers.
 // Processing fades out where the split cannot be trusted: no pitch, a pitch change in the averaging window.
@@ -28,7 +31,7 @@
 #include <cstdlib>
 #include <vector>
 
-#include "../../bass-common/PitchTracker.h"
+#include "../../bass-common/EnvelopeShaper.h"
 
 namespace nsp
 {
@@ -44,6 +47,9 @@ struct Params
     float repair = 0.0f;        // 0..1   blend to 100 % at 0.5, then the smoothing stretches from 60 to 200 ms
     float translate = 0.0f;     // 0..2   1 = harmonics 2-4 at -6/-9/-12 dB re the fundamental, 2 = +3/0/-3 dB
     float rangeHz = 300.0f;     // residual cleanup acts below this (50..1000 Hz)
+    float punch = 0.0f;         // -1..1  tame .. emphasise attacks (the low band: note and residual below Range)
+    float sustain = 0.0f;       // -1..1  shorten .. lengthen the body
+    float kick = 0.0f;          // 0..1   duck the residual (never the note) up to 24 dB while the sidechain's kick plays
 };
 
 class NoteSpace
@@ -55,6 +61,9 @@ public:
     {
         sr_ = sampleRate;
         trk_.prepare (sr_);
+        lpK_.setLowpass (150.0, sr_);
+        aDyn_ = 1.0 - std::exp (-1.0 / (0.0007 * sr_));
+        ak_ = 1.0 - std::exp (-1.0 / (0.008 * sr_));
         W_ = trk_.windowSamples();
         hopIn_ = trk_.hopSamples();
         // the split runs 2 * Pmax behind the pitch, which runs Lp behind the input
@@ -73,6 +82,8 @@ public:
             dsize_ <<= 1;
         for (auto& d : dl_)
             d.assign ((size_t) dsize_, 0.0f);
+        kpow_.assign ((size_t) dsize_, 0.0f);
+        shaper_.prepare (sr_, lat_);
         for (int c = 0; c < 2; ++c)
         {
             dr_[c].assign ((size_t) rsize_, 0.0);
@@ -117,6 +128,12 @@ public:
         for (auto& l : lpR_)
             l.reset();
         trk_.reset();
+        shaper_.reset();
+        lpK_.reset();
+        std::fill (kpow_.begin(), kpow_.end(), 0.0f);
+        pk_ = scSame_ = duckDb_ = dynDbT_ = 0.0;
+        gDyn_ = gDynP_ = gDs_ = 1.0;
+        rampB_ = 0;
         nIn_ = 0;
         theta_ = 0.0;
         f0s_ = 55.0;
@@ -161,14 +178,21 @@ public:
     double lastPartials() const { return tapP_; }
     double lastResidual() const { return tapR_; }
 
-    void process (float* const* ch, int nCh, int n)
+    float kickDuckDb() const { return (float) duckDb_; }
+    float dynamicsDb() const { return (float) (20.0 * std::log10 (std::max (gDyn_, 1e-6))); }
+
+    // sc: optional sidechain (the kick), scCh channels, same length n
+    void process (float* const* ch, int nCh, int n, const float* const* sc = nullptr, int scCh = 0)
     {
         nCh = std::min (nCh, 2);
         const int mask = dsize_ - 1;
         for (int i = 0; i < n; ++i)
         {
             if (nIn_ % kSub == 0)
+                {
                 trk_.control();
+                shaper_.analyse (nIn_, trk_, std::clamp ((double) prm_.sustain, -1.0, 1.0));
+            }
             double x[2];
             for (int c = 0; c < 2; ++c)
             {
@@ -177,6 +201,20 @@ public:
                     x[c] = 0.0;
             }
             trk_.push (0.5 * (x[0] + x[1]));
+            double kin = 0.0;
+            if (sc != nullptr && scCh > 0)
+            {
+                for (int c = 0; c < scCh; ++c)
+                    kin += sc[c][i] / scCh;
+                if (! std::isfinite (kin))
+                    kin = 0.0;
+                scSame_ += (kin == x[0] ? 1.0 : 0.0) * (1.0 / 4096.0) - scSame_ * (1.0 / 4096.0);
+            }
+            else
+                scSame_ -= scSame_ * (1.0 / 4096.0);
+            const double kl = lpK_.process (kin);
+            pk_ += ak_ * (kl * kl - pk_);
+            kpow_[(size_t) (nIn_ & (dsize_ - 1))] = (float) pk_;
             const int wr = (int) (nIn_ & mask);
             for (int c = 0; c < nCh; ++c)
                 dl_[c][(size_t) wr] = (float) x[c];
@@ -371,14 +409,43 @@ private:
             return;
         }
         const size_t k2 = (size_t) (t2 & (rsize_ - 1));
-        const double gRes = vC_ * attC_ * (grC_ - 1.0);
+
+        // Kick duck of the residual: the kick is read a few ms ahead of the audio leaving the delay, so the duck is already
+        // there when the kick hits. A sidechain that carries the bass itself has no kick to make room for.
+        const double kdepth = scSame_ > 0.5 ? 0.0 : 24.0 * std::clamp ((double) prm_.kick, 0.0, 1.0);
+        double dT = 0.0;
+        if (kdepth > 0.0)
+        {
+            const double pw = kpow_[(size_t) ((t2 + (int64_t) (0.005 * sr_)) & mask)];
+            dT = kdepth * std::clamp ((10.0 * std::log10 (pw + 1e-12) + 70.0) / 20.0, 0.0, 1.0); // -70 dBFS: nothing, -50: all
+        }
+        duckDb_ += (dT > duckDb_ ? 1.0 - std::exp (-1.0 / (0.003 * sr_)) : 1.0 - std::exp (-1.0 / (0.08 * sr_))) * (dT - duckDb_);
+        if (duckDb_ < 1e-4 && dT == 0.0)
+            duckDb_ = 0.0;
+        const double duck = duckDb_ > 0.0 ? std::pow (10.0, -duckDb_ / 20.0) : 1.0;
+
+        // Punch and sustain: one gain for the low band, gliding across each tick
+        if ((t2 & (kSub - 1)) == 0)
+        {
+            gDynP_ = gDyn_;
+            dynDbT_ = shaper_.gainDb (std::clamp ((double) prm_.punch, -1.0, 1.0), nIn_, t2 + kSub / 2);
+            gDyn_ = std::pow (10.0, dynDbT_ / 20.0);
+            rampB_ = 0;
+        }
+        ++rampB_;
+        // the ramps meet at a kink every tick (a line at sr/16 and its multiples): a short smoother takes it off
+        gDs_ += aDyn_ * (gDynP_ + (gDyn_ - gDynP_) * (double) std::min (rampB_, kSub) / kSub - gDs_);
+        const double gD = gDs_;
+
+        const double gRes = vC_ * ((1.0 + attC_ * (grC_ - 1.0)) * duck - 1.0);
         double rOutM = 0.0;
         for (int c = 0; c < nCh; ++c)
         {
             const double x = dl_[c][(size_t) (t2 & mask)];
             const double rIn = rr_[c][(size_t) ((t2 + aRes_) & (rsize_ - 1))];
             const double rLow = lpR_[c].process (rIn); // lines up with the residual at t2
-            out[c] = x + dr_[c][k2] + gRes * rLow;
+            const double lowOut = (x - rr_[c][k2]) + dr_[c][k2] + (1.0 + gRes) * rLow; // note + residual below Range, after the split's changes
+            out[c] = x + dr_[c][k2] + gRes * rLow + (gD - 1.0) * lowOut;
             rOutM += (rr_[c][k2] + gRes * rLow) / nCh;
         }
         tapP_ = tapPr_[k2];
@@ -489,7 +556,11 @@ private:
     double sr_ = 48000.0;
     int64_t hopIn_ = 200, W_ = 3400, nIn_ = 0;
     bass::PitchTracker trk_;
-    bass::Lr4 lpR_[2];
+    bass::EnvelopeShaper shaper_;
+    bass::Lr4 lpR_[2], lpK_;
+    std::vector<float> kpow_;
+    double pk_ = 0.0, ak_ = 0.01, scSame_ = 0.0, duckDb_ = 0.0, gDyn_ = 1.0, gDynP_ = 1.0, gDs_ = 1.0, aDyn_ = 0.05, dynDbT_ = 0.0;
+    int rampB_ = 0;
 
     int pMax_ = 1600, Lp_ = 4000, lag2_ = 3204, lat_ = 7200, rsize_ = 8192, dsize_ = 16384;
     std::vector<float> dl_[2];
