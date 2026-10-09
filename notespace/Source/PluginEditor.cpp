@@ -25,7 +25,7 @@ NoteSpaceEditor::NoteSpaceEditor (NoteSpaceProcessor& p) : juce::AudioProcessorE
     sustain.setup (*this, proc.apvts, "sustain", "SUSTAIN");
     kick.setup (*this, proc.apvts, "kick", "KICK");
     setResizable (true, true);
-    setResizeLimits (720, 400, 1300, 708);
+    setResizeLimits (800, 436, 1300, 708);
     getConstrainer()->setFixedAspectRatio (860.0 / 468.0);
     setSize (860, 468);
     startTimerHz (15);

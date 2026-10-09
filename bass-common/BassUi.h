@@ -70,7 +70,7 @@ struct Knob
         label.setText (text, juce::dontSendNotification);
         label.setJustificationType (juce::Justification::centred);
         label.setColour (juce::Label::textColourId, kDim);
-        label.setFont (juce::FontOptions (11.0f, juce::Font::bold));
+        label.setFont (juce::FontOptions (10.0f, juce::Font::bold));
         parent.addAndMakeVisible (label);
         attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (apvts, id, slider);
     }

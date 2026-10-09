@@ -235,7 +235,7 @@ int main()
         std::unique_ptr<juce::AudioProcessorEditor> ed (p.createEditor());
         bool inside = true, fits = true;
         int knobs = 0;
-        for (auto sz : { juce::Point<int> (720, 392), juce::Point<int> (860, 468), juce::Point<int> (1300, 708) })
+        for (auto sz : { juce::Point<int> (800, 436), juce::Point<int> (860, 468), juce::Point<int> (1300, 708) })
         {
             ed->setSize (sz.x, sz.y);
             for (auto* c : ed->getChildren())
@@ -243,13 +243,16 @@ int main()
                 inside = inside && ed->getLocalBounds().contains (c->getBounds());
                 if (auto* l = dynamic_cast<juce::Label*> (c))
                 {
-                    fits = fits && l->getFont().getStringWidthFloat (l->getText()) <= (float) l->getWidth();
+                    if (1.25f * l->getFont().getStringWidthFloat (l->getText()) > (float) l->getWidth())
+                        std::printf ("    %dx%d: \"%s\" needs %.0f px (+25 %%), has %d\n", sz.x, sz.y, l->getText().toRawUTF8(),
+                                     1.25f * l->getFont().getStringWidthFloat (l->getText()), l->getWidth());
+                    fits = fits && 1.25f * l->getFont().getStringWidthFloat (l->getText()) <= (float) l->getWidth(); // 25 % to spare: Windows and macOS fonts are wider than the CI Linux one
                     if (sz.x == 860)
                         ++knobs;
                 }
             }
         }
-        CHECK (inside && fits && knobs == 9, "9 knobs, every control inside the window and every label fitting, at 720x392, 860x468 and 1300x708");
+        CHECK (inside && fits && knobs == 9, "9 knobs, every control inside the window and every label fitting, at 800x436, 860x468 and 1300x708 (25 %% to spare on the labels)");
     }
 
     std::printf ("State, blocks, rates, stress\n");
