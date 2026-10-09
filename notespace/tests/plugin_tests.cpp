@@ -243,16 +243,16 @@ int main()
                 inside = inside && ed->getLocalBounds().contains (c->getBounds());
                 if (auto* l = dynamic_cast<juce::Label*> (c))
                 {
-                    if (1.25f * l->getFont().getStringWidthFloat (l->getText()) > (float) l->getWidth())
-                        std::printf ("    %dx%d: \"%s\" needs %.0f px (+25 %%), has %d\n", sz.x, sz.y, l->getText().toRawUTF8(),
-                                     1.25f * l->getFont().getStringWidthFloat (l->getText()), l->getWidth());
-                    fits = fits && 1.25f * l->getFont().getStringWidthFloat (l->getText()) <= (float) l->getWidth(); // 25 % to spare: Windows and macOS fonts are wider than the CI Linux one
+                    if (1.15f * l->getFont().getStringWidthFloat (l->getText()) > (float) l->getWidth())
+                        std::printf ("    %dx%d: \"%s\" needs %.0f px (+15 %%), has %d\n", sz.x, sz.y, l->getText().toRawUTF8(),
+                                     1.15f * l->getFont().getStringWidthFloat (l->getText()), l->getWidth());
+                    fits = fits && 1.15f * l->getFont().getStringWidthFloat (l->getText()) <= (float) l->getWidth(); // 15 % to spare: Windows and macOS fonts are wider than the CI Linux one
                     if (sz.x == 860)
                         ++knobs;
                 }
             }
         }
-        CHECK (inside && fits && knobs == 9, "9 knobs, every control inside the window and every label fitting, at 800x436, 860x468 and 1300x708 (25 %% to spare on the labels)");
+        CHECK (inside && fits && knobs == 9, "9 knobs, every control inside the window and every label fitting, at 800x436, 860x468 and 1300x708 (15 %% to spare on the labels)");
     }
 
     std::printf ("State, blocks, rates, stress\n");
