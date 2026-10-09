@@ -62,9 +62,13 @@ Every control value (voicing, residual gain, per-harmonic gains, attack and repa
 instead of stepping every 16 samples, which would put a click train at 3 kHz on top of the bass. What the plug-in adds above 1 kHz is
 measured in the tests, against the dry signal's own energy above 1 kHz: Fundamental +6 dB -34 dB (was -14 dB before the fix), Repair 100 %
 -38 dB (was -17), Contrast 100 % -79, Tone lock -45, Translate 100 % -48. Sustain 100 % adds nothing above -30 dB, and the kick duck on
-a plucked line stays below -25 dB. Punch is gain modulation by definition (a +10 dB pulse with a 3 ms rise): about -20 dB.
+a plucked line stays below -25 dB. Punch is gain modulation by definition (a +10 dB pulse with a 3 ms rise): -11 to -19 dB re the dry line's own energy above 1 kHz
+(which is tiny, and depends on how many attacks there are), and -54 dB or lower re the whole signal.
 
 ## Limits
+- The kick duck acts on the residual, and the residual only exists where the split is trusted: a note with no clear pitch (below about
+  31 Hz, an 808 mid-glide, a chord) is not ducked. Punch and Sustain do not depend on pitch and always act.
+- A kick above -50 dBFS ducks by the full Kick amount whatever its level relative to the bass; there is no level-dependent scaling.
 - Monophonic bass only. Chords, or two notes ringing together, are not split (processing fades out or follows one note).
 - Fundamentals from about 31 Hz up. Below that nothing is processed.
 - Around a note change (about four periods either side, plus a few ms) the split is not trusted and the input passes through.

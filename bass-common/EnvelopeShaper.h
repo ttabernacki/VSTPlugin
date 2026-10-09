@@ -36,7 +36,6 @@ public:
         nOn_ = head_ = 0;
         times_.fill (-1000000000LL);
         amps_.fill (0.0f);
-        inOnset_ = false;
     }
 
     // input time nIn (a multiple of kSub), after tracker.control(), before the tracker has seen the sample nIn
@@ -63,14 +62,12 @@ public:
                     hist_[(size_t) (b & (kHist - 1))] = gv * (1.0f - (float) (b - bs) / (float) (blk - bs));
             }
             gs_ = 0.0;
-            inOnset_ = true;
         }
         if (t.inOnset())
         {
             dPeak_ = std::max (dPeak_, d);
             amps_[(size_t) ((head_ - 1) & 31)] = (float) std::clamp (dPeak_ / 6.0, 0.4, 1.0);
         }
-        inOnset_ = t.inOnset();
 
         // body: how fast is the note dying (a natural ring-out falls at about 0.3-1.5; faster is a mute or a wobble)
         const double wl = std::clamp ((10.0 * std::log10 (t.longPower() + 1e-12) + 72.0) / 12.0, 0.0, 1.0);
@@ -79,10 +76,9 @@ public:
         const double wf = std::clamp ((10.0 * std::log10 (t.fastPower() + 1e-12) + 62.0) / 8.0, 0.0, 1.0); // note over: let go
         const double since = (double) (nIn - t.lastOnset()) / sr_;
         const double wb = std::clamp ((since - 0.03) / 0.03, 0.0, 1.0); // the body starts after the attack
-        const double raw = inOnset_ ? 0.0 : sustain * kS * dec * wf * wb;
+        const double raw = t.inOnset() ? 0.0 : sustain * kS * dec * wf * wb;
         gs_ += (1.0 - std::exp (-(double) kSub / (0.006 * sr_))) * (raw - gs_);
         hist_[(size_t) (blk & (kHist - 1))] = (float) gs_;
-        blkNow_ = blk;
     }
 
     // dB of gain for the audio at output time tOut (middle of the tick); call once per kSub samples after analyse()
@@ -111,8 +107,7 @@ private:
     static constexpr double kPunchDb = 10.0, kS = 8.0, kCeil = 12.0;
     double sr_ = 48000.0, gs_ = 0.0, gOut_ = 0.0, dPeak_ = 0.0;
     int latBlk_ = 0, antBlk_ = 12, nOn_ = 0, head_ = 0;
-    int64_t seenOnset_ = -1000000, blkNow_ = 0;
-    bool inOnset_ = false;
+    int64_t seenOnset_ = -1000000;
     std::vector<float> hist_;
     std::array<int64_t, 32> times_ {};
     std::array<float, 32> amps_ {};

@@ -3,6 +3,7 @@
 #include "../../bass-leveler/tests/synth.h"
 
 #include <chrono>
+#include <limits>
 #include <cstdio>
 #include <random>
 
@@ -93,7 +94,7 @@ static std::vector<float> held (double f0, double secs, double mudHz = 0, double
 
 
 // what a plug-in adds above 1 kHz, against the dry signal's own energy above 1 kHz (dB): a zipper or click train shows up here
-static double highAddedDb (const std::vector<float>& dry, const std::vector<float>& out, int lat, double fs)
+static double highAddedDb (const std::vector<float>& dry, const std::vector<float>& out, int lat, double fs, bool vsTotal = false)
 {
     const size_t N = dry.size();
     std::vector<double> add (N, 0.0), in (N, 0.0);
@@ -127,7 +128,7 @@ static double highAddedDb (const std::vector<float>& dry, const std::vector<floa
     for (size_t i = (size_t) lat + 4800; i + 4800 < N; ++i)
     {
         e += H[i] * H[i];
-        ei += Hin[i] * Hin[i];
+        ei += vsTotal ? (double) in[i] * in[i] : Hin[i] * Hin[i];
     }
     return 10.0 * std::log10 (e / (ei + 1e-30) + 1e-20);
 }
@@ -488,6 +489,58 @@ int main()
         CHECK (fin && peak < 40.0f, "fuzz (800 random blocks and settings): finite, peak %.2f", peak);
     }
     {
+        // fuzz the sidechain paths: NaN/inf/huge sidechains, a sidechain that comes and goes, odd blocks, all rates and settings
+        std::mt19937 g (77);
+        std::uniform_real_distribution<float> u (0.0f, 1.0f);
+        bool fin = true;
+        float peak = 0.0f;
+        for (double fs : { 22050.0, 44100.0, 48000.0, 96000.0, 192000.0 })
+        {
+            NoteSpace d;
+            d.prepare (fs);
+            std::vector<float> a (8192), b (8192), s0 (8192), s1 (8192);
+            for (int blk = 0; blk < 120; ++blk)
+            {
+                Params p;
+                p.contrast = u (g) * 2 - 1;
+                p.toneLock = u (g);
+                p.fundamentalDb = (u (g) * 2 - 1) * 18;
+                p.repair = u (g);
+                p.translate = u (g) * 2;
+                p.rangeHz = 50 + u (g) * 950;
+                p.punch = u (g) * 2 - 1;
+                p.sustain = u (g) * 2 - 1;
+                p.kick = u (g);
+                d.setParams (p);
+                const int n = 1 + (int) (u (g) * 4000);
+                const float f = 30.0f + 100.0f * u (g);
+                for (int i = 0; i < n; ++i)
+                {
+                    const float x = (float) (0.4 * std::sin (2 * kPi * f * (double) (i + blk * 131) / fs));
+                    a[(size_t) i] = x + 0.02f * (u (g) - 0.5f);
+                    b[(size_t) i] = a[(size_t) i];
+                    float k = 0.8f * (u (g) - 0.5f);
+                    const float r = u (g);
+                    if (r < 0.01f) k = std::numeric_limits<float>::quiet_NaN();
+                    else if (r < 0.02f) k = std::numeric_limits<float>::infinity();
+                    else if (r < 0.03f) k = 1e30f;
+                    s0[(size_t) i] = k;
+                    s1[(size_t) i] = k;
+                }
+                float* c[2] = { a.data(), b.data() };
+                const float* sc[2] = { s0.data(), s1.data() };
+                const int mode = blk % 3; // 0: no sidechain, 1: stereo, 2: mono
+                d.process (c, 2, n, mode == 0 ? nullptr : sc, mode == 0 ? 0 : (mode == 1 ? 2 : 1));
+                for (int i = 0; i < n; ++i)
+                {
+                    fin = fin && std::isfinite (a[(size_t) i]) && std::isfinite (b[(size_t) i]);
+                    peak = std::max (peak, std::fabs (a[(size_t) i]));
+                }
+            }
+        }
+        CHECK (fin && peak < 40.0f, "fuzz with NaN/inf/huge sidechains, 5 sample rates: finite, peak %.2f", peak);
+    }
+    {
         // CPU
         auto x = held (55.0, 20.0);
         std::vector<float> y = x;
@@ -580,11 +633,13 @@ int main()
         Params all = neutral;
         all.punch = 1.0f;
         all.sustain = 1.0f;
-        // a +10 dB pulse with a 3 ms rise modulates the low band, which has to put some energy into the upper harmonics
-        // (about -20 dB re the dry line's own); sustain moves slowly and adds nearly none. Neither may click.
+        // A +10 dB pulse with a 3 ms rise modulates the low band, which has to put some energy into the upper harmonics. How that
+        // compares with the dry line's own (tiny) energy above 1 kHz depends on how many attacks there are (-11 to -19 dB across
+        // note orders, and across standard libraries), so punch is bounded against the whole signal instead; sustain moves
+        // slowly and adds nearly none. Neither may click.
         const auto ra = run (sig, all), rs = run (sig, sp);
         CHECK (highAddedDb (sig, rs.out, rs.lat, kFs) < -30.0, "sustain at 100%%: %.1f dB added above 1 kHz (re the dry's own)", highAddedDb (sig, rs.out, rs.lat, kFs));
-        CHECK (highAddedDb (sig, ra.out, ra.lat, kFs) < -15.0, "punch + sustain at 100%%: %.1f dB added above 1 kHz (re the dry's own)", highAddedDb (sig, ra.out, ra.lat, kFs));
+        CHECK (highAddedDb (sig, ra.out, ra.lat, kFs, true) < -48.0, "punch + sustain at 100%%: %.1f dB added above 1 kHz (re the whole dry signal)", highAddedDb (sig, ra.out, ra.lat, kFs, true));
 
         // block-size independence
         const auto r1 = run (sig, all, 1), r2 = run (sig, all, 333);

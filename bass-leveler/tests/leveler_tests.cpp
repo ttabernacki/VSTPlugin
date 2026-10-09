@@ -80,13 +80,13 @@ static double stddev (const std::vector<double>& v)
 
 // per-pitch mean of a metric over the notes of a line (skipping the first `skip` notes, where the
 // automatic reference is still warming up)
-static std::vector<double> perPitch (const std::vector<float>& sig, int shift, const std::vector<synth::Ev>& ev, bool balance, size_t skip)
+static std::vector<double> perPitch (const std::vector<float>& sig, int shift, const std::vector<synth::Ev>& ev, size_t skip)
 {
     std::map<int, std::vector<double>> acc;
     for (size_t i = skip; i < ev.size(); ++i)
     {
         auto m = synth::measure (sig, kFs, ev[i].midi, ev[i].t + (double) shift / kFs);
-        acc[ev[i].midi].push_back (balance ? m.balDb : m.lvlDb);
+        acc[ev[i].midi].push_back (m.lvlDb);
     }
     std::vector<double> out;
     for (auto& kv : acc)
@@ -198,8 +198,8 @@ int main()
         p.maxBoostDb = 12.0f;
         p.maxCutDb = 18.0f;
         const auto out = run (l, sig, 512, p);
-        const double before = stddev (perPitch (sig, 0, ev, false, 8));
-        const double after = stddev (perPitch (out, l.latencySamples(), ev, false, 8));
+        const double before = stddev (perPitch (sig, 0, ev, 8));
+        const double after = stddev (perPitch (out, l.latencySamples(), ev, 8));
         CHECK (after < before * 0.65, "spread between pitches %.2f dB -> %.2f dB (-%.0f%%)", before, after, 100.0 * (1.0 - after / before));
     }
     {
@@ -361,7 +361,7 @@ int main()
         Params p;
         p.amount = 1.0f;
         const auto out = run (l, sig, 512, p);
-        const auto a = perPitch (sig, 0, ev, true, 6), b = perPitch (out, l.latencySamples(), ev, true, 6);
+        const auto a = perPitch (sig, 0, ev, 6), b = perPitch (out, l.latencySamples(), ev, 6);
         double worst = 0;
         for (size_t i = 0; i < a.size(); ++i)
             worst = std::max (worst, std::fabs (a[i] - b[i]));

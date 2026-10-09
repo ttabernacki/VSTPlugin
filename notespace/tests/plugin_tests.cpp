@@ -1,5 +1,5 @@
 // Host-style tests for the real Note Space processor.
-#include "../Source/PluginProcessor.h"
+#include "../Source/PluginEditor.h"
 #include "../../bass-leveler/tests/synth.h"
 
 #include <random>
@@ -227,6 +227,30 @@ int main()
         CHECK (std::fabs (ref[0] - ref[1]) < 0.5 && std::fabs (ref[0] - ref[2]) < 0.5, "the duck is the same whatever the layout (%.1f / %.1f / %.1f dB)", ref[0], ref[1], ref[2]);
     }
 
+
+    std::printf ("Editor layout\n");
+    {
+        NoteSpaceProcessor p;
+        prepare (p, kFs, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> ed (p.createEditor());
+        bool inside = true, fits = true;
+        int knobs = 0;
+        for (auto sz : { juce::Point<int> (720, 392), juce::Point<int> (860, 468), juce::Point<int> (1300, 708) })
+        {
+            ed->setSize (sz.x, sz.y);
+            for (auto* c : ed->getChildren())
+            {
+                inside = inside && ed->getLocalBounds().contains (c->getBounds());
+                if (auto* l = dynamic_cast<juce::Label*> (c))
+                {
+                    fits = fits && l->getFont().getStringWidthFloat (l->getText()) <= (float) l->getWidth();
+                    if (sz.x == 860)
+                        ++knobs;
+                }
+            }
+        }
+        CHECK (inside && fits && knobs == 9, "9 knobs, every control inside the window and every label fitting, at 720x392, 860x468 and 1300x708");
+    }
 
     std::printf ("State, blocks, rates, stress\n");
     {

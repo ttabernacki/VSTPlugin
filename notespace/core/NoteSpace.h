@@ -55,7 +55,7 @@ struct Params
 class NoteSpace
 {
 public:
-    static constexpr int kH = 8, kSub = 16;
+    static constexpr int kH = 8, kSub = bass::PitchTracker::kSub;
 
     void prepare (double sampleRate)
     {
@@ -63,6 +63,8 @@ public:
         trk_.prepare (sr_);
         lpK_.setLowpass (150.0, sr_);
         aDyn_ = 1.0 - std::exp (-1.0 / (0.0007 * sr_));
+        aDuckAtt_ = 1.0 - std::exp (-1.0 / (0.003 * sr_));
+        aDuckRel_ = 1.0 - std::exp (-1.0 / (0.08 * sr_));
         ak_ = 1.0 - std::exp (-1.0 / (0.008 * sr_));
         W_ = trk_.windowSamples();
         hopIn_ = trk_.hopSamples();
@@ -152,10 +154,8 @@ public:
             relSm_[h] = -100.0;
             inDb_[h] = outDb_[h] = -100.0f;
         }
-        refN_ = 0.0;
         c1s_ = c1t_ = Cx {};
         aRes_ = 0;
-        fundG_ = 1.0;
         repW_ = 1.0;
         pitchOut_ = 0.0f;
         partEn_ = resEn_ = resOutEn_ = 0.0;
@@ -206,7 +206,7 @@ public:
             if (sc != nullptr && scCh > 0)
             {
                 for (int c = 0; c < scCh; ++c)
-                    kin += sc[c][i] / scCh;
+                    kin += (double) sc[c][i] / scCh;
                 if (! std::isfinite (kin))
                     kin = 0.0;
                 if (kin != 0.0 || xm != 0.0) // two silences say nothing about whether the tracks are the same
@@ -421,7 +421,7 @@ private:
             const double pw = kpow_[(size_t) ((t2 + (int64_t) (0.005 * sr_)) & mask)];
             dT = kdepth * std::clamp ((10.0 * std::log10 (pw + 1e-12) + 70.0) / 20.0, 0.0, 1.0); // -70 dBFS: nothing, -50: all
         }
-        duckDb_ += (dT > duckDb_ ? 1.0 - std::exp (-1.0 / (0.003 * sr_)) : 1.0 - std::exp (-1.0 / (0.08 * sr_))) * (dT - duckDb_);
+        duckDb_ += (dT > duckDb_ ? aDuckAtt_ : aDuckRel_) * (dT - duckDb_);
         if (duckDb_ < 1e-4 && dT == 0.0)
             duckDb_ = 0.0;
         const double duck = duckDb_ > 0.0 ? std::pow (10.0, -duckDb_ / 20.0) : 1.0;
@@ -561,7 +561,7 @@ private:
     bass::EnvelopeShaper shaper_;
     bass::Lr4 lpR_[2], lpK_;
     std::vector<float> kpow_;
-    double pk_ = 0.0, ak_ = 0.01, scSame_ = 0.0, duckDb_ = 0.0, gDyn_ = 1.0, gDynP_ = 1.0, gDs_ = 1.0, aDyn_ = 0.05, dynDbT_ = 0.0;
+    double pk_ = 0.0, ak_ = 0.01, scSame_ = 0.0, duckDb_ = 0.0, gDyn_ = 1.0, gDynP_ = 1.0, gDs_ = 1.0, aDyn_ = 0.05, aDuckAtt_ = 0.01, aDuckRel_ = 0.001, dynDbT_ = 0.0;
     int rampB_ = 0;
 
     int pMax_ = 1600, Lp_ = 4000, lag2_ = 3204, lat_ = 7200, rsize_ = 8192, dsize_ = 16384;
@@ -576,13 +576,13 @@ private:
     std::array<int64_t, 64> jumps_ {};
     int jumpHead_ = 0;
 
-    double v_ = 0.0, gr_ = 1.0, g_[kH] {}, ref_[kH] {}, relSm_[kH] {}, refN_ = 0.0;
+    double v_ = 0.0, gr_ = 1.0, g_[kH] {}, ref_[kH] {}, relSm_[kH] {};
     Cx c1s_, c1t_, cMono_[kH], cOutMono_[kH];
     int aMax_ = 300, aRes_ = 0;
     double repW_ = 1.0, vP_ = 0.0, grP_ = 1.0, attP_ = 1.0, repP_ = 1.0, gP_[kH] {}, vC_ = 0.0, grC_ = 1.0, attC_ = 1.0;
     int rampPos_ = 0;
     std::vector<double> dr_[2], rr_[2], tapPr_, tapRr_;
-    double fundG_ = 1.0, vTarget_ = 0.0, attW_ = 1.0;
+    double attW_ = 1.0;
     float rangeApplied_ = -1.0f;
     float pitchOut_ = 0.0f, inDb_[kH] {}, outDb_[kH] {};
     double partEn_ = 0.0, resEn_ = 0.0, resOutEn_ = 0.0, tapP_ = 0.0, tapR_ = 0.0;
