@@ -87,3 +87,6 @@ add_subdirectory(bass-leveler)
 
 # --- Low-End Definition (third plug-in in this repo) ----------------------------------
 add_subdirectory(lowend-definition)
+
+# --- Note Space (fourth plug-in in this repo) -------------------------------------------
+add_subdirectory(notespace)

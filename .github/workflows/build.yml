@@ -41,8 +41,8 @@ jobs:
       - name: Build
         shell: bash
         run: |
-          TARGETS="dsp_tests render_demo PluginTests OrbitPan_VST3 leveler_tests BassLevelerPluginTests BassNoteLeveler_VST3 definition_tests LowEndPluginTests LowEndDefinition_VST3"
-          if [ "$RUNNER_OS" = "macOS" ]; then TARGETS="$TARGETS OrbitPan_AU BassNoteLeveler_AU LowEndDefinition_AU"; fi
+          TARGETS="dsp_tests render_demo PluginTests OrbitPan_VST3 leveler_tests BassLevelerPluginTests BassNoteLeveler_VST3 definition_tests LowEndPluginTests LowEndDefinition_VST3 notespace_tests NoteSpacePluginTests NoteSpace_VST3"
+          if [ "$RUNNER_OS" = "macOS" ]; then TARGETS="$TARGETS OrbitPan_AU BassNoteLeveler_AU LowEndDefinition_AU NoteSpace_AU"; fi
           cmake --build build --config Release --parallel 4 --target $TARGETS
 
       - name: Test (DSP + plugin processors, both plug-ins)
@@ -58,13 +58,15 @@ jobs:
       - name: Collect plug-in bundles
         shell: bash
         run: |
-          mkdir -p dist/orbitpan dist/bassleveler dist/lowenddefinition
+          mkdir -p dist/orbitpan dist/bassleveler dist/lowenddefinition dist/notespace
           find build -type d -name "OrbitPan.vst3" -prune -exec cp -R {} dist/orbitpan/ \;
           find build -type d -name "OrbitPan.component" -prune -exec cp -R {} dist/orbitpan/ \;
           find build -type d -name "Bass Note Leveler.vst3" -prune -exec cp -R {} dist/bassleveler/ \;
           find build -type d -name "Bass Note Leveler.component" -prune -exec cp -R {} dist/bassleveler/ \;
           find build -type d -name "Low-End Definition.vst3" -prune -exec cp -R {} dist/lowenddefinition/ \;
           find build -type d -name "Low-End Definition.component" -prune -exec cp -R {} dist/lowenddefinition/ \;
+          find build -type d -name "Note Space.vst3" -prune -exec cp -R {} dist/notespace/ \;
+          find build -type d -name "Note Space.component" -prune -exec cp -R {} dist/notespace/ \;
           ls -R dist | head -40
 
       - name: Windows DLLs must not need the VC++ redistributable
@@ -75,6 +77,7 @@ jobs:
           python tools/check_dll_imports.py "dist/orbitpan/OrbitPan.vst3/Contents/x86_64-win/OrbitPan.vst3"
           python tools/check_dll_imports.py "dist/bassleveler/Bass Note Leveler.vst3/Contents/x86_64-win/Bass Note Leveler.vst3"
           python tools/check_dll_imports.py "dist/lowenddefinition/Low-End Definition.vst3/Contents/x86_64-win/Low-End Definition.vst3"
+          python tools/check_dll_imports.py "dist/notespace/Note Space.vst3/Contents/x86_64-win/Note Space.vst3"
 
       - name: pluginval (strictness 10)
         shell: bash
@@ -101,6 +104,7 @@ jobs:
           run_pv "dist/orbitpan/OrbitPan.vst3"
           run_pv "dist/bassleveler/Bass Note Leveler.vst3"
           run_pv "dist/lowenddefinition/Low-End Definition.vst3"
+          run_pv "dist/notespace/Note Space.vst3"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -116,3 +120,8 @@ jobs:
         with:
           name: LowEndDefinition-${{ matrix.name }}
           path: dist/lowenddefinition
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NoteSpace-${{ matrix.name }}
+          path: dist/notespace
