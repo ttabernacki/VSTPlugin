@@ -33,7 +33,8 @@ a note change inside the analysis window) the processing fades out and the input
   tracked only the residual below Range is ducked (the mud and boom around the note go, the note keeps its pitch). On a note's
   first ~100 ms, where a kick usually lands and the split is not trusted yet, and on notes that are not tracked, everything
   below Range is ducked, as a plain sidechain duck would. The kick is read 5 ms ahead, so the duck is already there at the hit;
-  it lets go in about 80 ms. A sidechain that carries the bass itself, or a kick below -70 dBFS, ducks nothing. (Ducking only
+  it lets go in about 80 ms. A sidechain that carries the bass itself (at any level: a post-fader send is a scaled copy), or a kick below -70 dBFS,
+  ducks nothing. (Ducking only
   the residual everywhere did nothing at all on a kick that lands on the note's attack: 0.0 dB under the hit, now -11.9 dB.)
 
 The ranges are deliberately extreme, for finding the sweet spot by ear; expect to use much less.

@@ -72,6 +72,8 @@ void BassLevelerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
     p.maxBoostDb = pBoost->load();
     p.maxCutDb = pCut->load();
     p.speedMs = pSpeed->load();
+    if (bypassNow_)
+        p.amount = 0.0f; // amount 0: exactly the delay (bit for bit); the correction in flight releases instead of jumping
     core.setParams (p);
 
     core.process (buffer.getArrayOfWritePointers(), nCh, n);
@@ -88,6 +90,16 @@ void BassLevelerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
         recCorr[i].store (r[i].correctionDb);
     }
     recentCount.store (count);
+}
+
+// Bypassed, the plug-in still has to delay the audio by the latency it reports, or the host's latency compensation would put
+// the bass about 130 ms early. The core with Amount at 0 is exactly that delay and keeps tracking, so switching back in does
+// not replay stale audio.
+void BassLevelerProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
+{
+    bypassNow_ = true;
+    processBlock (buffer, midi);
+    bypassNow_ = false;
 }
 
 juce::AudioProcessorEditor* BassLevelerProcessor::createEditor()

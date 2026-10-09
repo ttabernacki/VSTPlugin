@@ -14,7 +14,9 @@ public:
     void releaseResources() override {}
     bool isBusesLayoutSupported (const BusesLayout&) const override;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    void processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     using juce::AudioProcessor::processBlock;
+    using juce::AudioProcessor::processBlockBypassed;
 
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
@@ -52,7 +54,7 @@ public:
 
 private:
     bnl::Leveler core;
-    bool prepared_ = false;
+    bool prepared_ = false, bypassNow_ = false;
     std::atomic<float> recMidi[kRecent], recDev[kRecent], recCorr[kRecent];
     std::atomic<int> recentCount { 0 };
 

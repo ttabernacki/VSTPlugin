@@ -255,6 +255,57 @@ int main()
         CHECK (inside && fits && knobs == 9, "9 knobs, every control inside the window and every label fitting, at 800x436, 860x468 and 1300x708 (15 %% to spare on the labels)");
     }
 
+    std::printf ("Bypass\n");
+    {
+        // A host that bypasses the plug-in still compensates its reported latency: bypassed, the output must be the input
+        // delayed by exactly that latency (not the input itself, which would come out that much early), and switching
+        // between bypassed and active while the audio plays must not click.
+        const auto sig = line();
+        auto go = [&] (int toggleEvery) {
+            NoteSpaceProcessor p;
+            prepare (p, kFs, 512);
+            setPlain (p, "contrast", 1.0f);
+            setPlain (p, "tonelock", 1.0f);
+            setPlain (p, "fundamental", 12.0f);
+            setPlain (p, "repair", 0.7f);
+            setPlain (p, "translate", 1.5f);
+            setPlain (p, "punch", 1.0f);
+            setPlain (p, "sustain", 1.0f);
+            std::vector<float> out (sig.size());
+            juce::MidiBuffer midi;
+            juce::AudioBuffer<float> buf (2, 512);
+            int blk = 0;
+            for (size_t pos = 0; pos < sig.size(); pos += 512, ++blk)
+            {
+                const int n = (int) std::min<size_t> (512, sig.size() - pos);
+                juce::AudioBuffer<float> view (buf.getArrayOfWritePointers(), 2, n);
+                for (int i = 0; i < n; ++i)
+                    view.setSample (0, i, sig[pos + (size_t) i]), view.setSample (1, i, sig[pos + (size_t) i]);
+                const bool bypassed = toggleEvery == 0 || (blk / toggleEvery) % 2 == 1;
+                if (bypassed)
+                    p.processBlockBypassed (view, midi);
+                else
+                    p.processBlock (view, midi);
+                for (int i = 0; i < n; ++i)
+                    out[pos + (size_t) i] = view.getSample (0, i);
+            }
+            return std::make_pair (out, p.getLatencySamples());
+        };
+        const auto [byp, lat] = go (0);
+        double md = 0;
+        for (size_t i = (size_t) lat; i < sig.size(); ++i)
+            md = std::max (md, (double) std::fabs (byp[i] - sig[i - (size_t) lat]));
+        CHECK (lat > 0 && md == 0.0, "bypassed with everything turned up: the input delayed by exactly the reported %d samples (max diff %.1e)", lat, md);
+        const auto tog = go (28).first; // about 0.3 s on, 0.3 s off
+        double stepOut = 0, stepIn = 0;
+        for (size_t i = (size_t) lat + 1; i < sig.size(); ++i)
+        {
+            stepOut = std::max (stepOut, (double) std::fabs (tog[i] - tog[i - 1]));
+            stepIn = std::max (stepIn, (double) std::fabs (sig[i - (size_t) lat] - sig[i - 1 - (size_t) lat]));
+        }
+        CHECK (stepOut < 2.0 * stepIn, "bypass toggled every 0.3 s while playing: largest sample step %.4f (dry %.4f)", stepOut, stepIn);
+    }
+
     std::printf ("State, blocks, rates, stress\n");
     {
         NoteSpaceProcessor a, b;

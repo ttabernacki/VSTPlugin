@@ -66,6 +66,7 @@ public:
         aDuckAtt_ = 1.0 - std::exp (-1.0 / (0.003 * sr_));
         aDuckRel_ = 1.0 - std::exp (-1.0 / (0.08 * sr_));
         ak_ = 1.0 - std::exp (-1.0 / (0.008 * sr_));
+        aCorr_ = 1.0 - std::exp (-1.0 / (1.0 * sr_));
         W_ = trk_.windowSamples();
         hopIn_ = trk_.hopSamples();
         // the split runs 2 * Pmax behind the pitch, which runs Lp behind the input
@@ -136,7 +137,7 @@ public:
         shaper_.reset();
         lpK_.reset();
         std::fill (kpow_.begin(), kpow_.end(), 0.0f);
-        pk_ = scSame_ = duckDb_ = dynDbT_ = 0.0;
+        pk_ = scSame_ = scXY_ = scXX_ = scYY_ = duckDb_ = dynDbT_ = 0.0;
         gDyn_ = gDynP_ = gDs_ = 1.0;
         rampB_ = 0;
         nIn_ = 0;
@@ -213,8 +214,13 @@ public:
                     kin += (double) sc[c][i] / scCh;
                 if (! std::isfinite (kin))
                     kin = 0.0;
-                if (kin != 0.0 || xm != 0.0) // two silences say nothing about whether the tracks are the same
-                    scSame_ += ((kin == xm ? 1.0 : 0.0) - scSame_) * (1.0 / 4096.0);
+                // Is the sidechain the bass itself (picked as its own sidechain, often after its fader, so at another level)?
+                // Correlation over about a second: a scaled copy gives exactly 1, a kick against a bass line never 0.99.
+                scXY_ += aCorr_ * (kin * xm - scXY_);
+                scXX_ += aCorr_ * (kin * kin - scXX_);
+                scYY_ += aCorr_ * (xm * xm - scYY_);
+                const bool same = scXX_ > 1e-12 && scYY_ > 1e-12 && scXY_ > 0.99 * std::sqrt (scXX_ * scYY_);
+                scSame_ += ((same ? 1.0 : 0.0) - scSame_) * (1.0 / 256.0);
             }
             else
                 scSame_ -= scSame_ * (1.0 / 4096.0);
@@ -599,7 +605,7 @@ private:
     bass::EnvelopeShaper shaper_;
     bass::Lr4 lpR_[2], lpX_[2], lpK_;
     std::vector<float> kpow_;
-    double pk_ = 0.0, ak_ = 0.01, scSame_ = 0.0, duckDb_ = 0.0, gDyn_ = 1.0, gDynP_ = 1.0, gDs_ = 1.0, aDyn_ = 0.05, aDuckAtt_ = 0.01, aDuckRel_ = 0.001, dynDbT_ = 0.0;
+    double pk_ = 0.0, ak_ = 0.01, scSame_ = 0.0, scXY_ = 0.0, scXX_ = 0.0, scYY_ = 0.0, aCorr_ = 2e-5, duckDb_ = 0.0, gDyn_ = 1.0, gDynP_ = 1.0, gDs_ = 1.0, aDyn_ = 0.05, aDuckAtt_ = 0.01, aDuckRel_ = 0.001, dynDbT_ = 0.0;
     int rampB_ = 0;
 
     int pMax_ = 1600, Lp_ = 4000, lag2_ = 3204, lat_ = 7200, rsize_ = 8192, dsize_ = 16384;

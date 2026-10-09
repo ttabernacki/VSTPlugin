@@ -778,12 +778,18 @@ int main()
         CHECK (mudHit < -6.0, "the residual under a kick hit is ducked by %.1f dB", -mudHit);
         CHECK (std::fabs (fundHit) < 0.5, "the note's own fundamental is never ducked (%+.1f dB)", fundHit);
         CHECK (std::fabs (mudQuiet) < 1.5, "it lets go between hits (%+.1f dB)", mudQuiet);
-        // the bass as its own sidechain: nothing to make room for
-        const auto self = run (bass, on, 480, kFs, false, &bass);
+        // the bass as its own sidechain, at its own level or after its fader (a scaled copy): nothing to make room for
         double mdS = 0;
-        for (size_t i = (size_t) lat; i < bass.size(); ++i)
-            mdS = std::max (mdS, (double) std::fabs (self.out[i] - bass[i - (size_t) lat]));
-        CHECK (mdS < 1e-6, "the bass track as its own sidechain: left alone (%.1e)", mdS);
+        for (float gain : { 1.0f, 0.5f, 0.1f })
+        {
+            std::vector<float> sc = bass;
+            for (auto& v : sc)
+                v *= gain;
+            const auto self = run (bass, on, 480, kFs, false, &sc);
+            for (size_t i = (size_t) lat; i < bass.size(); ++i)
+                mdS = std::max (mdS, (double) std::fabs (self.out[i] - bass[i - (size_t) lat]));
+        }
+        CHECK (mdS < 1e-6, "the bass track as its own sidechain (also at -6 and -20 dB): left alone (%.1e)", mdS);
         const auto r1 = run (bass, on, 1, kFs, false, &kick), r2 = run (bass, on, 333, kFs, false, &kick);
         md = 0;
         for (size_t i = 0; i < bass.size(); ++i)

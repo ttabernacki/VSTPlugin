@@ -14,7 +14,9 @@ public:
     void releaseResources() override {}
     bool isBusesLayoutSupported (const BusesLayout&) const override;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    void processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     using juce::AudioProcessor::processBlock;
+    using juce::AudioProcessor::processBlockBypassed;
 
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
@@ -46,8 +48,9 @@ public:
     std::atomic<double> latencySeconds { 0.11 };
 
 private:
+    static nsp::Params neutralParams();
     nsp::NoteSpace core;
-    bool prepared_ = false;
+    bool prepared_ = false, bypassNow_ = false;
     std::atomic<float>*pContrast = nullptr, *pTone = nullptr, *pFund = nullptr, *pRepair = nullptr, *pTranslate = nullptr, *pRange = nullptr, *pPunch = nullptr, *pSustain = nullptr, *pKick = nullptr;
     juce::AudioBuffer<float> scratch;
 

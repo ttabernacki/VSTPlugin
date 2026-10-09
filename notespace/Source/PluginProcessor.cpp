@@ -127,6 +127,8 @@ void NoteSpaceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
     p.punch = pPunch->load();
     p.sustain = pSustain->load();
     p.kick = pKick->load();
+    if (bypassNow_)
+        p = neutralParams();
     core.setParams (p);
     core.process (buffer.getArrayOfWritePointers(), nCh, n, scCh > 0 ? scPtr : nullptr, scCh);
     duckDb.store (core.kickDuckDb());
@@ -143,6 +145,24 @@ void NoteSpaceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
     noteResIn.store (core.noteToResidualInDb());
     noteResOut.store (core.noteToResidualOutDb());
     residualDb.store (core.residualGainDb());
+}
+
+// Bypassed, the plug-in still has to delay the audio by the latency it reports, or the host's latency compensation would put
+// the bass about 115 ms early. The core with every control at neutral is exactly that delay (bit for bit), and keeps running,
+// so switching back in neither clicks nor replays stale audio (the controls glide back over a few tens of ms).
+void NoteSpaceProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
+{
+    bypassNow_ = true;
+    processBlock (buffer, midi);
+    bypassNow_ = false;
+}
+
+nsp::Params NoteSpaceProcessor::neutralParams()
+{
+    nsp::Params p;
+    p.contrast = p.toneLock = p.fundamentalDb = p.repair = p.translate = 0.0f;
+    p.punch = p.sustain = p.kick = 0.0f;
+    return p;
 }
 
 juce::AudioProcessorEditor* NoteSpaceProcessor::createEditor()
