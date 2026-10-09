@@ -1,9 +1,11 @@
-# OrbitPan + Bass Note Leveler + Low-End Definition + Note Space
+# OrbitPan + Bass Note Leveler + Note Space
 
-This repo holds four plug-ins: **OrbitPan** (binaural 3D panner, below) and **Bass Note Leveler**
-(`bass-leveler/`, automatic per-note leveling with look-ahead; see [bass-leveler/README.md](bass-leveler/README.md)) and **Low-End Definition** (`lowend-definition/`, pitch-aware contrast,
-punch and sustain for the low band; see [lowend-definition/README.md](lowend-definition/README.md)), and **Note Space** (`notespace/`, a prototype that splits the bass
-into the note's partials and everything else; see [notespace/README.md](notespace/README.md)). CI builds all four for Windows, macOS and Linux.
+This repo holds three plug-ins: **OrbitPan** (binaural 3D panner, below), **Bass Note Leveler**
+(`bass-leveler/`, automatic per-note level evening with look-ahead; see [bass-leveler/README.md](bass-leveler/README.md))
+and **Note Space** (`notespace/`, splits the bass into the note's partials and everything else, then shapes each
+side, plus Punch, Sustain and a kick duck that never touches the note; see [notespace/README.md](notespace/README.md)).
+CI builds all three for Windows, macOS and Linux. Pitch tracking, onset detection and the punch/sustain envelope are
+shared in `bass-common/`. (Low-End Definition, an earlier bass plug-in, was folded into Note Space and removed; its last version is commit `ae79d27`.)
 
 Binaural 3D panner (VST3 + standalone) for headphones. Put it on a track and automate
 where the sound sits around your head: azimuth, elevation and distance.
