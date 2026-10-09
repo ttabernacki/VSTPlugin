@@ -207,8 +207,9 @@ public:
         for (auto& c : bz_)
             for (auto& z : c)
                 z = {};
-        s1_ = s2_ = Svf {};
-        m1_ = m2_ = 0.0;
+        s1_ = s2_ = s1p_ = s2p_ = s1n_ = s2n_ = Svf {};
+        m1_ = m2_ = m1p_ = m2p_ = m1n_ = m2n_ = 0.0;
+        rampPos_ = 0;
         nIn_ = 0;
         m_ = 0;
         pf_ = ps_ = pm_ = pl_ = 0.0;
@@ -288,6 +289,21 @@ public:
             const int wr = (int) (nIn_ & mask);
             double lowMono = 0.0;
             gAmp_ += gStep_;
+            // the bell coefficients glide to their new values over the control block: stepping them every kSub samples
+            // is a zipper (a click train at sr/16) on top of the low band
+            {
+                const double r = (double) std::min (rampPos_ + 1, kSub) / kSub;
+                ++rampPos_;
+                auto mix = [r] (double a, double b) { return a + (b - a) * r; };
+                s1_.a1 = mix (s1p_.a1, s1n_.a1);
+                s1_.a2 = mix (s1p_.a2, s1n_.a2);
+                s1_.a3 = mix (s1p_.a3, s1n_.a3);
+                s2_.a1 = mix (s2p_.a1, s2n_.a1);
+                s2_.a2 = mix (s2p_.a2, s2n_.a2);
+                s2_.a3 = mix (s2p_.a3, s2n_.a3);
+                m1_ = mix (m1p_, m1n_);
+                m2_ = mix (m2p_, m2n_);
+            }
             for (int c = 0; c < nCh; ++c)
             {
                 dl_[c][(size_t) wr] = (float) x[c];
@@ -958,13 +974,26 @@ private:
         if (freq_ > 0.0)
         {
             const double A1 = std::pow (10.0, gain1Db_ / 40.0), A2 = std::pow (10.0, gain2Db / 40.0), q1 = 3.0, q2 = 4.0;
-            setSvf (s1_, freq_, sr_, 1.0 / (q1 * A1));
-            setSvf (s2_, 1.5 * freq_, sr_, 1.0 / (q2 * A2));
-            m1_ = (A1 - 1.0 / A1) / q1;
-            m2_ = (A2 - 1.0 / A2) / q2;
+            s1p_ = s1_;
+            s2p_ = s2_;
+            m1p_ = m1_;
+            m2p_ = m2_;
+            setSvf (s1n_, freq_, sr_, 1.0 / (q1 * A1));
+            setSvf (s2n_, 1.5 * freq_, sr_, 1.0 / (q2 * A2));
+            m1n_ = (A1 - 1.0 / A1) / q1;
+            m2n_ = (A2 - 1.0 / A2) / q2;
         }
         else
-            m1_ = m2_ = 0.0;
+        {
+            s1p_ = s1_;
+            s2p_ = s2_;
+            m1p_ = m1_;
+            m2p_ = m2_;
+            s1n_ = s1_;
+            s2n_ = s2_;
+            m1n_ = m2n_ = 0.0;
+        }
+        rampPos_ = 0;
 
         if (blk % 64 == 0 && voiced)
             updateMeter (f0);
@@ -1006,8 +1035,9 @@ private:
     std::array<double, 2 * kLag + 1> cc_ {};
     float kickDuckDb_ = 0.0f, alignDb_ = 0.0f, alignLagMs_ = 0.0f, alignRho_ = 0.0f;
     St bz_[2][2];
-    Svf s1_, s2_;
-    double m1_ = 0.0, m2_ = 0.0;
+    Svf s1_, s2_, s1p_, s2p_, s1n_, s2n_; // bell coefficients: running, at the start and at the end of the control block
+    double m1_ = 0.0, m2_ = 0.0, m1p_ = 0.0, m2p_ = 0.0, m1n_ = 0.0, m2n_ = 0.0;
+    int rampPos_ = 0;
     int64_t nIn_ = 0, m_ = 0;
     double pf_ = 0.0, ps_ = 0.0, pm_ = 0.0, pl_ = 0.0, af_ = 0.01, as_ = 0.001, am_ = 0.002, al_ = 0.0005, gs_ = 0.0, gOut_ = 0.0, gAmp_ = 1.0, gStep_ = 0.0;
     float rangeApplied_ = -1.0f;

@@ -167,7 +167,28 @@ public:
             analyse (mono);
             wr_ = (wr_ + 1) & (dsize_ - 1);
             if ((nIn_ & (kSub - 1)) == 0)
+            {
                 updateControl();
+                rampPos_ = 0;
+            }
+            // the bell coefficients glide to their new values over the control block: stepping them every kSub samples is
+            // a zipper (a click train at sr/16) on top of the bass
+            {
+                const double r = (double) std::min (rampPos_ + 1, kSub) / kSub;
+                ++rampPos_;
+                for (auto& v : v_)
+                {
+                    auto mix = [r] (double a, double b) { return a + (b - a) * r; };
+                    v.s1.a1 = mix (v.s1p.a1, v.s1n.a1);
+                    v.s1.a2 = mix (v.s1p.a2, v.s1n.a2);
+                    v.s1.a3 = mix (v.s1p.a3, v.s1n.a3);
+                    v.s2.a1 = mix (v.s2p.a1, v.s2n.a1);
+                    v.s2.a2 = mix (v.s2p.a2, v.s2n.a2);
+                    v.s2.a3 = mix (v.s2p.a3, v.s2n.a3);
+                    v.m1 = mix (v.m1p, v.m1n);
+                    v.m2 = mix (v.m2p, v.m2n);
+                }
+            }
             for (int c = 0; c < nCh; ++c)
             {
                 float x = delay_[c][(size_t) ((wr_ - 1 - lat_) & (dsize_ - 1))];
@@ -697,10 +718,14 @@ private:
             v.lastGain = v.gain;
             const double A = std::pow (10.0, (double) v.gain / 40.0);
             const double q1 = prm_.bellQ, q2 = prm_.bellQ * 1.2;
-            setSvf (v.s1, v.freq, sr_, 1.0 / (q1 * A));
-            setSvf (v.s2, std::min (2.0 * v.freq, 0.45 * sr_), sr_, 1.0 / (q2 * A));
-            v.m1 = (A - 1.0 / A) / q1;
-            v.m2 = (A - 1.0 / A) / q2;
+            v.s1p = v.s1;
+            v.s2p = v.s2;
+            v.m1p = v.m1;
+            v.m2p = v.m2;
+            setSvf (v.s1n, v.freq, sr_, 1.0 / (q1 * A));
+            setSvf (v.s2n, std::min (2.0 * v.freq, 0.45 * sr_), sr_, 1.0 / (q2 * A));
+            v.m1n = (A - 1.0 / A) / q1;
+            v.m2n = (A - 1.0 / A) / q2;
         }
     }
 
@@ -735,11 +760,12 @@ private:
     {
         float gain = 0.0f, lastGain = 0.0f, freq = 80.0f;
         bool active = false;
-        Svf s1, s2;
-        double m1 = 0, m2 = 0;
+        Svf s1, s2, s1p, s2p, s1n, s2n; // running coefficients, and at the start and end of the control block
+        double m1 = 0, m2 = 0, m1p = 0, m2p = 0, m1n = 0, m2n = 0;
         State st[2][2] {};
     };
     Voice v_[2];
+    int rampPos_ = 0;
     int cur_ = 0, voiceKey_ = -2;
     std::array<RecentNote, 32> recent_ {};
     int recentN_ = 0;

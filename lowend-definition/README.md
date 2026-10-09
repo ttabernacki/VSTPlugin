@@ -99,6 +99,10 @@ output, plus a 5-second history) and the punch/sustain gain.
   (the window cannot resolve finer than about 14 Hz), which also trims the Simple-mode duck (mud under a hit: -6.4 dB).
 
 ## Bug hunt (what was found and fixed)
+- **Zipper noise in the bells ('scratchy').** The note bells' coefficients were stepped every 16 samples, a click train at 3 kHz riding on the
+  low band that grew with Contrast and with pitch jitter. They now glide to each new value across the block. What the plug-in adds above
+  1 kHz fell by about 20 dB (Contrast 100 %: -41 dB re the dry's own content above 1 kHz instead of -23 dB; on a bass with 20 cent
+  pitch wander: -60 dB instead of -40 dB). The Bass Note Leveler had the same fault and got the same fix (-35 dB to -50 dB).
 - **The kick duck was gated off about 20 % of the time.** The overlap-add output was treated as final two hops too late, so
   for part of every 9 ms hop the difference signal was dropped, switching the duck on and off about 110 times a second. Fixed (a
   counter, `spectralGaps()`, now proves it never happens: tested at 8 kHz to 384 kHz, in fuzzing and over a 5-minute run).
