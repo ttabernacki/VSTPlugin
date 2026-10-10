@@ -52,10 +52,13 @@ static std::vector<float> render (BassLevelerProcessor& p, const std::vector<flo
     return out;
 }
 
+// std::shuffle and the std distributions are implementation-defined (libc++ on macOS played the notes in another order than
+// libstdc++), so the test signals are drawn straight from the generator, the same on every platform
+static double uni (std::mt19937& g) { return (double) g() / 4294967296.0 * 2.0 - 1.0; }
+
 static std::vector<synth::Ev> bassEvents (unsigned seed, double& total)
 {
     std::mt19937 g (seed);
-    std::uniform_real_distribution<double> u (-1.0, 1.0);
     std::vector<synth::Ev> ev;
     double t = 0.3;
     for (int rep = 0; rep < 4; ++rep)
@@ -63,10 +66,11 @@ static std::vector<synth::Ev> bassEvents (unsigned seed, double& total)
         std::vector<int> pitches;
         for (int p = 28; p <= 43; ++p)
             pitches.push_back (p);
-        std::shuffle (pitches.begin(), pitches.end(), g);
+        for (size_t i = pitches.size() - 1; i > 0; --i)
+            std::swap (pitches[i], pitches[(size_t) (g() % (i + 1))]);
         for (int p : pitches)
         {
-            ev.push_back ({ t, 0.42, p, u (g) * 3.0 });
+            ev.push_back ({ t, 0.42, p, uni (g) * 3.0 });
             t += 0.55;
         }
     }
@@ -79,7 +83,7 @@ static std::array<double, 128> resonances (double spread)
     std::mt19937 g (99);
     std::array<double, 128> res {};
     for (auto& r : res)
-        r = std::uniform_real_distribution<double> (-1.0, 1.0) (g) * spread;
+        r = uni (g) * spread;
     return res;
 }
 
@@ -224,7 +228,7 @@ int main()
         double md = 0;
         for (size_t i = (size_t) lat; i < sig.size(); ++i)
             md = std::max (md, (double) std::fabs (byp[i] - sig[i - (size_t) lat]));
-        CHECK (lat > 0 && md == 0.0, "bypassed with Amount 100 %: the input delayed by exactly the reported %d samples (max diff %.1e)", lat, md);
+        CHECK (lat > 0 && md == 0.0, "bypassed with Amount 100 %%: the input delayed by exactly the reported %d samples (max diff %.1e)", lat, md);
         // switching may not make a step bigger than either state makes on its own (processed, the bass can be much louder)
         const auto tog = go (28).first, act = go (-1).first; // about 0.3 s on, 0.3 s off; and never bypassed
         double stepOut = 0, stepIn = 0, stepAct = 0;
