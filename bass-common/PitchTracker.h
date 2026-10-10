@@ -44,6 +44,7 @@ public:
         lp_.setLowpass (400.0, sr_);
         af_ = 1.0 - std::exp (-1.0 / (0.008 * sr_));
         as_ = 1.0 - std::exp (-1.0 / (0.060 * sr_));
+        valN_ = std::clamp ((int) std::lround (0.04 * sr_ / kSub), 1, (int) kValMax);
         am_ = 1.0 - std::exp (-1.0 / (0.030 * sr_));
         al_ = 1.0 - std::exp (-1.0 / (0.120 * sr_));
         reset();
@@ -62,6 +63,10 @@ public:
         inOnset_ = false;
         lastOnsetT_ = -1000000;
         pf_ = ps_ = pm_ = pl_ = 0.0;
+        val_.fill (0.0f);
+        valHead_ = 0;
+        peakSince_ = 0.0;
+        dipped_ = true;
     }
 
     int64_t samples() const { return nIn_; }
@@ -83,13 +88,31 @@ public:
         const double lvl = 10.0 * std::log10 (ps_ + 1e-12);
         const double wgt = std::clamp ((lvl + 72.0) / 12.0, 0.0, 1.0);
         const double d = 10.0 * std::log10 ((pf_ + 1e-12) / (ps_ + 1e-12)) * wgt;
-        if (d > 4.5)
+        // Fast playing: right after a short note the 60 ms envelope is still full of it, and the next attack hardly rises above
+        // it. Against the quietest moment of the last 40 ms (the gap between two staccato notes) it rises a lot: 10 dB above that
+        // also counts, if the level itself is above -60 dBFS (a note, not noise in a gap).
+        double valley = pf_;
+        for (int i = 0; i < valN_; ++i)
+            valley = std::min (valley, (double) val_[(size_t) i]);
+        val_[(size_t) (valHead_++ % valN_)] = (float) pf_;
+        // ...but only once the level has really dipped (6 dB under its peak since the last attack: a release, a gap), so a low
+        // note whose 8 ms envelope ripples by a few dB never fires again by itself
+        peakSince_ = std::max (peakSince_, pf_);
+        if (pf_ < 0.25 * peakSince_)
+            dipped_ = true;
+        const double dV = dipped_ && pf_ > 1e-6 ? 10.0 * std::log10 ((pf_ + 1e-12) / (valley + 1e-12)) : 0.0;
+        if (d > 4.5 || dV > 10.0)
         {
-            if (! inOnset_ && nIn_ - lastOnsetT_ > (int64_t) (0.04 * sr_))
+            // (a rise out of a real gap may follow 40 ms after the last attack; a rise against the 60 ms envelope only after 60 ms,
+            // as the 8 ms envelope of a low note ripples by a few dB and could fire again within the same note)
+            const int64_t since = nIn_ - lastOnsetT_;
+            if (! inOnset_ && (dV > 10.0 ? since > (int64_t) (0.04 * sr_) : since > (int64_t) (0.06 * sr_)))
             {
                 lastOnsetT_ = nIn_;
                 onsets_[(size_t) (onsetHead_++ & 31)] = nIn_ - (int64_t) (0.0065 * sr_);
                 onsetN_ = std::min (onsetN_ + 1, 32);
+                peakSince_ = pf_;
+                dipped_ = false;
             }
             inOnset_ = true;
         }
@@ -193,8 +216,73 @@ public:
         return true;
     }
 
+    // The pitch of whatever plays between input times a and b (a short note, say), measured on that stretch alone: YIN over
+    // the stretch with lags up to a third of its length, so it needs about three periods of the note. Returns false for no
+    // clear pitch (same confidence and purity tests as the frames).
+    bool pitchOver (int64_t a, int64_t b, float& f0) const
+    {
+        const int64_t ma = (a + D_ - 1) / D_, mb = std::min (b / D_, m_ - 1);
+        const int L = (int) (mb - ma + 1);
+        if (L < 3 * tauMin_ || mb - ma >= kRing - 1 || ma < 0)
+            return false;
+        const int tMax = std::min (tauMax_, L / 3);
+        if (tMax <= tauMin_ + 1)
+            return false;
+        std::vector<float> w ((size_t) L);
+        double mean = 0.0;
+        for (int j = 0; j < L; ++j)
+            mean += (w[(size_t) j] = din_[(size_t) ((ma + j) & (kRing - 1))]);
+        mean /= L;
+        for (auto& v : w)
+            v -= (float) mean;
+        std::vector<float> d ((size_t) tMax + 2, 0.0f), cm ((size_t) tMax + 2, 1.0f);
+        for (int tau = 1; tau <= tMax + 1 && tau < L; ++tau)
+        {
+            double s2 = 0.0;
+            for (int j = 0; j + tau < L; ++j)
+            {
+                const double e = (double) w[(size_t) j] - w[(size_t) (j + tau)];
+                s2 += e * e;
+            }
+            d[(size_t) tau] = (float) (s2 / (double) (L - tau)); // per-sample, so lags of different overlap compare
+        }
+        double run = 0.0;
+        for (int tau = 1; tau <= tMax + 1; ++tau)
+        {
+            run += d[(size_t) tau];
+            cm[(size_t) tau] = run > 0.0 ? (float) (d[(size_t) tau] * tau / run) : 1.0f;
+        }
+        int best = -1;
+        for (int tau = tauMin_; tau <= tMax; ++tau)
+            if (cm[(size_t) tau] < 0.2f)
+            {
+                while (tau + 1 <= tMax && cm[(size_t) tau + 1] < cm[(size_t) tau])
+                    ++tau;
+                best = tau;
+                break;
+            }
+        if (best < 0)
+            return false;
+        float tau = (float) best;
+        if (best + 1 <= tMax + 1)
+        {
+            const float p0 = cm[(size_t) best - 1], p1 = cm[(size_t) best], p2 = cm[(size_t) best + 1], den = p0 - 2.0f * p1 + p2;
+            if (std::fabs (den) > 1e-9f)
+                tau += 0.5f * (p0 - p2) / den;
+        }
+        f0 = (float) fsd_ / tau;
+        if (1.0f - cm[(size_t) best] < 0.8f)
+            return false;
+        double pur = 0.0;
+        return purityAt (mb, f0, L, pur) && pur >= kMinPurity;
+    }
+
 private:
-    static constexpr int kRing = 4096, kFrames = 1024;
+    static constexpr int kRing = 4096, kFrames = 1024, kValMax = 1024;
+    std::array<float, kValMax> val_ {};
+    int valN_ = 120, valHead_ = 0;
+    double peakSince_ = 0.0;
+    bool dipped_ = true;
     static constexpr float kMinPurity = 0.35f;
     struct Frame
     {

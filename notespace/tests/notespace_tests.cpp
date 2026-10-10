@@ -197,6 +197,56 @@ static double ampAt (const std::vector<float>& x, size_t i, double f0, int h)
     return 2.0 / P * std::sqrt (re * re + im * im);
 }
 
+// A fast funk line: 16ths with rests, dead (ghost) notes and short plucked notes (about 70 % of a 16th, released in 4 ms),
+// octave and fifth jumps, a pluck noise burst on every note
+struct FunkNote { double t, dur, f0, amp; bool ghost; };
+static std::vector<FunkNote> funkLine (double bpm, int bars, unsigned seed, std::vector<float>& x, double fs = kFs)
+{
+    std::mt19937 g (seed);
+    std::uniform_real_distribution<double> u (0, 1);
+    const double s16 = 60.0 / bpm / 4.0;
+    std::vector<FunkNote> ev;
+    double t = 0.3;
+    const int roots[] = { 28, 28, 33, 31 };
+    for (int b = 0; b < bars; ++b)
+        for (int k = 0; k < 16; ++k, t += s16)
+        {
+            const double r = u (g);
+            if (r < 0.15)
+                continue;
+            const bool ghost = r < 0.35;
+            const int m = roots[b % 4] + (u (g) < 0.3 ? 12 : 0) + (u (g) < 0.15 ? 7 : 0);
+            const double amp = (k % 4 == 0 ? 0.45 : 0.3) * (ghost ? 0.5 : 1.0);
+            ev.push_back ({ t, s16 * (ghost ? 0.25 : 0.7 * (0.6 + 0.4 * u (g))), 440.0 * std::pow (2.0, (m - 69) / 12.0), amp, ghost });
+        }
+    x.assign ((size_t) ((t + 0.5) * fs), 0.0f);
+    std::mt19937 gn (seed + 1);
+    std::normal_distribution<double> nd;
+    for (const auto& e : ev)
+    {
+        const size_t s0 = (size_t) (e.t * fs), n = (size_t) ((e.dur + 0.01) * fs);
+        double ph = 0;
+        for (size_t i = 0; i < n && s0 + i < x.size(); ++i)
+        {
+            const double tt = (double) i / fs, rel = tt > e.dur ? std::exp (-(tt - e.dur) / 0.004) : 1.0;
+            double v;
+            if (e.ghost)
+                v = 0.6 * nd (gn) * std::exp (-tt / 0.012) + std::sin (2 * kPi * e.f0 * tt) * std::exp (-tt / 0.01);
+            else
+            {
+                ph += 2 * kPi * e.f0 / fs;
+                const double env = std::min (1.0, tt / 0.002) * std::exp (-tt / 0.35);
+                v = 0;
+                for (int h = 1; h <= 6; ++h)
+                    v += std::pow (0.62, h - 1) * std::sin (h * ph + 0.4 * h);
+                v = env * v + 0.15 * nd (gn) * std::exp (-tt / 0.004);
+            }
+            x[s0 + i] += (float) (e.amp * rel * v);
+        }
+    }
+    return ev;
+}
+
 int main()
 {
     Params neutral;
@@ -760,6 +810,54 @@ int main()
             for (size_t i = (size_t) r.lat + 1; i < x.size(); ++i)
                 mx = std::max (mx, std::fabs ((double) (r.out[i] - x[i - (size_t) r.lat]) - (double) (r.out[i - 1] - x[i - 1 - (size_t) r.lat])));
             CHECK (mx < 0.5 * dryStep, "staccato line, %-18s: largest step of what is added %.4f (dry line's largest step %.4f)", names[w], mx, dryStep);
+        }
+    }
+
+    std::printf ("Fast funk line\n");
+    {
+        // 16ths at 90 and 120 bpm, short notes with rests and dead notes: every note has to be processed for most of its length
+        // (a detector that needed a quiet gap of its own and a release that was not recognised left a third of the notes
+        // untouched), and letting a short note go may not click (the attack measurement stopped in one sample: steps of 0.41
+        // in silence)
+        for (double bpm : { 90.0, 120.0 })
+        {
+            std::vector<float> x;
+            const auto ev = funkLine (bpm, 8, 7, x);
+            double dryStep = 0;
+            for (size_t i = 1; i < x.size(); ++i)
+                dryStep = std::max (dryStep, (double) std::fabs (x[i] - x[i - 1]));
+            Params p = neutral;
+            p.fundamentalDb = 12.0f;
+            const auto r = run (x, p);
+            const size_t L = (size_t) r.lat;
+            int n = 0, never = 0;
+            double frac = 0;
+            for (const auto& e : ev)
+            {
+                if (e.ghost)
+                    continue;
+                const size_t P = (size_t) std::lround (kFs / e.f0);
+                int ok = 0, tot = 0;
+                for (size_t i = (size_t) (e.t * kFs); i + P < (size_t) ((e.t + e.dur) * kFs); i += P)
+                {
+                    ++tot;
+                    if (20.0 * std::log10 (ampAt (r.out, i + L, e.f0, 1) / (ampAt (x, i, e.f0, 1) + 1e-9)) > 9.0)
+                        ++ok;
+                }
+                if (tot == 0)
+                    continue;
+                ++n;
+                frac += (double) ok / tot;
+                never += ok == 0;
+            }
+            frac /= n;
+            CHECK (frac > 0.75 && never == 0, "funk at %.0f bpm, Fundamental +12 dB: full effect over %.0f %% of each note on average, %d of %d notes never",
+                   bpm, 100.0 * frac, never, n);
+            double mx = 0;
+            for (size_t i = L + 1; i < x.size(); ++i)
+                mx = std::max (mx, std::fabs ((double) (r.out[i] - x[i - L]) - (double) (r.out[i - 1] - x[i - 1 - L])));
+            CHECK (mx < 0.1 * dryStep, "funk at %.0f bpm, Fundamental +12 dB: largest step of what is added %.4f (dry line's largest step %.4f)", bpm, mx,
+                   dryStep);
         }
     }
 

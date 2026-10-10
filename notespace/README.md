@@ -56,6 +56,13 @@ The ranges are deliberately extreme, for finding the sweet spot by ear; expect t
    boxes that start at the attack. The note before it is measured over its last two periods, if it is still sounding and steady.
    The two cross over 5 ms at the attack. The usual measurement takes over once its window is clear of the attack. Result: full
    effect 0-16 ms after the attack (was 42-88 ms), no added latency.
+
+   Fast, short notes (funk 16ths, dead notes, rests): an attack counts when the level rises 10 dB from the quietest point of the
+   last 40 ms after it had fallen to a quarter of its peak, so a note that follows a short gap is caught even when the level never
+   drops to silence (before, a third of the notes in a 120 bpm 16th line were missed). The note's release (its level 15 dB under
+   the attack's peak) is found in the look-ahead too: a short note's pitch is read from the attack to the release only, and its
+   measurement holds to the release and then fades over one period instead of stopping (that stop clicked). If an attack has no
+   readable pitch (a dead note), the note before it keeps its last-two-periods measurement and fades out over one period.
 4. Partials = the sum of each envelope times e^{j h theta}; residual = input minus partials. Output = input + (processed partials -
    partials) + (residual gain - 1) x residual below Range, with the residual low-pass read ahead by its group delay so the cut lands
    in phase. Punch and Sustain then apply one gain to (processed note + processed residual below Range); the high residual is never
@@ -101,6 +108,9 @@ a plucked line stays below -25 dB. Punch is gain modulation by definition (a +10
   0-16 ms after the attack (42-88 ms before the attack-aligned measurement). On a staccato line nothing a control adds jumps from
   one sample to the next by more than half the dry line's largest step, and with everything turned up at once what is added has no
   discontinuity (Translate turned a harmonic's phase in a single sample when it crossed its floor: fixed).
+- Fast funk line (16ths at 90 and 120 bpm, rests, dead notes, notes 60-70 % of a 16th long): Fundamental +12 dB is at full effect
+  over 81-83 % of each note, no note missed (50-63 % and 14-29 of 79 notes missed before), and letting a note go adds no step
+  larger than 0.02 against the dry line's 0.59 (0.41 before).
 - The split, for notes at 31, 41, 62, 98 and 147 Hz: the note's harmonics left in the residual 35-39 dB down; a steady tone between the
   harmonics ends up in the residual (within 1.3 dB) and 17-26 dB down in the partials.
 - Contrast +100 %: mud between the harmonics -18.7 dB (the residual gain is -40 dB; what is left is the part of the mud the split

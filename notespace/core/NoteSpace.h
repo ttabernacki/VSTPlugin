@@ -164,6 +164,8 @@ public:
         aResF_ = 0.0;
         fresh_ = true;
         zone_ = Zone {};
+        endE_ = -1;
+        lastWe_ = 0.0;
         zAdv_ = 0;
         nextOn_ = -1;
         for (int i = 0; i < 32; ++i)
@@ -296,13 +298,53 @@ private:
     // An attack at o starts a measurement of the new note with its own pitch, read from the first pitch window that lies
     // entirely after the attack (the look-ahead has it already). The usual measurement takes over again once its four-period
     // window is clear of the attack and of the pitch tracker's own switch.
-    bool attackPitch (int64_t o, float& f0) const
+    bool attackPitch (int64_t o, float& f0)
     {
-        float pur = 0.0f;
-        if (! trk_.pickCentred (o + W_ / 2 + hopIn_, f0, pur))
-            return false;
+        // a note shorter than a pitch window (fast playing): its pitch is measured on the note itself, attack to release
+        const int64_t off = noteRelease (o, o + W_ + 2 * hopIn_);
+        if (off != kNever)
+        {
+            if (! trk_.pitchOver (o + (int64_t) (0.002 * sr_), off, f0))
+                return false;
+        }
+        else
+        {
+            float pur = 0.0f;
+            if (! trk_.pickCentred (o + W_ / 2 + hopIn_, f0, pur))
+                return false;
+        }
         f0 = std::clamp (f0, 31.0f, 260.0f);
         return true;
+    }
+
+    // Where the note that starts at o is let go, looking no further than `until` and than the audio that has arrived; kNever
+    // if not found there. Level over 24 ms windows (a period of the lowest notes; shorter ones read a zero crossing as
+    // silence), every 2 ms: the release is the start of the first window after the attack that is 15 dB under the loudest
+    // window of the first 40 ms. A staccato release drops fast; a natural decay takes far longer.
+    int64_t noteRelease (int64_t o, int64_t until) const
+    {
+        const int mask = dsize_ - 1;
+        const int64_t win = std::max<int64_t> (8, (int64_t) (0.024 * sr_)), hop = std::max<int64_t> (1, (int64_t) (0.002 * sr_));
+        const int64_t end = std::min (until, nIn_ - 1);
+        auto pw = [&] (int64_t a) {
+            double e = 0.0;
+            for (int64_t t = a; t < a + win; ++t)
+            {
+                const double v = 0.5 * ((double) dl_[0][(size_t) (t & mask)] + (double) dl_[1][(size_t) (t & mask)]);
+                e += v * v;
+            }
+            return e / (double) win;
+        };
+        double peak = 0.0;
+        for (int64_t a = o; a + win <= end; a += hop)
+        {
+            const double e = pw (a);
+            if (a < o + (int64_t) (0.04 * sr_) - win / 2)
+                peak = std::max (peak, e);
+            else if (e < 0.0316 * peak)
+                return a;
+        }
+        return kNever;
     }
 
     // The onset detector fires a few ms into an attack and places the onset a fixed 6.5 ms earlier, which can be late (a slow
@@ -443,6 +485,7 @@ private:
             if (jumps_[(size_t) i] >= o - 2 * kSub && jumps_[(size_t) i] <= o + W_ / 2 + 3 * hopIn_)
                 j = std::max (j, jumps_[(size_t) i]);
         zone_.end = j + (int64_t) (2.0 * zone_.P + 0.125 * (double) W_) + kSub;
+        zone_.off = noteRelease (o, nIn_);
         zAdv_ = o;
         zPh_ = Cx { std::cos (zone_.th0), std::sin (zone_.th0) };
         zStep_ = Cx { std::cos (zone_.w), std::sin (zone_.w) };
@@ -569,9 +612,14 @@ private:
         for (int i = 0; i < 64 && stable; ++i)
             if (std::llabs (jumps_[(size_t) i] - t2) < (int64_t) (2.0 * P + 0.125 * (double) W_) + kSub && ! explainedJump (jumps_[(size_t) i], t2, P))
                 stable = false;
-        if (zone_.on && t2 + kSub > zone_.o && t2 < zone_.end + (int64_t) zone_.P)
-            stable = true; // a note just after its attack, measured from the attack on
-        if (zone_.on && nextOn_ >= 0 && nextOn_ - zone_.o < (int64_t) (2.0 * zone_.P) + kSub)
+        if (zone_.on && zone_.off == kNever && t2 + kSub > zone_.o)
+            zone_.off = noteRelease (zone_.o, nIn_);
+        const int64_t zEnd = std::min (zone_.end + (int64_t) zone_.P, zone_.off);
+        if (zone_.on && t2 + kSub > zone_.o && t2 < zEnd)
+            stable = true; // a note just after its attack (or a short one, up to its release), measured from the attack on
+        if (zone_.on && zone_.off != kNever && zone_.off - (int64_t) (2.0 * zone_.P) <= zone_.end + (int64_t) zone_.P && t2 >= zone_.off)
+            stable = false; // a short note that has been let go
+        if (zone_.on && std::min (nextOn_ >= 0 ? nextOn_ : kNever, zone_.off) - zone_.o < (int64_t) (2.0 * zone_.P) + kSub)
             stable = false; // a note shorter than two periods cannot be measured at all
         if (! zone_.on && nextOn_ >= 0 && vr_[k2] != 0 && t2 >= nextOn_ - (int64_t) (3.0 * P))
             stable = stable || endFromS1Ok (nextOn_, P); // the end of a note, measured over its last two periods
@@ -769,11 +817,17 @@ private:
         if (nextOn_ >= 0 && t3 == nextOn_)
         {
             startZone (nCh, t3); // an attack: measure the new note from here on, with its own pitch
+            endE_ = ! zone_.on && lastWe_ > 0.0 ? t3 : -1; // no pitch for the new note: hold the old note's last two periods
+                                                            // and fade them out (dropping them clicked)
             for (int c = 0; c < 2; ++c)
                 for (int h = 0; h < kH; ++h)
                     csFrom_[c][h] = csLast_[c][h];
         }
-        if (zone_.on && t3 >= zone_.end + (int64_t) zone_.P)
+        // the zone's measurement runs to the end of its window, or, when the note is let go (or the next one starts) before the
+        // usual measurement is clean again, up to that point and a period beyond
+        const int64_t zLim = zone_.on ? std::min (nextOn_ > zone_.o ? nextOn_ : INT64_MAX, zone_.off) : INT64_MAX;
+        const bool zHeld = zLim != INT64_MAX && zLim - (int64_t) (2.0 * zone_.P) <= zone_.end + (int64_t) zone_.P;
+        if (zone_.on && t3 >= zone_.end + (int64_t) zone_.P && (! zHeld || t3 >= zLim + (int64_t) zone_.P))
             zone_.on = false;
         const double P = sr_ / (double) f0r_[k3];
         const Cx z = zr_[k3];
@@ -781,16 +835,20 @@ private:
         //   wz  the note just after its attack (one full weight until the usual measurement is clean again, then a one-period fade)
         //   we  the note just before the next attack: its last two periods (faded in over the period before they start)
         double wz = 0.0, we = 0.0;
-        bool zoneEnd = false;
+        bool zoneEnd = false, endHeld = false;
         int64_t za = 0;
         if (zone_.on && t3 >= zone_.o)
         {
-            const int64_t lim = nextOn_ > t3 ? nextOn_ : INT64_MAX;
+            const int64_t lim = std::min (nextOn_ > t3 ? nextOn_ : INT64_MAX, zone_.off);
             if (lim != INT64_MAX && lim - zone_.o < (int64_t) (2.0 * zone_.P) + 1)
                 wz = 0.0; // too short to measure
             else
             {
                 wz = t3 < zone_.end ? 1.0 : std::max (0.0, 1.0 - (double) (t3 - zone_.end) / zone_.P);
+                if (zHeld)
+                    // a short note: measured from the attack to the release, then a one-period fade like the usual end (a hard
+                    // switch at the release clicked)
+                    wz = t3 < zLim ? 1.0 : std::max (0.0, 1.0 - (double) (t3 - zLim) / zone_.P);
                 // five two-period boxes, centred on t3 and half a period apart (close to the usual four-period triangle), each
                 // kept inside the note: from the attack on, and ending by the next attack
                 const double P2 = 2.0 * zone_.P;
@@ -803,8 +861,8 @@ private:
                 }
                 za = (int64_t) std::ceil (zBox_[4] + P2) + 2;
                 advanceZone (nCh, za);
-                if (lim != INT64_MAX && t3 >= lim - (int64_t) (2.0 * zone_.P))
-                    wz = 1.0; // up to the next attack the box is the only clean measurement left
+                if (lim != INT64_MAX && t3 >= lim - (int64_t) (2.0 * zone_.P) && t3 < lim)
+                    wz = 1.0; // up to the next attack (or the release) the box is the only clean measurement left
             }
         }
         else if (! zone_.on && nextOn_ > t3 && nextOn_ - t3 <= (int64_t) (3.0 * P) && endFromS1Ok (nextOn_, P))
@@ -812,6 +870,18 @@ private:
             zoneEnd = true;
             we = std::clamp (1.0 - ((double) (nextOn_ - t3) - 2.0 * P) / P, 0.0, 1.0);
         }
+        else if (! zone_.on && endE_ >= 0 && t3 < endE_ + (int64_t) endP_)
+        {
+            zoneEnd = endHeld = true;
+            we = lastWe_ * (1.0 - (double) (t3 - endE_) / endP_);
+        }
+        if (! endHeld)
+        {
+            endE_ = -1;
+            lastWe_ = we;
+            endP_ = P;
+        }
+        const double eAt = endHeld ? (double) endE_ : (double) nextOn_, eP = endHeld ? endP_ : P;
         const double xfade = zone_.on && t3 >= zone_.o ? std::min (1.0, (double) (t3 - zone_.o) / (0.005 * sr_)) : 1.0;
         Cx q { 1.0, 0.0 }; // the zone's phase reference against the usual one
         if (wz > 0.0)
@@ -855,8 +925,7 @@ private:
                 else if (zoneEnd && we > 0.0)
                 {
                     // before an attack: the note's last two periods (the usual average would already hear the next note)
-                    const double e = (double) nextOn_;
-                    const Cx ce = (readS (S1_[c][h], e) - readS (S1_[c][h], e - 2.0 * P)) * (1.0 / P);
+                    const Cx ce = (readS (S1_[c][h], eAt) - readS (S1_[c][h], eAt - 2.0 * eP)) * (1.0 / eP);
                     cs[h] = cs[h] * (1.0 - we) + ce * we;
                 }
                 sumP += (cs[h] * zp[h]).re;
@@ -893,12 +962,9 @@ private:
                         if (m < T)
                         {
                             const double target = m + std::min (1.0, tr) * (T - m);
-                            // (the pull toward the phase-locked direction fades out as the harmonic reaches the floor, so crossing
-                            // the floor never turns its phase in a single sample)
-                            const Cx dir = co[h] + uh * (0.1 * (T - m));
-                            const double md = mag (dir);
-                            if (md > 1e-15)
-                                co[h] = dir * (target / md);
+                            // the shortfall is added in the phase-locked direction; nothing is renormalised, since rescaling a sum
+                            // that nearly cancels turned the harmonic's phase around in a single sample
+                            co[h] = co[h] + uh * (target - m);
                         }
                     }
                 }
@@ -941,10 +1007,14 @@ private:
     {
         bool on = false;
         int64_t o = 0, end = 0;
+        int64_t off = INT64_MAX; // where the note is let go (INT64_MAX: not yet seen)
         double f0 = 55.0, P = 870.0, w = 0.0, th0 = 0.0;
     } zone_;
+    static constexpr int64_t kNever = INT64_MAX;
     Cx zAcc_[2][kH], zPh_ { 1.0, 0.0 }, zStep_ { 1.0, 0.0 };
     int64_t zAdv_ = 0, nextOn_ = -1;
+    int64_t endE_ = -1; // an attack where no zone could start: the note before it, measured up to it, fades out from here
+    double endP_ = 870.0, lastWe_ = 0.0;
     double zBox_[5] {};
     Cx csLast_[2][kH], csFrom_[2][kH];
     int64_t onRaw_[32] {}, onRef_[32] {};
