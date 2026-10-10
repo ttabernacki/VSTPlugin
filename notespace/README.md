@@ -109,7 +109,7 @@ a plucked line stays below -25 dB. Punch is gain modulation by definition (a +10
   one sample to the next by more than half the dry line's largest step, and with everything turned up at once what is added has no
   discontinuity (Translate turned a harmonic's phase in a single sample when it crossed its floor: fixed).
 - Fast funk line (16ths at 90 and 120 bpm, rests, dead notes, notes 60-70 % of a 16th long): Fundamental +12 dB is at full effect
-  over 81-83 % of each note, no note missed (50-63 % and 14-29 of 79 notes missed before), and letting a note go adds no step
+  over 77-83 % of each note across five random lines, no note missed (50-63 % and 14-29 of 79 notes missed before), and letting a note go adds no step
   larger than 0.02 against the dry line's 0.59 (0.41 before).
 - The split, for notes at 31, 41, 62, 98 and 147 Hz: the note's harmonics left in the residual 35-39 dB down; a steady tone between the
   harmonics ends up in the residual (within 1.3 dB) and 17-26 dB down in the partials.
