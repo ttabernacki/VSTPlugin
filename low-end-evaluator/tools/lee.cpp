@@ -136,11 +136,19 @@ static int cmdAnalyze (const std::vector<std::string>& args, const std::string& 
 
 static int cmdProfile (const std::vector<std::string>& args, std::string name, const std::string& out)
 {
-    const auto files = expand (args);
-    if (files.empty() || out.empty())
+    if (out.empty() || args.empty())
     {
-        usage();
+        std::fprintf (stderr, "error: profile needs -o OUT.json and at least one reference WAV or folder\n");
         return 2;
+    }
+    const auto files = expand (args);
+    if (files.empty())
+    {
+        std::fprintf (stderr, "error: no .wav files found in");
+        for (auto& a : args)
+            std::fprintf (stderr, " \"%s\"", a.c_str());
+        std::fprintf (stderr, " (only WAV is read: convert lossless files such as FLAC or AIFF to WAV)\n");
+        return 1;
     }
     std::vector<Analysis> refs;
     for (size_t i = 0; i < files.size(); ++i)
@@ -458,8 +466,21 @@ int main (int argc, char** argv)
         return cmdAnalyze (pos, json);
     if (cmd == "profile")
         return cmdProfile (pos, name, out);
-    if (cmd == "judge" && pos.size() == 1 && ! prof.empty())
+    if (cmd == "judge")
+    {
+        if (pos.size() > 1)
+        {
+            std::fprintf (stderr, "error: judge takes one mix, but got %zu names. A file name with spaces needs quotes:\n"
+                                  "  lee judge \"my mix.wav\" -p profile.json\n", pos.size());
+            return 2;
+        }
+        if (pos.empty() || prof.empty())
+        {
+            std::fprintf (stderr, "error: judge needs a mix and -p PROFILE.json\n");
+            return 2;
+        }
         return cmdJudge (pos[0], prof, stage, report, compare, all, simulate);
+    }
     usage();
     return 2;
 }
