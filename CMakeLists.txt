@@ -87,3 +87,6 @@ add_subdirectory(bass-leveler)
 
 # --- Note Space (third plug-in in this repo) -------------------------------------------
 add_subdirectory(notespace)
+
+# --- Low-End Evaluator (analysis-only: core library, `lee` CLI, tests) ----------------------
+add_subdirectory(low-end-evaluator)
