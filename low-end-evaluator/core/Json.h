@@ -3,6 +3,7 @@
 // Minimal JSON value, writer and parser (no JUCE): enough for profiles and reports. Objects keep insertion order so files
 // diff cleanly; numbers are written with 10 significant digits so a profile survives a round trip.
 
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -215,7 +216,10 @@ struct Parser
                     case 'f': out += '\f'; break;
                     case 'u':
                     {
-                        if (i + 4 > s.size())
+                        bool hex = i + 4 <= s.size();
+                        for (size_t h = i; hex && h < i + 4; ++h)
+                            hex = std::isxdigit ((unsigned char) s[h]) != 0;
+                        if (! hex)
                             return fail ("bad \\u escape");
                         const unsigned cp = (unsigned) std::strtoul (s.substr (i, 4).c_str(), nullptr, 16);
                         i += 4;
@@ -321,12 +325,19 @@ struct Parser
             return j = Json::boolean (false), true;
         if (lit ("null"))
             return j = Json(), true;
-        const char* p = s.c_str() + i;
-        char* e = nullptr;
-        const double v = std::strtod (p, &e);
-        if (e == p)
+        // only JSON number characters: strtod alone would also take nan, inf and hex, and a value that overflows to inf
+        // would come back as null on the next save
+        size_t k = i;
+        while (k < s.size() && (std::isdigit ((unsigned char) s[k]) || s[k] == '-' || s[k] == '+' || s[k] == '.' || s[k] == 'e' || s[k] == 'E'))
+            ++k;
+        if (k == i)
             return fail ("unexpected character");
-        i += (size_t) (e - p);
+        const std::string tok = s.substr (i, k - i);
+        char* e = nullptr;
+        const double v = std::strtod (tok.c_str(), &e);
+        if (*e != '\0' || ! std::isfinite (v))
+            return fail ("bad number");
+        i = k;
         j = Json::num (v);
         return true;
     }

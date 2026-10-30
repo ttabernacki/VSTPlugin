@@ -71,8 +71,9 @@ of the references themselves sit outside it on any metric).
 
 - **Simulated** (EQ bells and shelves from clustering the curve deviation, high-pass, mono below X Hz): the fix is
   applied to a copy of the audio, which is re-analysed and re-scored. The predicted metric changes and composite gain
-  are measured. Moves worth less than one point are dropped. All simulated fixes are also applied together, in order
-  (clipping, stereo, high-pass, EQ, dynamics, saturation), for a combined prediction.
+  are measured. Moves worth less than one point (of the uncapped score, under a gate) are dropped. All simulated fixes
+  are also applied together, in order (clipping, stereo, high-pass, EQ, dynamics, saturation), for a combined
+  prediction.
 - **Estimated** (compression, transient shaping, saturation): the targeted metrics are moved to their band edge and
   re-scored. These are labelled as estimates.
 - Ranked by predicted gain × confidence / effort. Under a gate, the uncapped gain also counts.

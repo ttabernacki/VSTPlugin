@@ -158,7 +158,7 @@ inline std::vector<float> resample (const std::vector<float>& x, double fsIn, do
 {
     if (std::fabs (fsIn - fsOut) < 1e-9 || x.empty())
         return x;
-    constexpr int kZc = 32, kRes = 512;
+    static constexpr int kZc = 32, kRes = 512; // static: MSVC will not let the table lambda use local constants uncaptured
     static const std::vector<float> table = [] {
         auto i0 = [] (double v) {
             double s = 1.0, t = 1.0;
@@ -183,13 +183,13 @@ inline std::vector<float> resample (const std::vector<float>& x, double fsIn, do
     const double half = kZc / cut; // kernel half-width in input samples
     const size_t nOut = (size_t) std::floor ((double) x.size() * ratio);
     std::vector<float> y (nOut);
-    const long n = (long) x.size();
+    const int64_t n = (int64_t) x.size(); // not long: 32 bits on Windows
     for (size_t i = 0; i < nOut; ++i)
     {
         const double t = (double) i / ratio;
-        const long k0 = (long) std::ceil (t - half), k1 = (long) std::floor (t + half);
+        const int64_t k0 = (int64_t) std::ceil (t - half), k1 = std::min (n - 1, (int64_t) std::floor (t + half));
         double acc = 0.0;
-        for (long k = std::max (0L, k0); k <= std::min (n - 1, k1); ++k)
+        for (int64_t k = std::max<int64_t> (0, k0); k <= k1; ++k)
         {
             const double u = std::fabs (t - (double) k) * cut * kRes;
             const size_t j = (size_t) u;

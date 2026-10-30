@@ -10,6 +10,8 @@
 #include "Profile.h"
 
 #include <array>
+#include <cstdarg>
+#include <cstdio>
 
 namespace lee
 {
@@ -46,12 +48,22 @@ struct Score
     }
 };
 
+inline std::string fmt (const char* f, ...)
+{
+    char buf[512];
+    va_list ap;
+    va_start (ap, f);
+    std::vsnprintf (buf, sizeof buf, f, ap);
+    va_end (ap);
+    return buf;
+}
+
 inline const char* grade (double s) { return s >= 90 ? "A" : s >= 80 ? "B" : s >= 65 ? "C" : s >= 50 ? "D" : "F"; }
 
 inline Score scoreMetrics (const std::map<std::string, Metric>& m, const Profile& p, Stage stage)
 {
     Score sc;
-    double num[3] = {}, den[3] = {}, cw[3] = {}, cn[3] = {};
+    double num[3] = {}, den[3] = {}, cw[3] = {};
     for (auto& info : catalog())
     {
         auto mit = m.find (info.id);
@@ -81,7 +93,6 @@ inline Score scoreMetrics (const std::map<std::string, Metric>& m, const Profile
                 num[c] += w * std::sqrt (ms.s);
                 den[c] += w;
                 cw[c] += t.weight;
-                cn[c] += t.weight * ms.conf;
             }
         }
         sc.ms.push_back (ms);
@@ -92,30 +103,26 @@ inline Score scoreMetrics (const std::map<std::string, Metric>& m, const Profile
         {
             sc.catValid[(size_t) c] = true;
             sc.cat[(size_t) c] = std::pow (num[c] / den[c], 2.0);
-            sc.catConf[(size_t) c] = cn[c] / cw[c];
+            sc.catConf[(size_t) c] = den[c] / cw[c];
             tot += p.catWeight[c] * sc.cat[(size_t) c];
             wsum += p.catWeight[c];
         }
     sc.uncapped = wsum > 0 ? tot / wsum : 0.0;
     double cap = 100;
-    auto gate = [&] (bool hit, double c, const std::string& why) {
-        if (hit)
-        {
-            cap = std::min (cap, c);
-            sc.gates.push_back (why + " (composite capped at " + std::to_string ((int) c) + ")");
-        }
+    auto gate = [&] (double c, const std::string& why) {
+        cap = std::min (cap, c);
+        sc.gates.push_back (why + " (composite capped at " + std::to_string ((int) c) + ")");
     };
+    // a metric is missing (NaN) on input too short to analyse: every comparison below is then false
     auto val = [&] (const char* id) { auto it = m.find (id); return it == m.end() ? NAN : it->second.v; };
-    char buf[96];
-    std::snprintf (buf, sizeof buf, "true peak %+.1f dBTP", val ("T1"));
-    gate (stage == Stage::Master && val ("T1") > 0.0, 59, buf);
-    std::snprintf (buf, sizeof buf, "%d clipping event(s)", (int) val ("T2"));
-    gate (val ("T2") > 0, 59, buf);
-    std::snprintf (buf, sizeof buf, "low-band correlation drops to %.2f (anti-phase low end)", val ("S2"));
-    auto s2 = m.find ("S2");
-    gate (s2 != m.end() && s2->second.conf >= 0.3 && s2->second.v < -0.5, 64, buf);
-    std::snprintf (buf, sizeof buf, "DC offset %.2f %% FS", val ("T3"));
-    gate (val ("T3") > 1.0, 69, buf);
+    if (stage == Stage::Master && val ("T1") > 0.0)
+        gate (59, fmt ("true peak %+.1f dBTP", val ("T1")));
+    if (val ("T2") > 0)
+        gate (59, fmt ("%.0f clipping event(s)", val ("T2")));
+    if (auto s2 = m.find ("S2"); s2 != m.end() && s2->second.conf >= 0.3 && s2->second.v < -0.5)
+        gate (64, fmt ("low-band correlation drops to %.2f (anti-phase low end)", s2->second.v));
+    if (val ("T3") > 1.0)
+        gate (69, fmt ("DC offset %.2f %% FS", val ("T3")));
     sc.composite = std::min (sc.uncapped, cap);
     return sc;
 }

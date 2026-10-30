@@ -307,8 +307,10 @@ static int cmdJudge (const std::string& mix, const std::string& profPath, Stage 
     for (size_t i = 0; i < shown; ++i)
     {
         const Rec& r = rs.recs[i];
-        std::printf ("\n  %zu. [%s] %s  (%s %+.1f -> %.1f, confidence %.2f)\n", i + 1, categoryName (r.category), r.title.c_str(),
-                     r.simulated ? "simulated" : "estimated", r.delta, r.after, r.conf);
+        // under a gate the composite cannot move, so show what the fix does to the uncapped score
+        const std::string uncapped = sc.gates.empty() ? "" : fmt (", uncapped %+.1f", r.deltaUncapped);
+        std::printf ("\n  %zu. [%s] %s  (%s %+.1f -> %.1f%s, confidence %.2f)\n", i + 1, categoryName (r.category), r.title.c_str(),
+                     r.simulated ? "simulated" : "estimated", r.delta, r.after, uncapped.c_str(), r.conf);
         std::printf ("     %s\n", r.diagnosis.c_str());
         if (r.fix.kind != Fix::None)
             std::printf ("     Fix: %s\n", describe (r.fix).c_str());

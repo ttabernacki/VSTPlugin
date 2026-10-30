@@ -103,7 +103,7 @@ struct Energy
 // real material is far below that). Also counts inter-sample overs (interpolated > 1 between two samples that are not).
 inline double truePeak (const std::vector<float>& x, int& overs)
 {
-    constexpr int H = 24;
+    static constexpr int H = 24; // static: MSVC will not let the table lambda below use a local constant uncaptured
     static const std::array<std::array<double, 2 * H>, 3> h = [] {
         std::array<std::array<double, 2 * H>, 3> t {};
         for (int p = 0; p < 3; ++p)
@@ -120,9 +120,9 @@ inline double truePeak (const std::vector<float>& x, int& overs)
         sp = std::max (sp, (double) std::fabs (v));
     double tp = sp;
     const double thr = sp * 0.5;
-    const long n = (long) x.size();
+    const int64_t n = (int64_t) x.size();
     bool inOver = false;
-    for (long i = 0; i + 1 < n; ++i)
+    for (int64_t i = 0; i + 1 < n; ++i)
     {
         if (std::fabs (x[(size_t) i]) < thr && std::fabs (x[(size_t) i + 1]) < thr)
         {
@@ -134,7 +134,7 @@ inline double truePeak (const std::vector<float>& x, int& overs)
             double acc = 0;
             for (int k = -H + 1; k <= H; ++k)
             {
-                const long j = i + k;
+                const int64_t j = i + k;
                 if (j >= 0 && j < n)
                     acc += x[(size_t) j] * h[(size_t) p][(size_t) (k + H - 1)];
             }
@@ -322,7 +322,7 @@ inline Analysis analyze (const Stereo& in, const std::string& source = {})
             S.band (b[0], b[1], ll, rr, lr);
             if (ll + rr > 1e-14)
             {
-                worst = any ? std::min (worst, db ((ll + rr + 2 * lr) / (2 * (ll + rr)))) : db ((ll + rr + 2 * lr) / (2 * (ll + rr)));
+                worst = std::min (worst, db ((ll + rr + 2 * lr) / (2 * (ll + rr)))); // never above 0 dB: |lr| <= (ll + rr) / 2
                 any = true;
             }
         }
@@ -541,7 +541,7 @@ inline Analysis analyze (const Stereo& in, const std::string& source = {})
                 loudest = std::max (loudest, nt.levelDb);
             }
             else
-                nt.levelDb = -300;
+                nt.levelDb = NAN; // too short for 3 periods: no harmonic data, so never kept below
         }
         for (auto& nt : notes)
             if (nt.levelDb > loudest - 30)

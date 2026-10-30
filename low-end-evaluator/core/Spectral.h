@@ -5,6 +5,7 @@
 #include "Audio.h"
 
 #include <complex>
+#include <cstddef>
 #include <vector>
 
 namespace lee
@@ -84,15 +85,13 @@ struct Biquad
 
 using Chain = std::vector<Biquad>;
 
-// Butterworth sections: order 2 or 4
+// Butterworth sections: order 2, 4 or 8 (section Qs 1 / (2 sin ((2k - 1) pi / 2n)))
 inline Chain butterworth (bool high, int order, double f, double fs)
 {
+    static const std::vector<double> q2 { 0.70710678 }, q4 { 0.54119610, 1.30656296 }, q8 { 0.50979558, 0.60134489, 0.89997622, 2.56291545 };
     Chain c;
-    if (order == 2)
-        c.push_back (high ? Biquad::highpass (f, 0.70710678, fs) : Biquad::lowpass (f, 0.70710678, fs));
-    else
-        for (double q : { 0.54119610, 1.30656296 })
-            c.push_back (high ? Biquad::highpass (f, q, fs) : Biquad::lowpass (f, q, fs));
+    for (double q : order == 2 ? q2 : order == 4 ? q4 : q8)
+        c.push_back (high ? Biquad::highpass (f, q, fs) : Biquad::lowpass (f, q, fs));
     return c;
 }
 
@@ -144,17 +143,14 @@ inline std::vector<double> filtfilt (const std::vector<double>& x, const Chain& 
     std::reverse (y.begin(), y.end());
     filterInPlace (y, c);
     std::reverse (y.begin(), y.end());
-    return std::vector<double> (y.begin() + (long) pad, y.begin() + (long) (pad + x.size()));
+    return std::vector<double> (y.begin() + (std::ptrdiff_t) pad, y.begin() + (std::ptrdiff_t) (pad + x.size()));
 }
 
 // 48 kHz -> 6 kHz: zero-phase 8th-order Butterworth at 2.6 kHz (-0.13 dB at 2 kHz, aliases into 0-2 kHz below -55 dB)
 constexpr int kDecim = 8;
 inline std::vector<double> decimate (const std::vector<float>& x, double fs)
 {
-    Chain lp = butterworth (false, 4, 2600.0, fs);
-    auto more = butterworth (false, 4, 2600.0, fs);
-    lp.insert (lp.end(), more.begin(), more.end());
-    const auto y = filtfilt (std::vector<double> (x.begin(), x.end()), lp, 2048);
+    const auto y = filtfilt (std::vector<double> (x.begin(), x.end()), butterworth (false, 8, 2600.0, fs), 2048);
     std::vector<double> d (y.size() / kDecim);
     for (size_t i = 0; i < d.size(); ++i)
         d[i] = y[i * kDecim];

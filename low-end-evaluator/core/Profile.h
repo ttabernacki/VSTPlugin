@@ -164,9 +164,9 @@ inline bool fromJson (const Json& j, Profile& p, std::string& err)
         err = "not a low-end-evaluator profile";
         return false;
     }
-    if (j.numOr ("version", 0) > kProfileVersion)
+    if (const double ver = j.numOr ("version", 0); ver > kProfileVersion)
     {
-        err = "profile version " + std::to_string ((int) j.numOr ("version", 0)) + " is newer than this build understands";
+        err = "profile version " + std::to_string ((int) std::min (ver, 1e6)) + " is newer than this build understands";
         return false;
     }
     p = Profile {};
@@ -192,7 +192,7 @@ inline bool fromJson (const Json& j, Profile& p, std::string& err)
             t.sigma = o.numOr ("sigma", info->sigmaFloor);
             t.weight = o.numOr ("weight", info->weight);
             t.muted = o.boolOr ("muted", false);
-            t.n = (int) o.numOr ("n", 0);
+            t.n = (int) std::clamp (o.numOr ("n", 0), 0.0, 1e6);
             t.values = o.numsOr ("values");
             if (! std::isfinite (t.center) || ! std::isfinite (t.lo) || ! std::isfinite (t.hi) || t.lo > t.hi || ! (t.sigma > 0) || t.weight < 0)
             {

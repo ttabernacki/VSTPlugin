@@ -66,9 +66,26 @@ static void dspConformance()
         CHECK (std::fabs (tp) < 0.3, "true peak of an fs/4 sine sampled at -3 dB: %.2f dBTP (0)", tp);
     }
     {
-        // ISO 226: 1 kHz is its own reference; 40 phon at 100 Hz needs ~62 dB SPL (weight ~ -22 dB)
-        const double w1k = equalLoudnessWeightDb (1000, 40), w100 = equalLoudnessWeightDb (100, 40);
-        CHECK (std::fabs (w1k) < 0.05 && w100 < -19 && w100 > -25, "equal loudness: 1 kHz %.2f dB, 100 Hz at 40 phon %.1f dB", w1k, w100);
+        // the 48 -> 6 kHz decimator keeps 2 kHz (the top of the mid reference band) within 0.13 dB and rejects what would
+        // alias onto it
+        auto level = [] (double f) {
+            std::vector<float> x (96000);
+            for (size_t i = 0; i < x.size(); ++i)
+                x[i] = (float) (0.5 * std::sin (2 * kPi * f * (double) i / kAnalysisRate));
+            const auto d = decimate (x, kAnalysisRate);
+            double e = 0;
+            for (size_t i = d.size() / 4; i < 3 * d.size() / 4; ++i)
+                e += d[i] * d[i];
+            return 10 * std::log10 (e / (double) (d.size() / 2) / 0.125);
+        };
+        const double l2k = level (2000), l4k = level (4000);
+        CHECK (std::fabs (l2k + 0.13) < 0.1 && l4k < -55, "decimator: 2 kHz %.2f dB (-0.13), 4 kHz %.1f dB (< -55)", l2k, l4k);
+    }
+    {
+        // ISO 226:2003: 1 kHz is its own reference; 40 phon needs 64.4 dB SPL at 100 Hz and 99.9 dB at 20 Hz
+        const double w1k = equalLoudnessWeightDb (1000, 40), w100 = equalLoudnessWeightDb (100, 40), w20 = equalLoudnessWeightDb (20, 40);
+        CHECK (std::fabs (w1k) < 0.05 && std::fabs (w100 + 24.4) < 0.1 && std::fabs (w20 + 59.9) < 0.1,
+               "equal loudness at 40 phon: 1 kHz %.2f dB, 100 Hz %.1f dB (-24.4), 20 Hz %.1f dB (-59.9)", w1k, w100, w20);
     }
     {
         // WAV round trip
@@ -81,6 +98,86 @@ static void dspConformance()
         const bool ok = writeWav (path, s) && readWav (path, r, err);
         std::remove (path);
         CHECK (ok && r.L == s.L && r.R == s.R && r.fs == 48000, "WAV write/read round trip");
+    }
+    {
+        // hand-made files: 16-bit mono after an odd-sized chunk (padded to even), and 24-bit WAVE_FORMAT_EXTENSIBLE stereo
+        // whose data chunk is cut short (the header claims more than the file holds)
+        auto readBytes = [] (const std::vector<unsigned char>& b, Stereo& out) {
+            const char* path = "lee_test_parse.wav";
+            FILE* f = std::fopen (path, "wb");
+            std::fwrite (b.data(), 1, b.size(), f);
+            std::fclose (f);
+            std::string err;
+            const bool ok = readWav (path, out, err);
+            std::remove (path);
+            return ok;
+        };
+        auto le = [] (std::vector<unsigned char>& b, uint32_t v, int bytes) {
+            for (int k = 0; k < bytes; ++k)
+                b.push_back ((unsigned char) (v >> (8 * k)));
+        };
+        auto tag = [] (std::vector<unsigned char>& b, const char* t) { b.insert (b.end(), t, t + 4); };
+        std::vector<unsigned char> m;
+        tag (m, "RIFF");
+        le (m, 0, 4);
+        tag (m, "WAVE");
+        tag (m, "junk");
+        le (m, 3, 4);
+        le (m, 0xABCDEF, 4); // 3 bytes + 1 pad byte
+        tag (m, "fmt ");
+        le (m, 16, 4);
+        le (m, 1, 2);
+        le (m, 1, 2);
+        le (m, 44100, 4);
+        le (m, 88200, 4);
+        le (m, 2, 2);
+        le (m, 16, 2);
+        tag (m, "data");
+        le (m, 4, 4);
+        le (m, 0x4000, 2);  // +0.5
+        le (m, 0x8000, 2);  // -1
+        Stereo a;
+        const bool okA = readBytes (m, a);
+        std::vector<unsigned char> x;
+        tag (x, "RIFF");
+        le (x, 0, 4);
+        tag (x, "WAVE");
+        tag (x, "fmt ");
+        le (x, 40, 4);
+        le (x, 0xFFFE, 2);
+        le (x, 2, 2);
+        le (x, 96000, 4);
+        le (x, 96000 * 6, 4);
+        le (x, 6, 2);
+        le (x, 24, 2);
+        le (x, 22, 2);
+        le (x, 24, 2);
+        le (x, 3, 4);
+        le (x, 1, 2); // sub-format GUID starts with the PCM tag
+        for (int k = 0; k < 14; ++k)
+            x.push_back (0);
+        tag (x, "data");
+        le (x, 600, 4);
+        le (x, 0x800000, 3); // -1
+        le (x, 0x200000, 3); // +0.25
+        le (x, 0, 2);        // half a frame, then the file ends
+        Stereo b;
+        const bool okB = readBytes (x, b);
+        const std::vector<float> wantA { 0.5f, -1.0f }, wantBL { -1.0f }, wantBR { 0.25f };
+        CHECK (okA && a.fs == 44100 && a.L == wantA && a.R == wantA && okB && b.fs == 96000 && b.L == wantBL && b.R == wantBR,
+               "WAV parsing: odd chunk, 16-bit mono, 24-bit extensible, truncated data");
+    }
+    {
+        // strict numbers: nan, inf, hex and overflow are not JSON, and a non-finite value would be written back as null
+        Json j;
+        std::string err;
+        bool rejected = true;
+        for (const char* t : { "nan", "-inf", "0x10", "1e999", "[1, 2e]", "\"\\uzz12\"" })
+            rejected = rejected && ! parse (t, j, err);
+        err.clear();
+        const bool ok = parse ("{\"a\": [-1.5e-3, 2, true, null], \"b\": \"\\u00e9\\n\"}", j, err) && j.get ("a")->a[0].n == -1.5e-3
+                         && j.get ("b")->s == "\xc3\xa9\n";
+        CHECK (rejected && ok, "JSON: non-JSON numbers and bad escapes rejected, valid input parsed%s%s", err.empty() ? "" : ": ", err.c_str());
     }
 }
 
@@ -233,6 +330,36 @@ int main()
         CHECK (r && r->fix.gainDb < -2 && r->fix.hz < 300 && (r->fix.kind == Fix::LowShelf || r->fix.q < 1.5) && r->delta > 2, "a broad low cut is suggested and helps: %s (%+.1f)", r ? describe (r->fix).c_str() : "none",
                r ? r->delta : 0.0);
         (void) sc;
+    }
+
+    std::printf ("\nDefect: mud in a clipped mix\n");
+    {
+        mix::Params p;
+        p.seed = 84;
+        p.driveDb = 15;
+        p.mudDb = 6;
+        Analysis a;
+        Recommendations rs;
+        const Score sc = judge (p, "clipped + mud", rs, a);
+        // the clipping gate holds the composite, so the EQ move must be judged (and kept) on the uncapped score
+        const Rec* r = findRec (rs, "eq@");
+        CHECK (sc.composite <= 59 && r && r->fix.gainDb < 0 && r->fix.hz > 150 && r->fix.hz < 330 && r->deltaUncapped > 3,
+               "under the clipping gate the mud cut is still suggested: %s (uncapped %+.1f)", r ? describe (r->fix).c_str() : "none",
+               r ? r->deltaUncapped : 0.0);
+    }
+
+    std::printf ("\nToo short to analyse\n");
+    {
+        mix::Params p;
+        p.seed = 85;
+        p.seconds = 2;
+        Stereo s = mix::render (p);
+        s.L.resize (9600);
+        s.R.resize (9600);
+        const Analysis a = analyze (s);
+        const Score sc = score (a, prof, Stage::Master);
+        const Recommendations rs = recommend (s, a, prof, sc);
+        CHECK (a.m.empty() && sc.gates.empty() && sc.composite == 0 && rs.recs.empty(), "0.2 s: no metrics, no gates, no recommendations");
     }
 
     std::printf ("\nDeterminism and mix stage\n");

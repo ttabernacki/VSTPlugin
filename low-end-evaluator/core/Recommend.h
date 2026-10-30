@@ -13,7 +13,6 @@
 
 #include "Scoring.h"
 
-#include <cstdarg>
 #include <functional>
 #include <tuple>
 
@@ -33,7 +32,7 @@ struct Rec
     Fix fix;                          // simulated when kind != None
     std::vector<std::string> metrics; // the metrics it targets
     int effort = 2, order = 3;        // effort: 1 switch or nudge, 2 one plug-in move, 3 rebalance across tracks
-    double severity = 0, conf = 1, delta = 0, deltaUncapped = 0, priority = 0, after = 0;
+    double conf = 1, delta = 0, deltaUncapped = 0, priority = 0, after = 0;
     bool simulated = false;
     std::vector<std::tuple<std::string, double, double>> predicted; // metric, now, after
 };
@@ -43,16 +42,6 @@ inline std::string noteName (double hz)
     static const char* n[] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
     const int m = (int) std::lround (69 + 12 * std::log2 (hz / 440.0));
     return std::string (n[((m % 12) + 12) % 12]) + std::to_string (m / 12 - 1);
-}
-
-inline std::string fmt (const char* f, ...)
-{
-    char buf[512];
-    va_list ap;
-    va_start (ap, f);
-    std::vsnprintf (buf, sizeof buf, f, ap);
-    va_end (ap);
-    return buf;
 }
 
 inline Stereo applyFix (const Stereo& in, const Fix& f)
@@ -139,7 +128,6 @@ inline Recommendations recommend (const Stereo& audio, const Analysis& an, const
         r.category = Dynamics;
         r.effort = 1;
         r.order = 0;
-        r.severity = 10;
         recs.push_back (r);
     }
     // 1: stereo low end
@@ -176,7 +164,7 @@ inline Recommendations recommend (const Stereo& audio, const Analysis& an, const
         const auto& cf = curveFreqs();
         std::vector<double> dev (cf.size(), 0.0);
         for (size_t k = 0; k < cf.size() && k < an.curve.size(); ++k)
-            if (cf[k] <= 500 && std::isfinite (pr.curveMed[k]))
+            if (cf[k] <= 500 && pr.curveLo[k] <= pr.curveHi[k]) // false where the profile has no curve (NaN)
                 dev[k] = an.curve[k] - std::clamp (an.curve[k], pr.curveLo[k], pr.curveHi[k]);
         struct Cl { size_t a, b; double peak, mean, mass; };
         std::vector<Cl> cls;
@@ -216,7 +204,6 @@ inline Recommendations recommend (const Stereo& audio, const Analysis& an, const
             const double flo = cf[c.a] * std::pow (2.0, -1.0 / 12), fhi = cf[c.b] * std::pow (2.0, 1.0 / 12); // grid cells
             Rec r;
             r.order = 3;
-            r.severity = std::fabs (c.peak);
             if (c.a == 0 && widthOct >= 1.0)
             {
                 r.fix = { Fix::LowShelf, fhi, std::clamp (-0.7 * c.mean, -6.0, 6.0), 0.707 };
@@ -365,16 +352,10 @@ inline Recommendations recommend (const Stereo& audio, const Analysis& an, const
     // --- predictions -----------------------------------------------------------------------------------------------
     for (auto& r : recs)
     {
-        double cmin = 1.0, sev = r.severity;
+        r.conf = 1.0;
         for (auto& id : r.metrics)
             if (auto* m = ms (id); m && m->used)
-            {
-                cmin = std::min (cmin, m->conf);
-                if (r.fix.kind == Fix::None || r.fix.kind == Fix::MonoBelow || r.fix.kind == Fix::HighPass)
-                    sev = std::max (sev, m->d);
-            }
-        r.severity = sev;
-        r.conf = cmin;
+                r.conf = std::min (r.conf, m->conf);
         if (r.fix.kind != Fix::None && opt.simulate)
         {
             if (opt.progress)
@@ -412,8 +393,9 @@ inline Recommendations recommend (const Stereo& audio, const Analysis& an, const
         // under a gate the capped composite cannot move, so rank by what the fix does to the uncapped score as well
         r.priority = std::max ({ 0.0, r.delta, r.deltaUncapped }) * r.conf / r.effort;
     }
-    // a simulated move worth less than a point is noise, not advice
-    recs.erase (std::remove_if (recs.begin(), recs.end(), [] (const Rec& r) { return r.simulated && r.delta < 1.0; }), recs.end());
+    // a simulated move worth less than a point is noise, not advice (under a gate, the uncapped gain counts)
+    recs.erase (std::remove_if (recs.begin(), recs.end(), [] (const Rec& r) { return r.simulated && std::max (r.delta, r.deltaUncapped) < 1.0; }),
+                recs.end());
     std::stable_sort (recs.begin(), recs.end(), [] (const Rec& x, const Rec& y) { return x.priority > y.priority; });
 
     if (opt.simulate)
