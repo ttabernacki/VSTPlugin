@@ -91,6 +91,21 @@ passive 500k, or active). The panel shows the neck, with
 the bar, the strings ringing and their notes, the current chord, and what the wheel will do (which
 pedals, or "voice-led").
 
+## Advanced page (tuning the model)
+The **ADVANCED** tab exposes the physical model's calibration: 23 knobs, automatable and saved with the
+session. Every knob's default (the tuned value) sits at 12 o'clock, so you can always hear which way
+you've moved it. **Reset to calibrated** puts them all back. Hover a knob for what it does.
+
+| Group | Knobs |
+|---|---|
+| String | Stiffness (inharmonicity), Plane detune (the slow beating), Exchange (how fast the two vibration planes trade energy: the bloom), Vert decay (the two-stage decay), Tension mod (hard-pick pitch rise), Growl |
+| Body & bar | Body damp (energy the cabinet takes, and passes to the other strings), Body size (its resonances), Bar softness, Behind decay, Cabinet drop, Stop bounce |
+| Pickup | Pickup pos (mm from the bridge), Field width, Horizontal (sensitivity to side-to-side motion), Pickup curve, Coil res (+-1 octave), Coil Q, Cable (pF, the passive volume pedal's tone loss) |
+| Picking | Pick pos (mm from the bridge), Thumb (hardness re the finger picks), Drag, Variation |
+
+The same values live in `core/` as defaults (`StringParams`, `EngineParams`); the table that drives the
+parameters, the knobs and the tests is `Source/AdvancedParams.h`.
+
 ## The model
 **Strings** (`core/SteelString.h`). Each string is two coupled digital waveguide loops, one per
 vibration plane. Each loop has:
@@ -114,7 +129,7 @@ The pick and pickup are placed in metres from the bridge, so their comb filters 
 | Bar noise | From the bar's speed, on an S-curve (silent while the bar creeps into place). On wound strings, grainy ticks at the rate the wrap ridges pass under the bar. Band-limited to 400 Hz-3 kHz. As a magnetic pickup hears it: mostly through the played strings it sets moving, only a little directly. Played strings make it; strings merely under the bar make 20 %. About 48 dB below a medium pick on a wound string, and a chord slide's scrape about 48 dB below the picked chord (tested). A lifted and re-placed bar makes none |
 | Tension modulation | A vibrating string stretches: its tension, and so its pitch, rises with the squared slope along it (for travelling waves, the squared wave summed over one period), computed every sample. A hard pick starts ~4-6 cents sharp and settles as the high partials die; soft picks barely move. Wound and low strings stay sharp a little longer. The tension fluctuation also pulls on the bridge lengthwise, adding faint extra partials (growl) that grow with the square of the playing strength |
 | Body and bridge | Five cabinet/changer resonances (104-1180 Hz) plus a broadband part absorb energy from every string at the bridge. The vertical plane pushes on the top and loses ~4x more than the horizontal. Partials near a body resonance die faster, so each note decays unevenly, as on a real instrument. What the body absorbs drives the other strings (sympathetic resonance, strongest near the body modes). This is passive by construction: a string gets back at most 81% of what the strings gave the body, so the network always loses energy |
-| Two planes | Each string's horizontal and vertical vibrations trade energy through the bridge: a slow, lossless rotation, full exchange in 1.5-2.5 s, a little different per string. With the faster-decaying vertical plane this gives the two-stage decay of real strings: a fast early drop (~19 dB/s) and then a long, slowly blooming tail (~11 dB/s) |
+| Two planes | Each string's horizontal and vertical vibrations trade energy through the bridge: a slow, lossless rotation applied once per trip round the string, full exchange in ~2.4-3.6 s (a little different per string). With the faster-decaying vertical plane this gives the two-stage decay of real strings: a fast early drop (~28 dB/s) and then a long tail (~11 dB/s), with a mild bloom. Coupled planes push their frequencies apart slightly, so the long tail sits a fraction of a cent low |
 | Hand | Palm/hand blocks ramp both decay times down |
 | Behind the bar | The bar splits each string. The bar-to-nut part (1 - 2^(-fret/12) of the string) is short, high and usually out of key: at fret 3 on the E string it rings ~2 kHz over a G4. Moving the bar or vibrato moves it the opposite way to the note. It's a short, heavily damped second loop (T60 ~1 s). The pick's impulse passes through the bar and rings it, and the pickup hears it go by (about 30 dB below the note at Behind bar 100%). Where both halves share a pitch (fret 12) they also trade a little energy, losslessly: no drain, pitch within 0.3 cents |
 | Bar | A heavy rod resting on the string, not a hard stop: high partials die a little faster the further up the neck (up to ~25% at the 24th fret) |
@@ -142,4 +157,5 @@ The tests cover:
   pedal and its tone, CC pedals, pedal mechanics (travel, cabinet drop, stops), sympathetic coupling and a
   60 s random-MIDI stress run (`steelwave_engine_tests`);
 - host-style tests: parameters, state, keyswitches, bit-identical output at any block size, sample
-  rates, bypass and the editor (`SteelwavePluginTests`).
+  rates, bypass, the editor and both its pages, and every Advanced knob at both ends of its range
+  (finite, under 0 dBFS, and audibly changing the sound) (`SteelwavePluginTests`).

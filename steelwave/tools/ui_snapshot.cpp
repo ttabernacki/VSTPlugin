@@ -7,8 +7,9 @@ int main (int argc, char** argv)
     if (argc < 2)
         return 2;
     juce::ScopedJuceInitialiser_GUI init;
-    struct Shot { const char* name; int set; int note; int wheel; };
-    const Shot shots[] = { { "ui_chord_bent", 0, 60, 12000 }, { "ui_single", 8, 52, 8192 }, { "ui_pad_v", 7, 67, 4000 } };
+    struct Shot { const char* name; int set; int note; int wheel; bool advanced; };
+    const Shot shots[] = { { "ui_chord_bent", 0, 60, 12000, false }, { "ui_single", 8, 52, 8192, false }, { "ui_pad_v", 7, 67, 4000, false },
+                           { "ui_advanced", 0, 60, 8192, true } };
     for (const auto& s : shots)
     {
         SteelwaveProcessor proc;
@@ -26,7 +27,10 @@ int main (int argc, char** argv)
             proc.processBlock (buf, midi);
         }
         std::unique_ptr<juce::AudioProcessorEditor> ed (proc.createEditor());
-        ed->setSize (900, 460);
+        ed->setSize (900, 520);
+        if (s.advanced)
+            if (auto* se = dynamic_cast<SteelwaveEditor*> (ed.get()))
+                se->showPage (true);
         auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
         juce::File f (juce::String (argv[1]) + "/" + s.name + ".png");
         f.deleteFile();

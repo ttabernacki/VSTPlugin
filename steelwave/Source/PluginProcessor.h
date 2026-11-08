@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../core/SteelEngine.h"
+#include "AdvancedParams.h"
 
 #include <atomic>
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -57,6 +58,7 @@ private:
     std::atomic<float>*pSet = nullptr, *pKey = nullptr, *pGlide = nullptr, *pStrum = nullptr, *pHard = nullptr, *pBright = nullptr,
         *pSustain = nullptr, *pNoise = nullptr, *pVibRate = nullptr, *pVibDepth = nullptr, *pSym = nullptr, *pPickup = nullptr,
         *pVolCc = nullptr, *pLevel = nullptr, *pBehind = nullptr, *pVolType = nullptr;
+    std::vector<std::atomic<float>*> pAdv; // in swadv::params() order
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SteelwaveProcessor)
 };

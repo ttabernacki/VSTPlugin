@@ -67,6 +67,18 @@ APVTS::ParameterLayout SteelwaveProcessor::createLayout()
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "level", 1 }, "Level", Range (-24.0f, 12.0f), 0.0f,
                                                   Attr().withStringFromValueFunction ([] (float v, int) { return String (v > 0 ? "+" : "") + String (v, 1) + " dB"; })
                                                       .withValueFromStringFunction (num)));
+    // the Advanced page: the model's calibration. Each knob's default sits at 12 o'clock.
+    for (const auto& a : swadv::params())
+    {
+        Range r (a.min, a.max);
+        const float mid = 0.5f * (a.min + a.max);
+        if (std::abs (a.def - mid) > 1e-4f * (a.max - a.min))
+            r.setSkewForCentre (a.def);
+        const auto* ap = &a;
+        l.add (std::make_unique<AudioParameterFloat> (ParameterID { a.id, 1 }, a.name, r, a.def,
+                                                      Attr().withStringFromValueFunction ([ap] (float v, int) { return swadv::format (*ap, v); })
+                                                          .withValueFromStringFunction (num)));
+    }
     return l;
 }
 
@@ -90,6 +102,8 @@ SteelwaveProcessor::SteelwaveProcessor()
     pLevel = apvts.getRawParameterValue ("level");
     pBehind = apvts.getRawParameterValue ("behindbar");
     pVolType = apvts.getRawParameterValue ("voltype");
+    for (const auto& a : swadv::params())
+        pAdv.push_back (apvts.getRawParameterValue (a.id));
     for (auto& s : uiSemis)
         s = 0.0f;
 }
@@ -119,6 +133,9 @@ sw::EngineParams SteelwaveProcessor::readParams() const
     p.levelDb = pLevel->load();
     p.behindBar = pBehind->load();
     p.volumePedal = (sw::EngineParams::VolumePedal) juce::jlimit (0, 2, (int) pVolType->load());
+    const auto& adv = swadv::params();
+    for (size_t i = 0; i < adv.size(); ++i)
+        p.*(adv[i].field) = pAdv[i]->load();
     return p;
 }
 

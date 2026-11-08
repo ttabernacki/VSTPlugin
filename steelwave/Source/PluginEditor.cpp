@@ -46,10 +46,42 @@ SteelwaveEditor::SteelwaveEditor (SteelwaveProcessor& p) : juce::AudioProcessorE
     vibDepth.setup (*this, proc.apvts, "vibdepth", "VIB DEPTH");
     sym.setup (*this, proc.apvts, "sympathetic", "SYMPATHETIC");
     level.setup (*this, proc.apvts, "level", "LEVEL");
+
+    for (const auto& a : swadv::params())
+    {
+        auto k = std::make_unique<bassui::Knob>();
+        k->setup (*this, proc.apvts, a.id, a.label);
+        k->slider.setTooltip (juce::String (a.name) + ": " + a.help);
+        k->slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 66, 15);
+        advKnobs.push_back (std::move (k));
+    }
+    for (auto* b : { &playTab, &advTab })
+    {
+        b->setClickingTogglesState (false);
+        b->setColour (juce::TextButton::buttonColourId, kPanel2);
+        b->setColour (juce::TextButton::buttonOnColourId, kAccent.darker (0.6f));
+        addAndMakeVisible (*b);
+    }
+    playTab.onClick = [this] { showPage (false); };
+    advTab.onClick = [this] { showPage (true); };
+    resetAdv.setColour (juce::TextButton::buttonColourId, kPanel2);
+    resetAdv.setTooltip ("Put every Advanced knob back to the calibrated value (12 o'clock).");
+    resetAdv.onClick = [this] {
+        for (const auto& a : swadv::params())
+            if (auto* prm = proc.apvts.getParameter (a.id))
+            {
+                prm->beginChangeGesture();
+                prm->setValueNotifyingHost (prm->getDefaultValue());
+                prm->endChangeGesture();
+            }
+    };
+    addChildComponent (resetAdv);
+
     setResizable (true, true);
-    setResizeLimits (820, 420, 1400, 716);
-    getConstrainer()->setFixedAspectRatio (900.0 / 460.0);
-    setSize (900, 460);
+    setResizeLimits (840, 485, 1400, 808);
+    getConstrainer()->setFixedAspectRatio (900.0 / 520.0);
+    setSize (900, 520);
+    showPage (false);
     startTimerHz (20);
 }
 
@@ -59,11 +91,64 @@ SteelwaveEditor::~SteelwaveEditor()
     setLookAndFeel (nullptr);
 }
 
+void SteelwaveEditor::showPage (bool adv)
+{
+    advanced = adv;
+    playTab.setToggleState (! adv, juce::dontSendNotification);
+    advTab.setToggleState (adv, juce::dontSendNotification);
+    for (auto* c : std::initializer_list<Choice*> { &set, &key, &pickup, &volcc, &voltype })
+    {
+        c->box.setVisible (! adv);
+        c->label.setVisible (! adv);
+    }
+    for (auto* k : { &glide, &strum, &pick, &bright, &sustain, &noise, &behind, &vibRate, &vibDepth, &sym, &level })
+    {
+        k->slider.setVisible (! adv);
+        k->label.setVisible (! adv);
+    }
+    for (auto& k : advKnobs)
+    {
+        k->slider.setVisible (adv);
+        k->label.setVisible (adv);
+    }
+    resetAdv.setVisible (adv);
+    repaint();
+}
+
 void SteelwaveEditor::resized()
 {
     auto r = getLocalBounds().reduced (14);
-    r.removeFromTop (34);
+    auto header = r.removeFromTop (34);
+    advTab.setBounds (header.removeFromRight (96).reduced (0, 4));
+    header.removeFromRight (6);
+    playTab.setBounds (header.removeFromRight (70).reduced (0, 4));
     r.removeFromTop (6);
+
+    // --- Advanced page: four groups, one row each
+    {
+        auto a = r;
+        auto top = a.removeFromTop (26);
+        resetAdv.setBounds (top.removeFromRight (150).reduced (0, 2));
+        a.removeFromTop (6);
+        const int rowH = a.getHeight() / swadv::kGroups;
+        const int maxPerRow = 7;
+        for (int g = 0; g < swadv::kGroups; ++g)
+        {
+            auto row = a.removeFromTop (rowH).reduced (0, 3);
+            groupAreas[(size_t) g] = row;
+            row.removeFromLeft (96); // group title
+            const int kw = row.getWidth() / maxPerRow;
+            const auto& ps = swadv::params();
+            for (size_t i = 0; i < ps.size(); ++i)
+                if (ps[i].group == g)
+                {
+                    auto cell = row.removeFromLeft (kw).reduced (2, 2);
+                    advKnobs[i]->label.setBounds (cell.removeFromTop (14));
+                    advKnobs[i]->slider.setBounds (cell);
+                }
+        }
+    }
+
     auto row = r.removeFromTop (42);
     auto place = [] (Choice& c, juce::Rectangle<int> cell) {
         c.label.setBounds (cell.removeFromTop (14));
@@ -96,7 +181,25 @@ void SteelwaveEditor::paint (juce::Graphics& g)
     g.drawText ("STEELWAVE", 14, 14, 200, 26, juce::Justification::centredLeft);
     g.setColour (kDim);
     g.setFont (juce::FontOptions (11.0f));
-    g.drawText ("physically modelled E9 pedal steel  |  no samples", 130, 14, getWidth() - 144, 26, juce::Justification::centredRight);
+    g.drawText ("physically modelled E9 pedal steel  |  no samples", 120, 14, playTab.getX() - 134, 26, juce::Justification::centredRight);
+
+    if (advanced)
+    {
+        g.setColour (kDim);
+        g.setFont (juce::FontOptions (11.0f));
+        g.drawText ("The physical model's calibration. 12 o'clock = the tuned value. Hover a knob for what it does.",
+                    14, resetAdv.getY(), resetAdv.getX() - 24, resetAdv.getHeight(), juce::Justification::centredLeft);
+        for (int gi = 0; gi < swadv::kGroups; ++gi)
+        {
+            const auto ga = groupAreas[(size_t) gi];
+            g.setColour (kPanel);
+            g.fillRoundedRectangle (ga.toFloat(), 8.0f);
+            g.setColour (kAccent);
+            g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+            g.drawFittedText (swadv::groupName (gi), ga.withWidth (92).reduced (12, 0), juce::Justification::centredLeft, 2);
+        }
+        return;
+    }
 
     // ---- the neck: 10 strings, the bar, what is ringing ------------------------------------
     g.setColour (kPanel);

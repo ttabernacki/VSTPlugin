@@ -272,6 +272,20 @@ struct StringParams
     double behindBar = 0.5;     // how freely the string behind the bar rings (0 = muted by the hand)
     double pickupNonlinear = 1.0; // the pickup's magnetic field getting stronger as the string nears the pole
     double pickVariation = 1.0;   // how much each pick differs from the last (position, angle, contact)
+
+    // --- advanced: the model's calibration (defaults = the tuned values) ---
+    double stiffness = 1.0;       // x the strings' inharmonicity
+    double planeExchange = 1.0;   // x the rate the two planes trade energy (0 = independent)
+    double verticalDecay = 0.55;  // vertical plane's decay time re the horizontal
+    double growl = 1.0;           // x the tension fluctuation's lengthwise pull on the bridge
+    double bodyDamping = 1.0;     // x the energy the body takes at the bridge
+    double bodySize = 1.0;        // body resonances at their frequencies / this (bigger = lower)
+    double barSoftness = 0.35;    // how much the bar darkens the string toward the 24th fret
+    double behindDecay = 1.0;     // s, T60 of the string behind the bar
+    double apertureM = 0.018;     // width of the pickup's field along the string
+    double pickupHorizontal = 0.8;// pickup sensitivity to horizontal motion (vertical = 1)
+    double thumbHardness = 0.65;  // thumb pick hardness re the finger picks
+    double dragTime = 1.0;        // x how long a pick drags the string before letting go
 };
 
 class SteelString
@@ -292,15 +306,8 @@ public:
         bumpW_ = 2.0 * kPi * 22.0;
         behindLine_.allocate (maxD); // the segment behind the bar is never longer than 3/4 of the string
         rng_.s = 0x1234567u + (uint32_t) (spec.openMidi * 7919);
-        cDisp_ = solveDispersion (fs, fOpen_, spec.inharmCents10);
-        for (auto& p : pol_)
-            for (size_t m = 0; m < kBodyModes.size(); ++m)
-                p.body[m].bandpass (kBodyModes[m].hz, kBodyModes[m].q, fs);
-        // the planes trade energy through the bridge: a slow, energy-conserving rotation
-        // (full exchange in ~1.5-2.5 s, a little different on every string)
-        const double xT = 1.5 + 1.0 * std::fmod (spec.openMidi * 0.618, 1.0);
-        rotS_ = std::sin (0.5 * kPi / (xT * fs));
-        rotC_ = std::cos (0.5 * kPi / (xT * fs));
+        cDisp_ = solveDispersion (fs, fOpen_, spec.inharmCents10 * std::clamp (prm_.stiffness, 0.0, 4.0));
+        designBody();
         // tension modulation: thinner/lower-tension (wound, low) strings stretch more for the same swing
         tensionK_ = (spec.wound ? 0.7 : 1.0) * kTensionScale; // wound strings swing wider for the same energy (measured stretch is larger)
         noiseBp_.lowpass (3000.0, 0.7, fs);
@@ -347,7 +354,14 @@ public:
         update (true);
     }
 
-    void setParams (const StringParams& p) { prm_ = p; }
+    void setParams (const StringParams& p)
+    {
+        const bool stiff = p.stiffness != prm_.stiffness, body = p.bodySize != prm_.bodySize, rot = p.planeExchange != prm_.planeExchange;
+        prm_ = p;
+        if (stiff) cDisp_ = solveDispersion (fs_, fOpen_, spec_.inharmCents10 * std::clamp (prm_.stiffness, 0.0, 4.0));
+        if (body) designBody();
+        if (rot) ctl_ = 0; // picked up at the next control update
+    }
     const StringSpec& spec() const { return spec_; }
 
     // positions in semitones above the open string; glide in seconds (0 = jump)
@@ -384,8 +398,9 @@ public:
         const bool ringing = energy_ > 1e-6;
         // The pick catches the string and drags it before slipping off: longer for a soft stroke and
         // for the thumb pick (thicker, rounder). A ringing string is also damped by the catch.
-        const double vary = std::clamp (prm_.pickVariation, 0.0, 1.0);
-        const double dragMs = (0.8 + 1.7 * (1.0 - velocity)) * (spec_.thumb ? 1.3 : 1.0) * (1.0 + 0.15 * vary * rng_.next());
+        const double vary = std::clamp (prm_.pickVariation, 0.0, 2.0);
+        const double dragMs = (0.8 + 1.7 * (1.0 - velocity)) * (spec_.thumb ? 1.3 : 1.0) * std::clamp (prm_.dragTime, 0.0, 4.0)
+                              * (1.0 + 0.15 * vary * rng_.next());
         excDelay_ = (int) (std::max (dragMs, ringing ? 4.0 : 0.0) * 1e-3 * fs_);
         dampPulse_ = dampLen_ = ringing ? excDelay_ : 0;
         if (ringing) // ~ -10 dB over the catch, whatever the loop length
@@ -498,7 +513,7 @@ public:
             double adm = kBodyBroadband * y[k];
             for (size_t m = 0; m < kBodyModes.size(); ++m)
                 adm += kBodyModes[m].gain * p.body[m].process (y[k]);
-            const double a = (k == 0 ? kAbsorbH : kAbsorbV) * adm;
+            const double a = absorb (k) * adm;
             y[k] -= a;
             absorbed += a;
         }
@@ -534,7 +549,7 @@ public:
             // a little of the contact noise excites the string; most of it is heard directly
             const double in = y[k] + (exc + drag) * excSplit_[k] + noise * kNoiseExcite * noiseExcite * excSplit_[k] + bridgeIn * kBridgeSplit[k];
             pol_[(size_t) k].line.write ((float) in);
-            out += in * kPickupSplit[k];
+            out += in * (k == 0 ? std::clamp (prm_.pickupHorizontal, 0.0, 1.0) : 1.0);
             inst += in * in;
         }
         // tension modulation: the string's stretch follows the squared slope along it (for travelling
@@ -543,7 +558,7 @@ public:
         tension_ = std::min (tensionK_ * prm_.nonlinear * stretch_, 0.5);
         // ... and the tension fluctuation pulls on the bridge lengthwise: faint extra partials at the
         // sums and differences of the string's own (the growl of a hard-picked string)
-        const double pull = (spec_.wound ? 2.0 : 1.0) * kPhantom * prm_.nonlinear * (inst - stretch_);
+        const double pull = (spec_.wound ? 2.0 : 1.0) * kPhantom * prm_.nonlinear * prm_.growl * (inst - stretch_);
         bridge_ = absorbed + 0.05 * pull;
 
         out += behindOut_;
@@ -575,8 +590,6 @@ public:
 
 private:
     // a magnetic pickup senses motion toward the pole (vertical) more than across it
-    static constexpr double kPickupSplit[2] = { 0.8, 1.0 };
-    static constexpr double kApertureM = 0.018;  // effective width of the pickup's field along the string
     // displacement -> fraction of the way to the pole: a hard pick reaches ~9-14 % (pole pieces sit
     // lower under the wound strings, which swing further)
     static constexpr double kPickupNL = 0.06, kPickupNLWound = 0.03;
@@ -592,6 +605,7 @@ private:
         const double f0 = fOpen_ * std::exp2 (semis / 12.0);
         const double w0 = 2.0 * kPi * f0 / fs_;
         polRatio_ = std::exp2 (-prm_.polDetuneCents / 1200.0);
+        designRotation (f0);
 
         // damping (hand block): ramp toward target, interpolate T60 in the log domain
         damp_ += (dampTarget_ - damp_) * (init ? 1.0 : 0.25);
@@ -600,7 +614,7 @@ private:
         const double tL = std::exp (std::log (spec_.t60Low * sus) * (1 - damp_) + std::log (0.10) * damp_);
         // the bar is a heavy rod resting on the string, not a hard stop: the shorter the front string,
         // the more its losses at the bar show (a little darker high up the neck)
-        const double barSoft = 1.0 - 0.35 * (1.0 - std::exp2 (-bar_.x / 12.0));
+        const double barSoft = 1.0 - std::clamp (prm_.barSoftness, 0.0, 0.9) * (1.0 - std::exp2 (-bar_.x / 12.0));
         const double tH = std::exp (std::log (spec_.t60High * sus * bright * barSoft) * (1 - damp_) + std::log (0.04) * damp_);
         {
             // behind the bar: rings briefly (nut and bar contact damp it), coupled once the bar is
@@ -608,8 +622,9 @@ private:
             const double frontFrac = std::exp2 (-bar_.x / 12.0);
             const double behindFrac = std::max (1.0 - frontFrac, 1e-3);
             const double fB = fOpen_ * std::exp2 ((pedal_.x + tension_) / 12.0) / behindFrac;
-            behindLoss_.design (std::min (fB, 0.4 * fs_), std::exp (std::log (1.0) * (1 - damp_) + std::log (0.05) * damp_),
-                                std::exp (std::log (0.12) * (1 - damp_) + std::log (0.02) * damp_), 5000.0, fs_);
+            const double bT = std::clamp (prm_.behindDecay, 0.05, 5.0);
+            behindLoss_.design (std::min (fB, 0.4 * fs_), std::exp (std::log (bT) * (1 - damp_) + std::log (0.05) * damp_),
+                                std::exp (std::log (0.12 * bT) * (1 - damp_) + std::log (0.02) * damp_), 5000.0, fs_);
             behindComp_ = behindLoss_.phaseDelay (2.0 * kPi * std::min (fB, 0.4 * fs_) / fs_);
             const double ramp = std::clamp ((bar_.x - 0.3) / 1.2, 0.0, 1.0);
             const double perB = fs_ / fB;
@@ -625,7 +640,8 @@ private:
             auto& p = pol_[(size_t) k];
             const double fk = k == 0 ? f0 : f0 / polRatio_;
             const double wk = k == 0 ? w0 : w0 / polRatio_;
-            p.loss.design (fk, k == 0 ? tL : tL * 0.55, k == 0 ? tH : tH * 0.7, 5000.0, fs_);
+            const double vd = std::clamp (prm_.verticalDecay, 0.1, 1.0);
+            p.loss.design (fk, k == 0 ? tL : tL * vd, k == 0 ? tH : tH * std::min (1.0, vd * 1.27), 5000.0, fs_);
             p.disp.c = cDisp_;
             p.compA = init ? 0.0 : p.compB;
             p.compB = p.loss.phaseDelay (wk) + p.disp.phaseDelay (wk) + bodyPhaseDelay (p.body, k, wk);
@@ -637,12 +653,31 @@ private:
         const double c = 2.0 * kScaleM * fOpen_ * std::exp2 (pedal_.x / 12.0);
         waveSpeed_ = c;
         combDelay_ = 2.0 * prm_.pickupPosM / c * fs_;
-        apHalf_ = std::clamp (0.5 * kApertureM / c * fs_, 0.0, 40.0);
+        apHalf_ = std::clamp (0.5 * std::clamp (prm_.apertureM, 0.0, 0.06) / c * fs_, 0.0, 40.0);
 
     }
 
+    void designBody()
+    {
+        const double size = std::clamp (prm_.bodySize, 0.25, 4.0);
+        for (auto& p : pol_)
+            for (size_t m = 0; m < kBodyModes.size(); ++m)
+                p.body[m].bandpass (kBodyModes[m].hz / size, kBodyModes[m].q, fs_);
+    }
+    // The planes trade energy through the bridge: a slow, energy-conserving rotation. Each part of
+    // the wave meets it once per trip round the string, so the angle per pass is set from the pitch:
+    // full exchange in kExchangeSec (a little different on every string) at the default.
+    void designRotation (double f0)
+    {
+        const double xT = kExchangeSec * (0.8 + 0.4 * std::fmod (spec_.openMidi * 0.618, 1.0));
+        const double th = 0.5 * kPi / (xT * std::max (f0, 20.0)) * std::clamp (prm_.planeExchange, 0.0, 10.0);
+        rotS_ = std::sin (th);
+        rotC_ = std::cos (th);
+    }
+    double absorb (int k) const { return (k == 0 ? kAbsorbH : kAbsorbV) * std::clamp (prm_.bodyDamping, 0.0, 4.0); }
+
     // phase delay (samples) of the body absorber 1 - mu * admittance at w
-    static double bodyPhaseDelay (const std::array<Biquad, kBodyModes.size()>& body, int k, double w)
+    double bodyPhaseDelay (const std::array<Biquad, kBodyModes.size()>& body, int k, double w) const
     {
         double re = kBodyBroadband, im = 0.0;
         for (size_t m = 0; m < kBodyModes.size(); ++m)
@@ -651,7 +686,7 @@ private:
             re += kBodyModes[m].gain * r[0];
             im += kBodyModes[m].gain * r[1];
         }
-        const double mu = k == 0 ? kAbsorbH : kAbsorbV;
+        const double mu = absorb (k);
         const double hr = 1.0 - mu * re, hi = -mu * im;
         return -std::atan2 (hi, hr) / std::max (w, 1e-9);
     }
@@ -687,13 +722,13 @@ private:
         // round-trip time (the ideal pluck's sin(n pi beta)/n spectrum), smoothed by the pick's
         // contact time (harder pick and harder playing = shorter = brighter), plus a pick click.
         const double period = fs_ / currentHz();
-        const double vary = std::clamp (prm_.pickVariation, 0.0, 1.0);
+        const double vary = std::clamp (prm_.pickVariation, 0.0, 2.0);
         // the thumb picks a little further from the bridge than the fingers; no two picks land in
         // exactly the same place (+-6 mm), which moves the pick-position notches a little every time
         const double pickPos = prm_.pickPosM + (spec_.thumb ? 0.018 : -0.004) + 0.006 * vary * rng_.next();
         const double W = std::clamp (2.0 * pickPos / waveSpeed_ * fs_, 2.0, 0.9 * period);
         // thumb picks are plastic: softer than the metal finger picks
-        const double h = std::clamp (prm_.hardness * (spec_.thumb ? 0.65 : 1.0), 0.0, 1.0);
+        const double h = std::clamp (prm_.hardness * (spec_.thumb ? prm_.thumbHardness : 1.0), 0.0, 1.0);
         const double contactMs = (0.25 + 1.6 * (1.0 - h)) * std::exp2 (-1.5 * (vel - 0.5)) * (1.0 + 0.1 * vary * rng_.next());
         const int T = std::max (2, (int) std::lround (contactMs * 1e-3 * fs_));
         const int Wi = (int) std::lround (W);
@@ -760,11 +795,12 @@ public:
 
 private:
     static constexpr double kBehindMax = 0.002; // resonant exchange per pass at Behind bar = 1 (weak: the bar is heavy)
-    static constexpr double kBehindIn = 0.5, kBehindOut = 0.06;
+    static constexpr double kBehindIn = 0.5, kBehindOut = 0.06; // the pick's impulse through the bar, and back
     // Bar scrape, as a pickup hears it: mostly through the played string it sets moving (whose
     // resonances lift it, so it's kept small), a little directly. About 50 dB below a medium pick
     // at the default Bar noise.
-    static constexpr double kNoiseDirect = 0.25, kNoiseExcite = 0.035; // the pick's impulse through the bar, and back
+    static constexpr double kNoiseDirect = 0.25, kNoiseExcite = 0.035;
+    static constexpr double kExchangeSec = 3.0; // full exchange between the planes at the default (a mild bloom; faster costs sustain)
     Glide bar_, pedal_, vib_;
     std::array<double, 4096> exc_ {};
     int excLen_ = 0, excPos_ = 0, excDelay_ = 0, dampPulse_ = 0, dampLen_ = 1, ctl_ = 0;
@@ -792,18 +828,28 @@ class Pickup
 {
 public:
     enum Type { SingleCoil, Humbucker };
-    void prepare (double fs) { fs_ = fs; set (type_); }
-    void set (Type t)
+    void prepare (double fs) { fs_ = fs; design(); }
+    // coil + cable resonance: the type's frequency moved by `shiftOct` octaves, its Q scaled
+    void set (Type t, double shiftOct = 0.0, double qScale = 1.0)
     {
+        if (t == type_ && shiftOct == shift_ && qScale == qScale_)
+            return;
         type_ = t;
-        if (t == SingleCoil) lp_.lowpass (6500.0, 1.7, fs_);
-        else lp_.lowpass (3600.0, 1.2, fs_);
+        shift_ = shiftOct;
+        qScale_ = qScale;
+        design();
     }
     void reset() { lp_.reset(); }
     float process (float x) { return (float) lp_.process (x); }
 
 private:
-    double fs_ = 48000;
+    void design()
+    {
+        const double f = (type_ == SingleCoil ? 6500.0 : 3600.0) * std::exp2 (std::clamp (shift_, -2.0, 2.0));
+        const double q = (type_ == SingleCoil ? 1.7 : 1.2) * std::clamp (qScale_, 0.25, 4.0);
+        lp_.lowpass (f, q, fs_);
+    }
+    double fs_ = 48000, shift_ = 0.0, qScale_ = 1.0;
     Type type_ = SingleCoil;
     Biquad lp_;
 };

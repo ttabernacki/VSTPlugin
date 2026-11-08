@@ -38,6 +38,14 @@ struct EngineParams
     enum VolumePedal { Passive250k, Passive500k, Active };
     VolumePedal volumePedal = Passive250k; // passive pedals lose treble part-way down
     double behindBar = 0.5;     // string behind the bar ringing (0 = muted by the hand)
+
+    // --- advanced: the physical model's calibration (defaults = the tuned values) ---
+    double pickPosMm = 100, pickupPosMm = 45, apertureMm = 18;
+    double pickupHorizontal = 0.8, pickupCurve = 1.0, coilShiftOct = 0.0, coilQ = 1.0, cablePf = 700;
+    double stiffness = 1.0, planeDetuneCents = 1.1, planeExchange = 1.0, verticalDecay = 0.55;
+    double tensionMod = 1.0, growl = 1.0, bodyDamping = 1.0, bodySize = 1.0, barSoftness = 0.35, behindDecay = 1.0;
+    double cabinetDrop = 1.0, stopBounce = 1.0;
+    double thumbHardness = 0.65, dragTime = 1.0, pickVariation = 1.0;
 };
 
 class SteelEngine
@@ -266,9 +274,27 @@ private:
         sp.sustain = prm_.sustain;
         sp.barNoise = prm_.barNoise;
         sp.behindBar = prm_.behindBar;
+        sp.pickPosM = prm_.pickPosMm * 1e-3;
+        sp.pickupPosM = prm_.pickupPosMm * 1e-3;
+        sp.apertureM = prm_.apertureMm * 1e-3;
+        sp.pickupHorizontal = prm_.pickupHorizontal;
+        sp.pickupNonlinear = prm_.pickupCurve;
+        sp.stiffness = prm_.stiffness;
+        sp.polDetuneCents = prm_.planeDetuneCents;
+        sp.planeExchange = prm_.planeExchange;
+        sp.verticalDecay = prm_.verticalDecay;
+        sp.nonlinear = prm_.tensionMod;
+        sp.growl = prm_.growl;
+        sp.bodyDamping = prm_.bodyDamping;
+        sp.bodySize = prm_.bodySize;
+        sp.barSoftness = prm_.barSoftness;
+        sp.behindDecay = prm_.behindDecay;
+        sp.thumbHardness = prm_.thumbHardness;
+        sp.dragTime = prm_.dragTime;
+        sp.pickVariation = prm_.pickVariation;
         for (auto& s : str_)
             s.setParams (sp);
-        pickup_.set (prm_.pickup);
+        pickup_.set (prm_.pickup, prm_.coilShiftOct, prm_.coilQ);
         volCoef_ = 1.0 - std::exp (-1.0 / (0.01 * fs_));
         if (prm_.volumeCc < 0)
             volTarget_ = 1.0;
@@ -289,11 +315,14 @@ private:
         double extra = 0;
         for (int s = 0; s < kStrings; ++s)
             extra += std::exp2 (rawOffset (s) / 6.0) - 1.0; // added tension, in units of one string's
-        return -kCabinetDrop * extra;
+        return -kCabinetDrop * std::clamp (prm_.cabinetDrop, 0.0, 5.0) * extra;
     }
     double offsetFor (int s) const { return std::clamp (rawOffset (s) + cabinetDrop(), -4.0, 6.0); }
     // a fast move hits the stop harder: up to ~3 cents of overshoot from a quick stab, none when eased in
-    static double stopBounce (double travelPerSec) { return kStopBounce * std::clamp ((travelPerSec - 3.0) / 30.0, 0.0, 1.0); }
+    double stopBounce (double travelPerSec) const
+    {
+        return kStopBounce * std::clamp (prm_.stopBounce, 0.0, 5.0) * std::clamp ((travelPerSec - 3.0) / 30.0, 0.0, 1.0);
+    }
     void retune (double glide, int except = -1)
     {
         for (int s = 0; s < kStrings; ++s)
@@ -519,7 +548,8 @@ private:
         double fc = 1e9;
         if (prm_.volumePedal != EngineParams::Active)
         {
-            const double R = prm_.volumePedal == EngineParams::Passive500k ? 500e3 : 250e3, C = 700e-12;
+            const double R = prm_.volumePedal == EngineParams::Passive500k ? 500e3 : 250e3;
+            const double C = std::clamp (prm_.cablePf, 50.0, 3000.0) * 1e-12;
             const double rth = R * t * (1.0 - t);
             fc = 1.0 / (2.0 * kPi * std::max (rth, 1.0) * C);
         }

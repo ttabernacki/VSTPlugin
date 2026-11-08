@@ -301,7 +301,8 @@ int main()
         const double early = cents (peakHz (x, midiHz (64), 0.005, 0.04, 30), midiHz (64));
         const double late = cents (peakHz (x, midiHz (64), 1.0, 0.6, 30), midiHz (64));
         CHECK (early > 2.0 && early < 9.0, "hard pick starts %.1f cents sharp (2..9)", early);
-        CHECK (late > -0.2 && late < 0.8, "and comes down as the note decays (%.2f cents after 1 s)", late);
+        // (coupled planes push their frequencies apart: the long-tail mode sits a fraction of a cent low)
+        CHECK (late > -0.6 && late < 0.8, "and comes down as the note decays (%.2f cents after 1 s)", late);
         auto soft = render (3, 0.3, 0.3, quiet);
         const double se = cents (peakHz (soft, midiHz (64), 0.005, 0.04, 30), midiHz (64));
         CHECK (se < 1.0, "a soft pick hardly stretches the string (%.2f cents)", se);

@@ -100,7 +100,18 @@ int main()
         int missing = 0;
         for (auto* id : ids)
             missing += p.apvts.getParameter (id) == nullptr;
-        CHECK (missing == 0 && p.getParameters().size() == 16, "16 parameters");
+        for (const auto& a : swadv::params())
+            missing += p.apvts.getParameter (a.id) == nullptr;
+        const int expected = 16 + (int) swadv::params().size();
+        CHECK (missing == 0 && p.getParameters().size() == expected, "%d parameters (16 + %d advanced)", expected, (int) swadv::params().size());
+        int offCentre = 0;
+        for (const auto& a : swadv::params())
+            if (std::fabs (p.apvts.getParameter (a.id)->getValue() - 0.5f) > 1e-3f)
+            {
+                ++offCentre;
+                std::printf ("    %s: default at %.3f of the knob (raw %.3f)\n", a.id, p.apvts.getParameter (a.id)->getValue(), p.apvts.getRawParameterValue (a.id)->load());
+            }
+        CHECK (offCentre == 0, "every advanced knob's calibrated default sits at 12 o'clock");
         CHECK ((int) getPlain (p, "key") == 4 && (int) getPlain (p, "set") == 0, "defaults: key of E, chord set 1");
         CHECK (p.acceptsMidi() && ! p.producesMidi(), "takes MIDI");
         juce::AudioProcessor::BusesLayout mono, stereo, withIn;
@@ -216,6 +227,46 @@ int main()
         CHECK (rms (y, 0.2, 0.6) > 1e-3, "volume pedal Off: plays at full level");
     }
 
+    std::printf ("Advanced parameters\n");
+    {
+        // a chord at bar 7 through a part-way volume pedal, with a stab of the wheel into its stop:
+        // something for every advanced knob to act on
+        std::vector<Ev> ev = { { 0, MM::controllerEvent (1, 11, 100) },
+                               { S (0.05), MM::noteOn (1, 67, (juce::uint8) 120) },
+                               { S (0.35), MM::pitchWheel (1, 12000) },
+                               { S (0.36), MM::pitchWheel (1, 16383) } };
+        auto run = [&] (const char* id, float v) {
+            SteelwaveProcessor p;
+            prepare (p, kFs, 512);
+            setPlain (p, "set", 1); // Full: finger and thumb strings
+            if (id) setPlain (p, id, v);
+            return render (p, ev, 1.0, { 512 });
+        };
+        const auto ref = run (nullptr, 0);
+        double refE = 0;
+        for (float v : ref) refE += (double) v * v;
+        int bad = 0, inert = 0;
+        for (const auto& a : swadv::params())
+            for (float v : { a.min, a.max })
+            {
+                if (v == a.def)
+                    continue;
+                auto x = run (a.id, v);
+                double d = 0, pk = 0;
+                bool fin = true;
+                for (size_t i = 0; i < x.size(); ++i)
+                {
+                    fin &= std::isfinite (x[i]);
+                    pk = std::max (pk, (double) std::fabs (x[i]));
+                    d += (double) (x[i] - ref[i]) * (x[i] - ref[i]);
+                }
+                if (! fin || pk > 1.0) { ++bad; std::printf ("    %s = %g: peak %.2f%s\n", a.id, v, pk, fin ? "" : " (not finite)"); }
+                if (10 * std::log10 (d / refE + 1e-30) < -60) { ++inert; std::printf ("    %s = %g changes nothing\n", a.id, v); }
+            }
+        CHECK (bad == 0, "every advanced knob at both ends: finite, peak under 0 dBFS");
+        CHECK (inert == 0, "and every one changes the sound");
+    }
+
     std::printf ("Performance\n");
     {
         SteelwaveProcessor p;
@@ -235,9 +286,12 @@ int main()
         SteelwaveProcessor p;
         prepare (p, kFs, 512);
         std::unique_ptr<juce::AudioProcessorEditor> ed (p.createEditor());
-        ed->setSize (900, 460);
+        ed->setSize (900, 520);
         auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
         CHECK (img.getWidth() == 900, "editor opens and paints");
+        if (auto* se = dynamic_cast<SteelwaveEditor*> (ed.get())) se->showPage (true);
+        auto img2 = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
+        CHECK (img2.getWidth() == 900, "advanced page opens and paints");
     }
 
     std::printf ("\n%s (%d failure%s)\n", failures ? "FAILED" : "ALL PASSED", failures, failures == 1 ? "" : "s");
