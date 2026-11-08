@@ -484,13 +484,13 @@ public:
                 y[0] = behindC_ * h + behindTheta_ * yb;
                 yb = behindC_ * yb - behindTheta_ * h;
             }
-            behindLine_.write ((float) (yb + exc * kBehindIn * behindGate_ + noise * 0.1 * noiseExcite));
+            behindLine_.write ((float) (yb + exc * kBehindIn * behindGate_ + noise * kNoiseExcite * noiseExcite));
         }
         double inst = 0.0;
         for (int k = 0; k < 2; ++k)
         {
             // a little of the contact noise excites the string; most of it is heard directly
-            const double in = y[k] + exc * kExcSplit[k] + noise * 0.1 * noiseExcite * kExcSplit[k] + bridgeIn * kBridgeSplit[k];
+            const double in = y[k] + exc * kExcSplit[k] + noise * kNoiseExcite * noiseExcite * kExcSplit[k] + bridgeIn * kBridgeSplit[k];
             pol_[(size_t) k].line.write ((float) in);
             out += in * kPickupSplit[k];
             inst += in * in;
@@ -508,8 +508,10 @@ public:
         // pickup position comb (velocity pickup at a fixed distance from the bridge)
         combLine_.write ((float) out);
         double s = out - combLine_.read (std::max (combDelay_, 3.0));
-        // the direct share of contact noise the pickup hears, and the bridge's lengthwise pull
-        s += noise + pull;
+        // A magnetic pickup only hears the strings move: the scrape reaches it mostly through the string
+        // it sets vibrating (above), and only a little directly (the bar rattling the string right at
+        // the contact). Plus the bridge's lengthwise pull.
+        s += kNoiseDirect * noise + pull;
         // DC guard
         dc_ += 0.0005 * (s - dc_);
         s -= dc_;
@@ -683,7 +685,11 @@ private:
     LossFilter behindLoss_;
     double behindTheta_ = 0, behindC_ = 1, behindComp_ = 0, behindAmt_ = 0, behindGate_ = 0, behindOut_ = 0;
     static constexpr double kBehindMax = 0.002; // resonant exchange per pass at Behind bar = 1 (weak: the bar is heavy)
-    static constexpr double kBehindIn = 0.5, kBehindOut = 0.06; // the pick's impulse through the bar, and back
+    static constexpr double kBehindIn = 0.5, kBehindOut = 0.06;
+    // Bar scrape, as a pickup hears it: mostly through the played string it sets moving (whose
+    // resonances lift it, so it's kept small), a little directly. About 50 dB below a medium pick
+    // at the default Bar noise.
+    static constexpr double kNoiseDirect = 0.25, kNoiseExcite = 0.035; // the pick's impulse through the bar, and back
     Glide bar_, pedal_, vib_;
     std::array<double, 4096> exc_ {};
     int excLen_ = 0, excPos_ = 0, excDelay_ = 0, dampPulse_ = 0, dampLen_ = 1, ctl_ = 0;

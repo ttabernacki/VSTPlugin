@@ -266,6 +266,24 @@ int main()
             const double with = offChord (0.5), without = offChord (0.0);
             CHECK (with < without + 1.5, "0.5 s after a legato slide, sound outside the chord: %.1f dB with bar noise, %.1f dB without", with, without);
         }
+        // the scrape of a legato chord slide, isolated (same render with and without bar noise):
+        // through a pickup it's a faint texture, far below the picked chord
+        {
+            auto slide = [&] (double noise) {
+                EngineParams q = p;
+                q.barNoise = noise;
+                Script sl;
+                sl.at (0.05, [] (SteelEngine& e) { e.noteOn (60, 0.75); });
+                sl.at (0.8, [] (SteelEngine& e) { e.noteOn (65, 0.75); });
+                sl.at (0.85, [] (SteelEngine& e) { e.noteOff (60); });
+                return render (q, 0, sl, 1.2);
+            };
+            auto a = slide (0.5), z = slide (0.0);
+            std::vector<float> d (a.size());
+            for (size_t i = 0; i < a.size(); ++i) d[i] = a[i] - z[i];
+            const double rel = db (rms (d, 0.8, 1.1)) - db (rms (z, 0.05, 0.55));
+            CHECK (rel < -44 && rel > -60, "a legato chord slide's scrape: %.1f dB below the picked chord (44..60)", -rel);
+        }
         Script sb;
         sb.at (0.05, [] (SteelEngine& e) { e.noteOn (60, 0.8); });
         sb.at (0.8, [] (SteelEngine& e) { e.noteOff (60); });

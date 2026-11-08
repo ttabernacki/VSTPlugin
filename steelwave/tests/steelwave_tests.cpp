@@ -277,7 +277,7 @@ int main()
         auto withN = slide (0.5, 7), without = slide (0.0, 7);
         const double rel = db (rms (withN, 0.3, 0.7) / pickRef (7));
         CHECK (rms (without, 0.3, 0.7) < 1e-9, "Bar noise 0: silent slide");
-        CHECK (rel > -42 && rel < -28, "wound string slide (default level): %.1f dB below a medium pick (28..42)", -rel);
+        CHECK (rel > -54 && rel < -42, "wound string slide (default level): %.1f dB below a medium pick (42..54: through a pickup)", -rel);
         auto plain = slide (0.5, 2);
         const double relP = db (rms (plain, 0.3, 0.7) / pickRef (2));
         CHECK (relP < rel - 6, "plain string: %.1f dB below a pick, quieter than wound", -relP);
