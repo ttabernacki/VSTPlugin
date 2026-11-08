@@ -376,6 +376,61 @@ int main()
                "CC21 = B pedal: G# -> A, B stays");
     }
 
+    std::printf ("Pedal mechanics\n");
+    {
+        // hold an E chord (strings 3 4 5 6), move the wheel, read string pitches
+        auto hold = [&] (std::function<void (Script&)> moves, double until, std::vector<std::pair<double, double>>* trace = nullptr, int traceString = -1) {
+            SteelEngine e;
+            e.prepare (kFs);
+            e.setParams (p);
+            Script sc;
+            sc.at (0.05, [] (SteelEngine& en) { en.noteOn (60, 0.7); });
+            moves (sc);
+            std::sort (sc.ev.begin(), sc.ev.end(), [] (auto& a, auto& b) { return a.first < b.first; });
+            std::vector<float> buf (64);
+            size_t k = 0;
+            for (double t = 0; t < until; t += 64.0 / kFs)
+            {
+                while (k < sc.ev.size() && sc.ev[k].first <= t) sc.ev[k++].second (e);
+                e.process (buf.data(), 64);
+                if (trace) trace->push_back ({ t, e.stringSemis (traceString) });
+            }
+            std::array<double, kStrings> semis {};
+            for (int s = 0; s < kStrings; ++s) semis[(size_t) s] = e.stringSemis (s);
+            return semis;
+        };
+        // half way through a whole-step pull: a little past a semitone (tension, not pitch, is linear)
+        auto half = hold ([] (Script& sc) { sc.at (0.3, [] (SteelEngine& e) { e.pitchWheel (0.5); }); }, 0.8);
+        CHECK (half[4] > 1.02 && half[4] < 1.09, "half wheel: string 5 (B -> C#) is %.3f semitones up (tension-linear: ~1.06)", half[4]);
+        // cabinet drop: the strings that don't move sag a little when others are pulled sharp
+        auto full = hold ([] (Script& sc) { sc.at (0.3, [] (SteelEngine& e) { e.pitchWheel (1.0); }); }, 0.8);
+        const double drop = 100.0 * full[3];
+        CHECK (drop < -0.5 && drop > -2.5, "A+B through the wheel: unpulled string 4 sags %.2f cents (cabinet drop)", drop);
+        auto ab = hold ([] (Script& sc) { sc.at (0.3, [] (SteelEngine& e) { e.controller (kPedalCcFirst + PedA, 1.0); e.controller (kPedalCcFirst + PedB, 1.0); }); }, 0.8);
+        CHECK (100.0 * ab[3] < -1.5 && 100.0 * ab[3] > -3.0, "A+B pedals on CCs (4 strings pulled): string 4 sags %.2f cents", 100.0 * ab[3]);
+        auto lkr = hold ([] (Script& sc) { sc.at (0.3, [] (SteelEngine& e) { e.controller (kPedalCcFirst + LKR, 1.0); }); }, 0.8);
+        CHECK (lkr[2] > 0.0, "lowering a lever relieves the cabinet: string 3 rises %.2f cents", 100.0 * lkr[2]);
+        // stops: a quick stab overshoots and settles; an eased-in move doesn't
+        auto overshoot = [&] (double rampSec) {
+            std::vector<std::pair<double, double>> tr;
+            hold ([rampSec] (Script& sc) {
+                for (int i = 1; i <= 10; ++i)
+                    sc.at (0.3 + rampSec * i / 10.0, [i] (SteelEngine& e) { e.pitchWheel (i / 10.0); });
+            }, 1.4, &tr, 4);
+            const double final = tr.back().second;
+            double peak = -1e9, late = 0;
+            for (auto& [t, v] : tr)
+            {
+                if (t > 0.3 && t < 0.3 + rampSec + 0.15) peak = std::max (peak, v);
+                if (t > 0.3 + rampSec + 0.2 && t < 0.3 + rampSec + 0.3) late = std::max (late, std::fabs (v - final));
+            }
+            return std::make_pair (100.0 * (peak - final), 100.0 * late);
+        };
+        const auto fast = overshoot (0.02), slow = overshoot (0.6);
+        CHECK (fast.first > 1.0 && fast.first < 5.0 && fast.second < 0.3, "a quick stab into the stop overshoots %.1f cents and settles (%.2f cents left after 0.2 s)", fast.first, fast.second);
+        CHECK (slow.first < 0.5, "an eased-in move doesn't (%.2f cents)", slow.first);
+    }
+
     std::printf ("Sympathetic strings\n");
     {
         auto run = [&] (double sym) {

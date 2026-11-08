@@ -307,13 +307,16 @@ int main()
         CHECK (se < 1.0, "a soft pick hardly stretches the string (%.2f cents)", se);
         StringParams lin = quiet;
         lin.nonlinear = 0;
+        lin.pickupNonlinear = 0; // the string's own nonlinearity is what's being tested here
         auto y = render (3, 2.0, 1.0, lin);
         const double le = cents (peakHz (y, midiHz (64), 0.005, 0.04, 30), midiHz (64));
-        CHECK (std::fabs (le) < 0.6, "Nonlinear 0: a linear string, in tune from the start (%.2f cents)", le);
+        // (the pickup hears mostly the vertical plane, tuned 1.1 cents above the horizontal for the beating)
+        CHECK (std::fabs (le) < 1.0, "Nonlinear 0: a linear string, in tune from the start (%.2f cents)", le);
         // growl: what the nonlinearity adds, apart from the pitch, relative to the note
         auto growl = [&] (double vel) {
-            StringParams on = quiet;
-            auto a = render (9, 1.0, vel, on), b = render (9, 1.0, vel, lin);
+            StringParams on = quiet, off = quiet;
+            off.nonlinear = 0;
+            auto a = render (9, 1.0, vel, on), b = render (9, 1.0, vel, off);
             double d = 0, r = 0;
             for (size_t i = 0; i < (size_t) (0.05 * kFs); ++i) { d += (double) (a[i] - b[i]) * (a[i] - b[i]); r += (double) b[i] * b[i]; }
             return 10 * std::log10 (d / r);
@@ -321,6 +324,66 @@ int main()
         const double gHard = growl (1.0), gSoft = growl (0.3);
         CHECK (gHard > -40 && gHard < -12, "hard pick on the low B: the nonlinearity changes the first 50 ms by %.1f dB re the note", gHard);
         CHECK (gSoft < gHard - 10, "a soft pick much less (%.1f dB)", gSoft);
+    }
+
+    std::printf ("Pickup\n");
+    {
+        // the field strengthening near the pole: what it adds to the sound, growing with playing strength
+        auto added = [&] (int si, double vel) {
+            StringParams on = quiet, off = quiet;
+            on.pickVariation = off.pickVariation = 0;
+            off.pickupNonlinear = 0;
+            auto a = render (si, 0.4, vel, on), b = render (si, 0.4, vel, off);
+            double d = 0, r = 0;
+            for (size_t i = 0; i < a.size(); ++i) { d += (double) (a[i] - b[i]) * (a[i] - b[i]); r += (double) b[i] * b[i]; }
+            return 10 * std::log10 (d / r);
+        };
+        const double hard = added (3, 1.0), soft = added (3, 0.3), hardLow = added (9, 1.0);
+        CHECK (hard > -32 && hard < -14, "hard pick: the pickup's curve adds %.1f dB (re the note)", hard);
+        CHECK (soft < hard - 8, "soft pick: much less (%.1f dB)", soft);
+        CHECK (hardLow > -32 && hardLow < -14, "low B, hard: %.1f dB (pole set lower under the wound strings)", hardLow);
+    }
+
+    std::printf ("Picking hand\n");
+    {
+        // no two picks quite alike: same string, same velocity, slightly different each time
+        SteelString st;
+        st.prepare (kFs, strings[3]);
+        StringParams q = quiet;
+        st.setParams (q);
+        std::vector<float> a ((size_t) (0.3 * kFs)), b ((size_t) (0.3 * kFs));
+        st.pluck (0.7);
+        for (auto& v : a) v = st.process();
+        st.setDamp (1);
+        for (int i = 0; i < (int) (0.5 * kFs); ++i) st.process();
+        st.pluck (0.7);
+        for (auto& v : b) v = st.process();
+        double d = 0, r = 0;
+        for (size_t i = 0; i < a.size(); ++i) { d += (double) (a[i] - b[i]) * (a[i] - b[i]); r += (double) a[i] * a[i]; }
+        const double lvl = db (rms (a, 0, 0.3)) - db (rms (b, 0, 0.3));
+        CHECK (10 * std::log10 (d / r) > -30 && std::fabs (lvl) < 1.5, "two picks differ in detail (%.1f dB) but not in level (%.2f dB)", 10 * std::log10 (d / r), lvl);
+        // the pick drags before it lets go: the note starts ~1-3 ms after the pick lands
+        auto onset = [&] (int si, double vel) {
+            auto x = render (si, 0.05, vel, q);
+            for (size_t i = 0; i < x.size(); ++i)
+                if (std::fabs (x[i]) > 0.02) return 1000.0 * i / kFs;
+            return 99.0;
+        };
+        const double fingerHard = onset (3, 1.0), fingerSoft = onset (3, 0.4), thumb = onset (8, 0.4);
+        CHECK (fingerHard > 0.5 && fingerHard < 2.0 && fingerSoft > fingerHard && fingerSoft < 3.5,
+               "finger pick lets go after %.1f ms (hard) / %.1f ms (soft)", fingerHard, fingerSoft);
+        CHECK (thumb > fingerSoft * 0.95 && thumb < 4.5, "thumb pick (string 9) drags a little longer: %.1f ms", thumb);
+        // the thumb (plastic, low strings) is softer than the metal finger picks
+        auto bright = [&] (int si) {
+            StringParams r2 = quiet;
+            r2.pickVariation = 0;
+            auto x = render (si, 0.3, 0.8, r2);
+            const double f = midiHz (strings[(size_t) si].openMidi);
+            double num = 0, den = 0;
+            for (int k = 1; k <= 20; ++k) { const double m = dftMag (x, k * f, 0.01, 0.12); num += k * m; den += m; }
+            return num / den;
+        };
+        CHECK (bright (4) > bright (5), "finger pick on string 5 brighter than the thumb on string 6 (centroid %.2f vs %.2f harmonics)", bright (4), bright (5));
     }
 
     std::printf ("Bridge and body\n");

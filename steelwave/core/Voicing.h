@@ -67,6 +67,14 @@ inline std::array<int, kStrings> copedentOffsets (uint32_t mask)
     }
     return off;
 }
+// Pitch part-way through a pull: a pedal changes tension in proportion to its travel, and pitch goes
+// with the square root of tension, so a whole-step pull is a little past a semitone half way.
+inline double tensionGlide (double fromSemis, double toSemis, double travel)
+{
+    const double ra = std::exp2 (fromSemis / 6.0), rb = std::exp2 (toSemis / 6.0); // tension ratios (f^2)
+    return 6.0 * std::log2 (std::max (ra + (rb - ra) * std::clamp (travel, 0.0, 1.0), 1e-6));
+}
+
 // continuous version (each control 0..1 of its travel)
 inline std::array<double, kStrings> copedentOffsets (const std::array<double, kControls>& travel)
 {
@@ -77,7 +85,7 @@ inline std::array<double, kStrings> copedentOffsets (const std::array<double, kC
         double up = 0, dn = 0;
         for (int k = 0; k < kControls; ++k)
         {
-            const double v = c[(size_t) k][(size_t) s] * std::clamp (travel[(size_t) k], 0.0, 1.0);
+            const double v = tensionGlide (0.0, c[(size_t) k][(size_t) s], travel[(size_t) k]);
             up = std::max (up, v);
             dn = std::min (dn, v);
         }

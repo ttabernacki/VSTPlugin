@@ -77,7 +77,7 @@ Sets: Scale, Scale high (bar +12), Whole-step bends, Half-step bends.
 |---|---|---|
 | Glide | 30-1200 ms | Legato bar slide time |
 | Strum | 0-60 ms | Pick spread across a chord, low string first |
-| Pick | Velocity pulse lasting the wave's round trip to the pick point, smoothed over the pick's contact time (harder = brighter), plus a metal tick at 2.5-4.5 kHz. Re-picking a ringing string first catches it briefly |
+| Picking hand | Thumb pick (plastic, softer, ~2 cm further from the bridge, pushing the string down and across) on strings 6-10; metal finger picks (pulling up and across) on 1-5. Each pick catches the string and drags it 0.8-2.5 ms before slipping off (longer for soft strokes and the thumb), with a faint scrape while it drags, more on wound strings. The release is a velocity pulse lasting the wave's round trip to the pick point, smoothed over the contact time (harder = brighter), plus a metal tick. No two picks are quite alike: position varies by +-6 mm, and stroke angle and contact time vary too. Re-picking a ringing string first catches it briefly |
 | Brightness | 0-100 % | How long the high partials ring (old → new strings) |
 | Sustain | 25-200 % | Decay times |
 | Bar noise | 0-100 % | Contact noise of the bar sliding over the strings |
@@ -97,8 +97,9 @@ vibration plane. Each loop has:
 - a time-varying fractional delay (6-point Lagrange) recomputed every sample, so slides and bends are
   continuous;
 - loss and stiffness filters (stiffness solved per string from physical inharmonicity);
-- tuning compensation (including the body absorber), within 0.5 cents everywhere at moderate
-  playing. Loud notes are slightly sharp, as on a real string.
+- tuning compensation (including the body absorber), within 0.75 cents everywhere at moderate
+  playing. The horizontal plane (the long tail) is on pitch; the vertical sits 1.1 cents sharp for
+  the slow beating. Loud notes are slightly sharp, as on a real string.
 
 Pitch is split the way the instrument does it:
 - the **bar** shortens the string;
@@ -118,10 +119,11 @@ The pick and pickup are placed in metres from the bridge, so their comb filters 
 | Behind the bar | The bar splits each string. The bar-to-nut part (1 - 2^(-fret/12) of the string) is short, high and usually out of key: at fret 3 on the E string it rings ~2 kHz over a G4. Moving the bar or vibrato moves it the opposite way to the note. It's a short, heavily damped second loop (T60 ~1 s). The pick's impulse passes through the bar and rings it, and the pickup hears it go by (about 30 dB below the note at Behind bar 100%). Where both halves share a pitch (fret 12) they also trade a little energy, losslessly: no drain, pitch within 0.3 cents |
 | Bar | A heavy rod resting on the string, not a hard stop: high partials die a little faster the further up the neck (up to ~25% at the 24th fret) |
 | Volume pedal | A passive pedal is a pot between the pickup and the cable. Part-way down, the resistance it leaves in the path (R t(1-t)) and ~700 pF of cable make a low-pass: open at both ends, darkest around half level (250k: ~3.6 kHz, about 7 dB less treble; 500k darker). Swells get brighter as they open, as with a real passive pedal. Active pedals have no loss |
-| Pickup | Comb at the pickup's position, plus a resonant coil/cable low-pass |
+| Pickup | Senses motion toward the pole (vertical) more than across it (0.8 : 1). It hears the wave going in and coming back from the bridge (a comb at its position), averaged over its ~18 mm field, which rounds off the top of the low strings where the waves are slow. The field strengthens as the string swings toward the pole (sensitivity (1 - y/d)^-2), adding a little second harmonic on hard picks (~21 dB below the note, ~36 dB on soft ones; pole pieces sit lower under the wound strings). Then the coil/cable resonance |
+| Pedals and levers | Pull tension in proportion to their travel, and pitch follows the square root of tension: half way through a whole-step pull is ~1.05 semitones. Cabinet drop: strings pulled sharp load the cabinet, which gives, so the other strings sag flat (A+B: ~1.3-2 cents); lowering levers relieve it. Stops: a quick stab into a stop overshoots up to ~3 cents and settles in ~50 ms (the changer springing back); an eased-in move doesn't. Releasing onto the rest stop bounces half as much |
 
 **Engine** (`core/SteelEngine.h`): 10 strings sharing one bar, sample-accurate MIDI, strums, the
-volume pedal and vibrato. 10 strings use about 7% of one core at 48 kHz.
+volume pedal and vibrato. 10 strings use about 8% of one core at 48 kHz.
 
 ## Build, test, listen
 ```
@@ -135,8 +137,9 @@ strictness 10. Bundles are in the `Steelwave-<os>` artifacts.
 
 The tests cover:
 - tuning, glides, decay, picking, bar noise, tension modulation, the two-stage decay, body
-  resonances, behind the bar and stability (`steelwave_tests`);
+  resonances, behind the bar, the pickup, the picking hand and stability (`steelwave_tests`);
 - every voicing in every key, the single-note maps, the wheel, legato, release/sustain, the volume
-  pedal and its tone, CC pedals, sympathetic coupling and a 60 s random-MIDI stress run (`steelwave_engine_tests`);
+  pedal and its tone, CC pedals, pedal mechanics (travel, cabinet drop, stops), sympathetic coupling and a
+  60 s random-MIDI stress run (`steelwave_engine_tests`);
 - host-style tests: parameters, state, keyswitches, bit-identical output at any block size, sample
   rates, bypass and the editor (`SteelwavePluginTests`).

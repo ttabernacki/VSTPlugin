@@ -77,7 +77,8 @@ public:
         volLp_ = 0;
         volG_ = 1.0;
         vibPh_ = driftPh_ = 0;
-        clock_ = 0;
+        clock_ = wheelClock_ = 0;
+        ccClock_.fill (0);
         rebuildSingle();
         applyParams();
     }
@@ -134,8 +135,28 @@ public:
     }
     void pitchWheel (double w) // -1..1
     {
-        wheel_ = std::clamp (w, -1.0, 1.0);
+        w = std::clamp (w, -1.0, 1.0);
+        const double dt = std::max ((double) (clock_ - wheelClock_) / fs_, 0.001);
+        const double speed = std::fabs (w - wheel_) / dt; // travel per second
+        const double old = wheel_;
+        wheel_ = w;
+        wheelClock_ = clock_;
         updatePedals (0.008);
+        // the pedals behind the wheel hitting their stops
+        for (int side : { 1, -1 })
+        {
+            const bool arrive = old * side < kStopAt && w * side >= kStopAt;
+            const bool leave = old * side > 1.0 - kStopAt && w * side <= 1.0 - kStopAt;
+            if (! arrive && ! leave)
+                continue;
+            for (int s = 0; s < kStrings; ++s)
+            {
+                const auto& st = sst_[(size_t) s];
+                const double moveDir = (side > 0 ? st.up : st.down) - st.rest; // which way this string goes
+                if (moveDir != 0.0)
+                    str_[(size_t) s].bump ((arrive ? 1.0 : -0.5) * stopBounce (speed) * (moveDir > 0 ? 1.0 : -1.0));
+            }
+        }
     }
     void controller (int cc, double v) // v 0..1
     {
@@ -152,8 +173,17 @@ public:
             volTarget_ = v;
         else if (cc >= kPedalCcFirst && cc < kPedalCcFirst + kControls)
         {
-            ccTravel_[(size_t) (cc - kPedalCcFirst)] = v;
+            const int k = cc - kPedalCcFirst;
+            const double dt = std::max ((double) (clock_ - ccClock_[(size_t) k]) / fs_, 0.001);
+            const double speed = std::fabs (v - ccTravel_[(size_t) k]) / dt, old = ccTravel_[(size_t) k];
+            ccTravel_[(size_t) k] = v;
+            ccClock_[(size_t) k] = clock_;
             updatePedals (0.01);
+            const bool arrive = old < kStopAt && v >= kStopAt, leave = old > 1.0 - kStopAt && v <= 1.0 - kStopAt;
+            if (arrive || leave)
+                for (int s = 0; s < kStrings; ++s)
+                    if (const int c = e9Copedent()[(size_t) k][(size_t) s]; c != 0)
+                        str_[(size_t) s].bump ((arrive ? 1.0 : -0.5) * stopBounce (speed) * (c > 0 ? 1.0 : -1.0));
         }
         else if (cc == 120 || cc == 123)
             stopAll();
@@ -215,6 +245,9 @@ public:
     static constexpr double kOutputScale = 0.12;
     static constexpr double kLandSec = 0.006;
     static constexpr double kIdleContact = 0.2;
+    static constexpr double kCabinetDrop = 0.026; // semitones per string's worth of added tension (A+B ~ -2 cents)
+    static constexpr double kStopBounce = 0.03;   // semitones of overshoot from a fast hit
+    static constexpr double kStopAt = 0.995;
 
 private:
     struct StringState
@@ -241,12 +274,31 @@ private:
             volTarget_ = 1.0;
     }
 
-    double offsetFor (int s) const
+    // where this string's pedals and levers have it, before cabinet drop
+    double rawOffset (int s) const
     {
         const auto& st = sst_[(size_t) s];
-        double o = st.rest + (wheel_ >= 0 ? wheel_ * (st.up - st.rest) : -wheel_ * (st.down - st.rest));
+        double o = tensionGlide (st.rest, wheel_ >= 0 ? st.up : st.down, std::fabs (wheel_));
         o += cc_[(size_t) s];
         return std::clamp (o, -4.0, 6.0);
+    }
+    // Cabinet drop: strings pulled sharp add tension to the cabinet, which gives a little, so every
+    // string sags slightly flat (A+B: ~2 cents); lowered strings relieve it.
+    double cabinetDrop() const
+    {
+        double extra = 0;
+        for (int s = 0; s < kStrings; ++s)
+            extra += std::exp2 (rawOffset (s) / 6.0) - 1.0; // added tension, in units of one string's
+        return -kCabinetDrop * extra;
+    }
+    double offsetFor (int s) const { return std::clamp (rawOffset (s) + cabinetDrop(), -4.0, 6.0); }
+    // a fast move hits the stop harder: up to ~3 cents of overshoot from a quick stab, none when eased in
+    static double stopBounce (double travelPerSec) { return kStopBounce * std::clamp ((travelPerSec - 3.0) / 30.0, 0.0, 1.0); }
+    void retune (double glide, int except = -1)
+    {
+        for (int s = 0; s < kStrings; ++s)
+            if (s != except)
+                str_[(size_t) s].setPedal (offsetFor (s), glide);
     }
     void updatePedals (double glide)
     {
@@ -366,8 +418,8 @@ private:
             st.down = v.down[(size_t) s];
             st.inChord = true;
             st.owner = -1;
-            str_[(size_t) s].setPedal (offsetFor (s), legato ? prm_.glide : 0.004);
         }
+        retune (legato ? prm_.glide : 0.004); // the chord's strings, and everyone's cabinet drop
         moveBarTo (bar, legato);
         chordSlot_ = slot;
         // a lifted bar takes a few ms to land: pick after that, or the attack would scoop
@@ -423,9 +475,11 @@ private:
         if (sameString) // a legato line on one string: slide there instead of picking again
         {
             str_[(size_t) n.string].setPedal (offsetFor (n.string), prm_.glide * 0.6);
+            retune (0.01, n.string);
             return;
         }
         str_[(size_t) n.string].setPedal (offsetFor (n.string), 0.003);
+        retune (0.01, n.string);
         cancelPicks (n.string);
         if (delay > 0)
             schedule (n.string, delay, vel);
@@ -474,7 +528,8 @@ private:
     double volLp_ = 0, volG_ = 1.0;
     double wheel_ = 0, mod_ = 0, vol_ = 1, volTarget_ = 1, volCoef_ = 0.002, vibPh_ = 0, driftPh_ = 0;
     bool sustainPedal_ = false;
-    int64_t clock_ = 0;
+    int64_t clock_ = 0, wheelClock_ = 0;
+    std::array<int64_t, kControls> ccClock_ {};
     Rng rng_;
 };
 } // namespace sw

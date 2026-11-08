@@ -65,6 +65,15 @@ public:
         w_ = (w_ + 1) & mask_;
     }
     // value written `d` samples ago (d >= 3; d = 1 is the last write); call before write()
+    // linear interpolation: for short, smoothed taps (the pickup's aperture) where 6-point accuracy is wasted
+    double readLinear (double d) const
+    {
+        d = std::clamp (d, 1.0, (double) maxDelay());
+        const int n = (int) d;
+        const double f = d - n;
+        const float a = buf_[(size_t) ((w_ - n) & mask_)], b = buf_[(size_t) ((w_ - n - 1) & mask_)];
+        return a + f * (b - a);
+    }
     double read (double d) const
     {
         d = std::clamp (d, 3.0, (double) maxDelay());
@@ -224,6 +233,7 @@ struct StringSpec
     double t60High = 1.0;   // s, at 5 kHz
     double inharmCents10 = 3.0; // stiffness: how sharp the 10th partial of the open string is (cents)
     double windPitchM = 0.0003; // wrap-wire spacing (wound strings), sets contact-noise pitch
+    bool thumb = false;         // picked with the thumb pick (the low strings) rather than a finger pick
 };
 
 // Standard 10-string E9 (string 1 = highest-pitched, nearest the player's far side).
@@ -236,12 +246,13 @@ inline std::array<StringSpec, 10> e9Strings()
         s[(size_t) i].openMidi = midi[i];
         s[(size_t) i].wound = i >= 5;
         const double t = (midi[i] - 47.0) / (68.0 - 47.0); // 0 low .. 1 high
-        s[(size_t) i].t60Low = 11.0 - 5.0 * t;
+        s[(size_t) i].t60Low = 12.1 - 5.5 * t;
         s[(size_t) i].t60High = s[(size_t) i].wound ? 0.8 : 1.3;
         // B = pi^3 E d^4 / (64 T L^2): ~3 cents at partial 10 for the plain .014 E, less for
         // thinner plain strings and for wound strings (thin core); grows as the bar shortens the string
         s[(size_t) i].inharmCents10 = s[(size_t) i].wound ? 1.5 : 2.0 + 1.5 * (1.0 - t);
         s[(size_t) i].windPitchM = 0.00025 + 0.0001 * (1.0 - t);
+        s[(size_t) i].thumb = i >= 5; // thumb pick on 6-10, metal finger picks on 1-5
     }
     return s;
 }
@@ -259,6 +270,8 @@ struct StringParams
     double polDetuneCents = 1.1;// vertical vs horizontal polarisation (slow beating)
     double nonlinear = 1.0;     // tension modulation and its growl (0 = a linear string)
     double behindBar = 0.5;     // how freely the string behind the bar rings (0 = muted by the hand)
+    double pickupNonlinear = 1.0; // the pickup's magnetic field getting stronger as the string nears the pole
+    double pickVariation = 1.0;   // how much each pick differs from the last (position, angle, contact)
 };
 
 class SteelString
@@ -273,7 +286,10 @@ public:
         const int maxD = (int) std::ceil (fs / (fOpen_ * std::pow (2.0, -4.0 / 12.0))) + 16;
         for (auto& p : pol_)
             p.line.allocate (maxD);
-        combLine_.allocate ((int) std::ceil (0.004 * fs) + 8);
+        combLine_.allocate ((int) std::ceil (0.006 * fs) + 96);
+        pickInteg_ = 2.0 * kPi * 1000.0 / fs; // velocity -> displacement (scaled), leaking below ~15 Hz
+        pickLeak_ = 15.0 / 1000.0;
+        bumpW_ = 2.0 * kPi * 22.0;
         behindLine_.allocate (maxD); // the segment behind the bar is never longer than 3/4 of the string
         rng_.s = 0x1234567u + (uint32_t) (spec.openMidi * 7919);
         cDisp_ = solveDispersion (fs, fOpen_, spec.inharmCents10);
@@ -310,6 +326,9 @@ public:
         behindLine_.clear();
         behindLoss_.z = 0;
         behindTheta_ = behindAmt_ = behindGate_ = behindOut_ = 0;
+        pickY_ = bumpX_ = bumpV_ = 0;
+        dragLeft_ = dragLen_ = 0;
+        dragBp_.reset();
         bar_.jump (0);
         pedal_.jump (0);
         vib_.jump (0);
@@ -350,7 +369,7 @@ public:
     // how hard the bar presses this string (1 = a played string, less for ones just under the bar)
     void setContact (double c) { contact_ = std::clamp (c, 0.0, 1.0); }
 
-    double currentSemis() const { return bar_.x + pedal_.x + vib_.x; }
+    double currentSemis() const { return bar_.x + pedal_.x + vib_.x + bumpX_; }
     double currentHz() const { return fOpen_ * std::pow (2.0, currentSemis() / 12.0); }
     bool isSounding() const { return energy_ > 1e-9 || excPos_ < excLen_ || excDelay_ > 0; }
     double level() const { return energy_; } // mean square at the bridge (roughly)
@@ -363,10 +382,22 @@ public:
         velocity = std::clamp (velocity, 0.0, 1.0);
         damp_ = dampTarget_ = 0;
         const bool ringing = energy_ > 1e-6;
-        excDelay_ = ringing ? (int) (0.004 * fs_) : 0;
-        dampPulse_ = dampLen_ = excDelay_;
+        // The pick catches the string and drags it before slipping off: longer for a soft stroke and
+        // for the thumb pick (thicker, rounder). A ringing string is also damped by the catch.
+        const double vary = std::clamp (prm_.pickVariation, 0.0, 1.0);
+        const double dragMs = (0.8 + 1.7 * (1.0 - velocity)) * (spec_.thumb ? 1.3 : 1.0) * (1.0 + 0.15 * vary * rng_.next());
+        excDelay_ = (int) (std::max (dragMs, ringing ? 4.0 : 0.0) * 1e-3 * fs_);
+        dampPulse_ = dampLen_ = ringing ? excDelay_ : 0;
         if (ringing) // ~ -10 dB over the catch, whatever the loop length
             pickMin_ = std::pow (0.3, (fs_ / currentHz()) / (0.5 * excDelay_));
+        // while it drags, the pick rubs the string: a faint scrape, more on wound strings
+        dragLen_ = dragLeft_ = excDelay_;
+        dragAmp_ = 0.012 * (0.3 + 0.7 * velocity) * (spec_.wound ? 1.0 : 0.35) * (spec_.thumb ? 0.7 : 1.0);
+        dragBp_.bandpass (spec_.wound ? 2600.0 : 4200.0, 1.2, fs_);
+        // which way the pick moves the string: fingers pull up and across, the thumb pushes down and across
+        const double tilt = 0.12 * vary * rng_.next();
+        excSplit_[0] = (spec_.thumb ? 0.7 : 0.85) * (1.0 + tilt);
+        excSplit_[1] = (spec_.thumb ? 0.85 : 0.7) * (1.0 - tilt);
         buildExcitation (velocity);
     }
 
@@ -388,11 +419,20 @@ public:
         bar_.step (dt);
         pedal_.step (dt);
         vib_.step (dt);
-        const double semis = bar_.x + pedal_.x + vib_.x + tension_;
+        // a pedal hitting its stop: the changer and rod spring back a little (damped ~22 Hz wobble)
+        bumpV_ += (-bumpW_ * bumpW_ * bumpX_ - 2.0 * 0.3 * bumpW_ * bumpV_) * dt;
+        bumpX_ += bumpV_ * dt;
+        const double semis = bar_.x + pedal_.x + vib_.x + tension_ + bumpX_;
         const double period = fs_ / (fOpen_ * std::exp2 (semis / 12.0));
 
-        // excitation (after the pick has caught a ringing string)
-        double exc = 0.0;
+        // excitation, after the pick has caught and dragged the string
+        double exc = 0.0, drag = 0.0;
+        if (dragLeft_ > 0)
+        {
+            const double env = std::sin (kPi * (double) (dragLen_ - dragLeft_) / std::max (dragLen_, 1));
+            drag = dragAmp_ * env * dragBp_.process (rng_.next());
+            --dragLeft_;
+        }
         if (excDelay_ > 0)
             --excDelay_;
         else if (excPos_ < excLen_)
@@ -450,6 +490,8 @@ public:
         {
             auto& p = pol_[(size_t) k];
             const double comp = p.compA + (p.compB - p.compA) * frac;
+            // the horizontal plane (the long tail, what a tuner settles on) is on pitch; the vertical a
+            // touch sharp, for the slow beating
             const double per = k == 0 ? period : period * polRatio_;
             y[k] = p.disp.process (p.loss.process (p.line.read (per - comp))) * pickGain;
             // energy into the body at the bridge: broadband plus the body's resonances
@@ -490,7 +532,7 @@ public:
         for (int k = 0; k < 2; ++k)
         {
             // a little of the contact noise excites the string; most of it is heard directly
-            const double in = y[k] + exc * kExcSplit[k] + noise * kNoiseExcite * noiseExcite * kExcSplit[k] + bridgeIn * kBridgeSplit[k];
+            const double in = y[k] + (exc + drag) * excSplit_[k] + noise * kNoiseExcite * noiseExcite * excSplit_[k] + bridgeIn * kBridgeSplit[k];
             pol_[(size_t) k].line.write ((float) in);
             out += in * kPickupSplit[k];
             inst += in * in;
@@ -505,9 +547,21 @@ public:
         bridge_ = absorbed + 0.05 * pull;
 
         out += behindOut_;
-        // pickup position comb (velocity pickup at a fixed distance from the bridge)
+        // The pickup, at a fixed distance from the bridge, hears the wave going in and coming back
+        // (a comb), each averaged over the width of its magnetic field (~18 mm of string: rounds off
+        // the top of the low strings, where the waves are slow).
         combLine_.write ((float) out);
-        double s = out - combLine_.read (std::max (combDelay_, 3.0));
+        auto aperture = [&] (double d) {
+            return 0.25 * combLine_.readLinear (d - apHalf_) + 0.5 * combLine_.readLinear (d) + 0.25 * combLine_.readLinear (d + apHalf_);
+        };
+        const double base = 3.0 + apHalf_;
+        double s = aperture (base) - aperture (base + std::max (combDelay_, 1.0));
+        // The field gets stronger as the string swings toward the pole: sensitivity (1 - y/d)^-2,
+        // with y the string's displacement over the pickup (the integral of its velocity). A little
+        // extra second harmonic, more on hard picks.
+        pickY_ += (s - pickY_ * pickLeak_) * pickInteg_;
+        const double u = std::clamp (pickY_ * (spec_.wound ? kPickupNLWound : kPickupNL) * prm_.pickupNonlinear, -0.4, 0.4);
+        s *= 1.0 / ((1.0 - u) * (1.0 - u));
         // A magnetic pickup only hears the strings move: the scrape reaches it mostly through the string
         // it sets vibrating (above), and only a little directly (the bar rattling the string right at
         // the contact). Plus the bridge's lengthwise pull.
@@ -520,8 +574,12 @@ public:
     }
 
 private:
-    static constexpr double kExcSplit[2] = { 0.9, 0.6 };
-    static constexpr double kPickupSplit[2] = { 1.0, 0.6 };
+    // a magnetic pickup senses motion toward the pole (vertical) more than across it
+    static constexpr double kPickupSplit[2] = { 0.8, 1.0 };
+    static constexpr double kApertureM = 0.018;  // effective width of the pickup's field along the string
+    // displacement -> fraction of the way to the pole: a hard pick reaches ~9-14 % (pole pieces sit
+    // lower under the wound strings, which swing further)
+    static constexpr double kPickupNL = 0.06, kPickupNLWound = 0.03;
     static constexpr double kBridgeSplit[2] = { 0.4, 0.6 }; // the bridge moves the strings mostly vertically; sums to 1 (passivity)
     // calibrated: a hard pick on a plain string starts ~6 cents sharp and is within ~1 cent by 0.4 s
     static constexpr double kTensionScale = 0.33; // semitones per unit stretch
@@ -530,7 +588,7 @@ private:
     void update (bool init)
     {
         // read targets at the start of this control block
-        const double semis = bar_.x + pedal_.x + vib_.x + tension_;
+        const double semis = bar_.x + pedal_.x + vib_.x + tension_ + bumpX_;
         const double f0 = fOpen_ * std::exp2 (semis / 12.0);
         const double w0 = 2.0 * kPi * f0 / fs_;
         polRatio_ = std::exp2 (-prm_.polDetuneCents / 1200.0);
@@ -579,6 +637,7 @@ private:
         const double c = 2.0 * kScaleM * fOpen_ * std::exp2 (pedal_.x / 12.0);
         waveSpeed_ = c;
         combDelay_ = 2.0 * prm_.pickupPosM / c * fs_;
+        apHalf_ = std::clamp (0.5 * kApertureM / c * fs_, 0.0, 40.0);
 
     }
 
@@ -628,9 +687,14 @@ private:
         // round-trip time (the ideal pluck's sin(n pi beta)/n spectrum), smoothed by the pick's
         // contact time (harder pick and harder playing = shorter = brighter), plus a pick click.
         const double period = fs_ / currentHz();
-        const double W = std::clamp (2.0 * prm_.pickPosM / waveSpeed_ * fs_, 2.0, 0.9 * period);
-        const double h = std::clamp (prm_.hardness, 0.0, 1.0);
-        const double contactMs = (0.25 + 1.6 * (1.0 - h)) * std::exp2 (-1.5 * (vel - 0.5));
+        const double vary = std::clamp (prm_.pickVariation, 0.0, 1.0);
+        // the thumb picks a little further from the bridge than the fingers; no two picks land in
+        // exactly the same place (+-6 mm), which moves the pick-position notches a little every time
+        const double pickPos = prm_.pickPosM + (spec_.thumb ? 0.018 : -0.004) + 0.006 * vary * rng_.next();
+        const double W = std::clamp (2.0 * pickPos / waveSpeed_ * fs_, 2.0, 0.9 * period);
+        // thumb picks are plastic: softer than the metal finger picks
+        const double h = std::clamp (prm_.hardness * (spec_.thumb ? 0.65 : 1.0), 0.0, 1.0);
+        const double contactMs = (0.25 + 1.6 * (1.0 - h)) * std::exp2 (-1.5 * (vel - 0.5)) * (1.0 + 0.1 * vary * rng_.next());
         const int T = std::max (2, (int) std::lround (contactMs * 1e-3 * fs_));
         const int Wi = (int) std::lround (W);
         const int click = (int) (0.0015 * fs_);
@@ -656,7 +720,7 @@ private:
         // string), stronger for hard picks and hard playing
         Biquad tick;
         tick.bandpass (2500.0 + 2000.0 * h * vel, 1.4, fs_);
-        const double tickAmp = 0.35 * amp * h * (0.4 + 0.6 * vel);
+        const double tickAmp = 0.35 * amp * h * (0.4 + 0.6 * vel) * (spec_.thumb ? 0.6 : 1.0);
         double prev = 0;
         for (int n = 0; n < excLen_; ++n)
         {
@@ -684,6 +748,17 @@ private:
     FracDelay combLine_, behindLine_;
     LossFilter behindLoss_;
     double behindTheta_ = 0, behindC_ = 1, behindComp_ = 0, behindAmt_ = 0, behindGate_ = 0, behindOut_ = 0;
+    double excSplit_[2] = { 0.85, 0.7 };
+    double apHalf_ = 0, pickY_ = 0, pickInteg_ = 0.1, pickLeak_ = 0.015, bumpX_ = 0, bumpV_ = 0, bumpW_ = 138.0, dragAmp_ = 0;
+    int dragLeft_ = 0, dragLen_ = 0;
+    Biquad dragBp_;
+
+public:
+    // A pedal or lever reaching its stop: the pitch overshoots by `semis` and settles (~50 ms).
+    void bump (double semis) { bumpV_ += semis * bumpW_ * 1.43; } // peak ~= semis at damping 0.3
+    double pickupDisplacement() const { return pickY_; }
+
+private:
     static constexpr double kBehindMax = 0.002; // resonant exchange per pass at Behind bar = 1 (weak: the bar is heavy)
     static constexpr double kBehindIn = 0.5, kBehindOut = 0.06;
     // Bar scrape, as a pickup hears it: mostly through the played string it sets moving (whose
