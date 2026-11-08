@@ -77,7 +77,7 @@ Sets: Scale, Scale high (bar +12), Whole-step bends, Half-step bends.
 |---|---|---|
 | Glide | 30-1200 ms | Legato bar slide time |
 | Strum | 0-60 ms | Pick spread across a chord, low string first |
-| Pick | 0-100 % | Soft thumb/flesh → hard metal fingerpicks (attack brightness, tick) |
+| Pick | Velocity pulse lasting the wave's round trip to the pick point, smoothed over the pick's contact time (harder = brighter), plus a metal tick at 2.5-4.5 kHz. Re-picking a ringing string first catches it briefly |
 | Brightness | 0-100 % | How long the high partials ring (old → new strings) |
 | Sustain | 25-200 % | Decay times |
 | Bar noise | 0-100 % | Contact noise of the bar sliding over the strings |
@@ -90,12 +90,13 @@ the bar, the strings ringing and their notes, the current chord, and what the wh
 pedals, or "voice-led").
 
 ## The model
-**Strings** (`core/SteelString.h`). Each string is two digital waveguide loops, one per vibration
-plane. Each loop has:
+**Strings** (`core/SteelString.h`). Each string is two coupled digital waveguide loops, one per
+vibration plane. Each loop has:
 - a time-varying fractional delay (6-point Lagrange) recomputed every sample, so slides and bends are
   continuous;
 - loss and stiffness filters (stiffness solved per string from physical inharmonicity);
-- tuning compensation, within 0.06 cents everywhere.
+- tuning compensation (including the body absorber), within 0.5 cents everywhere at moderate
+  playing. Loud notes are slightly sharp, as on a real string.
 
 Pitch is split the way the instrument does it:
 - the **bar** shortens the string;
@@ -108,12 +109,14 @@ The pick and pickup are placed in metres from the bridge, so their comb filters 
 |---|---|
 | Pick | Velocity pulse lasting the wave's round trip to the pick point, smoothed over the pick's contact time (harder = brighter), plus a metal tick at 2.5-4.5 kHz. A hard pick stretches the string, so the note starts up to ~7 cents sharp and settles in ~70 ms. Re-picking a ringing string first catches it briefly |
 | Bar noise | From the bar's speed, on an S-curve (silent while the bar creeps into place). On wound strings, grainy ticks at the rate the wrap ridges pass under the bar. Band-limited to 400 Hz-3 kHz and heard mostly directly. Played strings make it; strings merely under the bar make 20 %. About 35 dB below a medium pick (tested). A lifted and re-placed bar makes none |
-| Bridge | Every string feeds the others (sympathetic resonance). Stable by construction: each loop keeps 5x the coupling as gain headroom |
+| Tension modulation | A vibrating string stretches: its tension, and so its pitch, rises with the squared slope along it (for travelling waves, the squared wave summed over one period), computed every sample. A hard pick starts ~4-6 cents sharp and settles as the high partials die; soft picks barely move. Wound and low strings stay sharp a little longer. The tension fluctuation also pulls on the bridge lengthwise, adding faint extra partials (growl) that grow with the square of the playing strength |
+| Body and bridge | Five cabinet/changer resonances (104-1180 Hz) plus a broadband part absorb energy from every string at the bridge. The vertical plane pushes on the top and loses ~4x more than the horizontal. Partials near a body resonance die faster, so each note decays unevenly, as on a real instrument. What the body absorbs drives the other strings (sympathetic resonance, strongest near the body modes). This is passive by construction: a string gets back at most 81% of what the strings gave the body, so the network always loses energy |
+| Two planes | Each string's horizontal and vertical vibrations trade energy through the bridge: a slow, lossless rotation, full exchange in 1.5-2.5 s, a little different per string. With the faster-decaying vertical plane this gives the two-stage decay of real strings: a fast early drop (~19 dB/s) and then a long, slowly blooming tail (~11 dB/s) |
 | Hand | Palm/hand blocks ramp both decay times down |
 | Pickup | Comb at the pickup's position, plus a resonant coil/cable low-pass |
 
 **Engine** (`core/SteelEngine.h`): 10 strings sharing one bar, sample-accurate MIDI, strums, the
-volume pedal and vibrato. 10 strings use about 4% of one core at 48 kHz.
+volume pedal and vibrato. 10 strings use about 6% of one core at 48 kHz.
 
 ## Build, test, listen
 ```
@@ -126,7 +129,8 @@ CI builds VST3 and the standalone app for Windows, macOS (plus AU) and Linux, an
 strictness 10. Bundles are in the `Steelwave-<os>` artifacts.
 
 The tests cover:
-- tuning, glides, decay, picking, bar noise and stability (`steelwave_tests`);
+- tuning, glides, decay, picking, bar noise, tension modulation, the two-stage decay, body
+  resonances and stability (`steelwave_tests`);
 - every voicing in every key, the single-note maps, the wheel, legato, release/sustain, the volume
   pedal, CC pedals, sympathetic coupling and a 60 s random-MIDI stress run (`steelwave_engine_tests`);
 - host-style tests: parameters, state, keyswitches, bit-identical output at any block size, sample

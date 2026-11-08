@@ -101,14 +101,14 @@ int main()
     StringParams quiet;
     quiet.barNoise = 0;
 
-    std::printf ("Tuning: every E9 string, bar at 0/5/12/19/24\n");
+    std::printf ("Tuning: every E9 string, bar at 0/5/12/19/24 (picked moderately: loud notes are a little sharp)\n");
     {
         double worst = 0;
         for (int si = 0; si < 10; ++si)
             for (int bar : { 0, 5, 12, 19, 24 })
             {
-                auto x = render (si, 1.0, 0.8, quiet, [&] (SteelString& s, double t) {
-                    if (t == 0) { s.setBar (bar, 0); s.pluck (0.8); }
+                auto x = render (si, 1.0, 0.4, quiet, [&] (SteelString& s, double t) {
+                    if (t == 0) { s.setBar (bar, 0); s.pluck (0.4); }
                 });
                 const double target = midiHz (strings[(size_t) si].openMidi + bar);
                 const double f = peakHz (x, target, 0.3, 0.6);
@@ -124,8 +124,8 @@ int main()
         for (int si : { 0, 4, 9 })
             for (int bar : { 0, 12, 24 })
             {
-                auto x = render (si, 1.0, 0.8, quiet, [&] (SteelString& s, double t) {
-                    if (t == 0) { s.setBar (bar, 0); s.pluck (0.8); }
+                auto x = render (si, 1.0, 0.4, quiet, [&] (SteelString& s, double t) {
+                    if (t == 0) { s.setBar (bar, 0); s.pluck (0.4); }
                 }, fs);
                 const double target = midiHz (strings[(size_t) si].openMidi + bar);
                 worst = std::max (worst, std::fabs (cents (peakHz (x, target, 0.3, 0.6, 60, fs), target)));
@@ -136,13 +136,13 @@ int main()
     std::printf ("Glides land in tune\n");
     {
         auto x = render (3, 1.4, 0.8, quiet, [&] (SteelString& s, double t) {
-            if (t == 0) s.pluck (0.8);
+            if (t == 0) s.pluck (0.4);
             if (std::fabs (t - 0.3) < 0.5 / kFs) s.setBar (2, 0.2);
         });
         const double e = cents (peakHz (x, midiHz (66), 0.8, 0.5), midiHz (66));
         CHECK (std::fabs (e) < 1.0, "bar slide E4 -> F#4 lands within %.3f cents", e);
         auto y = render (5, 1.4, 0.8, quiet, [&] (SteelString& s, double t) {
-            if (t == 0) s.pluck (0.8);
+            if (t == 0) s.pluck (0.4);
             if (std::fabs (t - 0.3) < 0.5 / kFs) s.setPedal (1, 0.15);
         });
         const double e2 = cents (peakHz (y, midiHz (57), 0.8, 0.5), midiHz (57));
@@ -295,13 +295,49 @@ int main()
         CHECK (peak < 8.0 * sum / nb, "no narrow resonance in the noise (peak %.1fx the mean)", peak / (sum / nb));
     }
 
-    std::printf ("Attack pitch\n");
+    std::printf ("Tension modulation\n");
     {
-        auto x = render (3, 1.0, 1.0, quiet);
+        auto x = render (3, 2.0, 1.0, quiet);
         const double early = cents (peakHz (x, midiHz (64), 0.005, 0.04, 30), midiHz (64));
-        const double late = cents (peakHz (x, midiHz (64), 0.4, 0.4, 30), midiHz (64));
-        CHECK (early > 1.0 && early < 8.0, "hard pick starts %.1f cents sharp (1..8)", early);
-        CHECK (std::fabs (late) < 0.5, "and settles in tune (%.2f cents)", late);
+        const double late = cents (peakHz (x, midiHz (64), 1.0, 0.6, 30), midiHz (64));
+        CHECK (early > 2.0 && early < 9.0, "hard pick starts %.1f cents sharp (2..9)", early);
+        CHECK (late > -0.2 && late < 0.8, "and comes down as the note decays (%.2f cents after 1 s)", late);
+        auto soft = render (3, 0.3, 0.3, quiet);
+        const double se = cents (peakHz (soft, midiHz (64), 0.005, 0.04, 30), midiHz (64));
+        CHECK (se < 1.0, "a soft pick hardly stretches the string (%.2f cents)", se);
+        StringParams lin = quiet;
+        lin.nonlinear = 0;
+        auto y = render (3, 2.0, 1.0, lin);
+        const double le = cents (peakHz (y, midiHz (64), 0.005, 0.04, 30), midiHz (64));
+        CHECK (std::fabs (le) < 0.6, "Nonlinear 0: a linear string, in tune from the start (%.2f cents)", le);
+        // growl: what the nonlinearity adds, apart from the pitch, relative to the note
+        auto growl = [&] (double vel) {
+            StringParams on = quiet;
+            auto a = render (9, 1.0, vel, on), b = render (9, 1.0, vel, lin);
+            double d = 0, r = 0;
+            for (size_t i = 0; i < (size_t) (0.05 * kFs); ++i) { d += (double) (a[i] - b[i]) * (a[i] - b[i]); r += (double) b[i] * b[i]; }
+            return 10 * std::log10 (d / r);
+        };
+        const double gHard = growl (1.0), gSoft = growl (0.3);
+        CHECK (gHard > -40 && gHard < -12, "hard pick on the low B: the nonlinearity changes the first 50 ms by %.1f dB re the note", gHard);
+        CHECK (gSoft < gHard - 10, "a soft pick much less (%.1f dB)", gSoft);
+    }
+
+    std::printf ("Bridge and body\n");
+    {
+        // two-stage decay: a fast early drop, then a long tail
+        auto x = render (3, 4.0, 0.7, quiet);
+        const double early = (db (rms (x, 0.05, 0.15)) - db (rms (x, 0.35, 0.45))) / 0.3;
+        const double late = (db (rms (x, 1.5, 1.7)) - db (rms (x, 3.5, 3.7))) / 2.0;
+        CHECK (early > 1.5 * late, "two-stage decay: %.1f dB/s early, %.1f dB/s in the tail", early, late);
+        // a fundamental sitting on a body resonance (340 Hz) gives its energy away faster than one between
+        auto rate = [&] (double hz) {
+            const double semis = 12 * std::log2 (hz / midiHz (64));
+            auto y = render (3, 3.0, 0.4, quiet, [&] (SteelString& s, double t) { if (t == 0) { s.setBar (semis, 0); s.pluck (0.4); } });
+            return (db (dftMag (y, hz, 0.5, 0.5)) - db (dftMag (y, hz, 2.3, 0.5))) / 1.8;
+        };
+        const double on = rate (340.0), off = rate (420.0);
+        CHECK (on > off + 1.0, "on a body resonance the note decays faster (%.1f vs %.1f dB/s)", on, off);
     }
 
     std::printf ("Stability\n");

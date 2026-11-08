@@ -90,11 +90,22 @@ private:
     int mask_ = 0, w_ = 0;
 };
 
+// The body/bridge: resonances of the cabinet and changer that the strings drive through the bridge
+// (Hz, Q, relative admittance). Energy a string loses into them is what the other strings feel.
+struct BodyMode { double hz, q, gain; };
+constexpr std::array<BodyMode, 5> kBodyModes = { { { 104, 14, 1.0 }, { 196, 18, 0.8 }, { 340, 22, 0.9 }, { 610, 26, 0.6 }, { 1180, 30, 0.45 } } };
+constexpr double kBodyBroadband = 0.5;           // admittance away from the modes, re a mode peak
+constexpr double kAbsorbH = 0.0006, kAbsorbV = 0.0025; // per pass at a mode peak: the vertical plane pushes on the top
+
 // Max bridge coupling (per sample, see SteelString::process) and the loop-gain headroom it needs.
 // Coupled loops resonating together are stable while (n-1) * coupling < 1 - g: keeping 1 - g at
 // least 5x the coupling leaves room for 5 strings sharing an exact resonance (E9 has pairs at most).
 constexpr double kMaxCoupling = 1.5e-4;
 constexpr double kCouplingHeadroom = 5.0 * kMaxCoupling;
+// Bridge signal (what the body absorbed from every string) -> each other string. Passive: a string
+// gets back at most kBridgeGainMax x (9 others) = 0.81 of what the strings gave the body (the
+// two planes' shares of the input sum to 1), so the coupled network always loses energy.
+constexpr double kBridgeGainMax = 0.09;
 
 // Loop loss: g (1-a) / (1 - a z^-1). Designed from T60 at low frequencies and at fHigh.
 struct LossFilter
@@ -175,6 +186,15 @@ struct Biquad
         a1 = -2 * cw / a0; a2 = (1 - al) / a0;
     }
     void reset() { z1 = z2 = 0; }
+    // complex response at w (rad/sample): {re, im}
+    std::array<double, 2> response (double w) const
+    {
+        const double c1 = std::cos (w), s1 = std::sin (w), c2 = std::cos (2 * w), s2 = std::sin (2 * w);
+        const double nr = b0 + b1 * c1 + b2 * c2, ni = -(b1 * s1 + b2 * s2);
+        const double dr = 1 + a1 * c1 + a2 * c2, di = -(a1 * s1 + a2 * s2);
+        const double d = dr * dr + di * di;
+        return { (nr * dr + ni * di) / d, (ni * dr - nr * di) / d };
+    }
     double process (double x)
     {
         const double y = b0 * x + z1;
@@ -237,6 +257,7 @@ struct StringParams
     double sustain = 1.0;       // scales T60 (0.25..2)
     double barNoise = 0.5;      // contact noise level 0..1
     double polDetuneCents = 1.1;// vertical vs horizontal polarisation (slow beating)
+    double nonlinear = 1.0;     // tension modulation and its growl (0 = a linear string)
 };
 
 class SteelString
@@ -254,6 +275,16 @@ public:
         combLine_.allocate ((int) std::ceil (0.004 * fs) + 8);
         rng_.s = 0x1234567u + (uint32_t) (spec.openMidi * 7919);
         cDisp_ = solveDispersion (fs, fOpen_, spec.inharmCents10);
+        for (auto& p : pol_)
+            for (size_t m = 0; m < kBodyModes.size(); ++m)
+                p.body[m].bandpass (kBodyModes[m].hz, kBodyModes[m].q, fs);
+        // the planes trade energy through the bridge: a slow, energy-conserving rotation
+        // (full exchange in ~1.5-2.5 s, a little different on every string)
+        const double xT = 1.5 + 1.0 * std::fmod (spec.openMidi * 0.618, 1.0);
+        rotS_ = std::sin (0.5 * kPi / (xT * fs));
+        rotC_ = std::cos (0.5 * kPi / (xT * fs));
+        // tension modulation: thinner/lower-tension (wound, low) strings stretch more for the same swing
+        tensionK_ = (spec.wound ? 0.7 : 1.0) * kTensionScale; // wound strings swing wider for the same energy (measured stretch is larger)
         noiseBp_.lowpass (3000.0, 0.7, fs);
         hpCoef_ = 1.0 - std::exp (-2.0 * kPi * 400.0 / fs);
         bar_.setTime (0.08);
@@ -269,7 +300,10 @@ public:
             p.line.clear();
             p.loss.z = 0;
             p.disp.s.fill (0.0);
+            for (auto& b : p.body)
+                b.reset();
         }
+        stretch_ = tension_ = 0;
         combLine_.clear();
         bar_.jump (0);
         pedal_.jump (0);
@@ -282,7 +316,7 @@ public:
         noiseLev_ = 0;
         noiseBp_.reset();
         bridge_ = 0;
-        ridgePh_ = attack_ = 0;
+        ridgePh_ = 0;
         noiseHp_ = 0;
         dc_ = 0;
         ctl_ = 0;
@@ -329,9 +363,6 @@ public:
         if (ringing) // ~ -10 dB over the catch, whatever the loop length
             pickMin_ = std::pow (0.3, (fs_ / currentHz()) / (0.5 * excDelay_));
         buildExcitation (velocity);
-        // a hard pick stretches the string: it starts a little sharp and settles (tension modulation)
-        attack_ = 0.07 * velocity * velocity * (0.5 + 0.5 * prm_.hardness); // semitones (up to 7 cents)
-        attackDecay_ = std::exp (-1.0 / (0.07 * fs_));
     }
 
     // Hand/bar block: 1 = fully muted (fast decay), 0 = ringing. Ramped.
@@ -352,8 +383,7 @@ public:
         bar_.step (dt);
         pedal_.step (dt);
         vib_.step (dt);
-        attack_ *= attackDecay_;
-        const double semis = bar_.x + pedal_.x + vib_.x + attack_;
+        const double semis = bar_.x + pedal_.x + vib_.x + tension_;
         const double period = fs_ / (fOpen_ * std::exp2 (semis / 12.0));
 
         // excitation (after the pick has caught a ringing string)
@@ -405,29 +435,50 @@ public:
 
         double out = 0.0;
         const double frac = (double) (kCtl - 1 - ctl_) / kCtl;
+        double y[2], absorbed = 0.0;
         for (int k = 0; k < 2; ++k)
         {
             auto& p = pol_[(size_t) k];
             const double comp = p.compA + (p.compB - p.compA) * frac;
             const double per = k == 0 ? period : period * polRatio_;
-            double y = p.line.read (per - comp);
-            y = p.disp.process (p.loss.process (y)) * pickGain;
-            // a little of the contact noise excites the string; most of it is heard directly
-            double in = y + exc * kExcSplit[k] + noise * 0.1 * kExcSplit[k];
-            if (k == 0)
-            {
-                bridge_ = y;
-                in += bridgeIn;
-            }
-            p.line.write ((float) in);
-            out += in * kPickupSplit[k];
+            y[k] = p.disp.process (p.loss.process (p.line.read (per - comp))) * pickGain;
+            // energy into the body at the bridge: broadband plus the body's resonances
+            double adm = kBodyBroadband * y[k];
+            for (size_t m = 0; m < kBodyModes.size(); ++m)
+                adm += kBodyModes[m].gain * p.body[m].process (y[k]);
+            const double a = (k == 0 ? kAbsorbH : kAbsorbV) * adm;
+            y[k] -= a;
+            absorbed += a;
         }
+        // the two planes trade energy through the bridge (lossless rotation)
+        {
+            const double h = y[0], v = y[1];
+            y[0] = rotC_ * h + rotS_ * v;
+            y[1] = rotC_ * v - rotS_ * h;
+        }
+        double inst = 0.0;
+        for (int k = 0; k < 2; ++k)
+        {
+            // a little of the contact noise excites the string; most of it is heard directly
+            const double in = y[k] + exc * kExcSplit[k] + noise * 0.1 * kExcSplit[k] + bridgeIn * kBridgeSplit[k];
+            pol_[(size_t) k].line.write ((float) in);
+            out += in * kPickupSplit[k];
+            inst += in * in;
+        }
+        // tension modulation: the string's stretch follows the squared slope along it (for travelling
+        // waves, the squared velocity summed over one period). More stretch = more tension = sharper.
+        stretch_ += (inst - stretch_) / std::max (period, 8.0);
+        tension_ = std::min (tensionK_ * prm_.nonlinear * stretch_, 0.5);
+        // ... and the tension fluctuation pulls on the bridge lengthwise: faint extra partials at the
+        // sums and differences of the string's own (the growl of a hard-picked string)
+        const double pull = (spec_.wound ? 2.0 : 1.0) * kPhantom * prm_.nonlinear * (inst - stretch_);
+        bridge_ = absorbed + 0.05 * pull;
 
         // pickup position comb (velocity pickup at a fixed distance from the bridge)
         combLine_.write ((float) out);
         double s = out - combLine_.read (std::max (combDelay_, 3.0));
-        // the direct share of contact noise the pickup hears
-        s += noise;
+        // the direct share of contact noise the pickup hears, and the bridge's lengthwise pull
+        s += noise + pull;
         // DC guard
         dc_ += 0.0005 * (s - dc_);
         s -= dc_;
@@ -436,13 +487,17 @@ public:
     }
 
 private:
-    static constexpr double kExcSplit[2] = { 0.9, 0.45 };
-    static constexpr double kPickupSplit[2] = { 1.0, 0.45 };
+    static constexpr double kExcSplit[2] = { 0.9, 0.6 };
+    static constexpr double kPickupSplit[2] = { 1.0, 0.6 };
+    static constexpr double kBridgeSplit[2] = { 0.4, 0.6 }; // the bridge moves the strings mostly vertically; sums to 1 (passivity)
+    // calibrated: a hard pick on a plain string starts ~6 cents sharp and is within ~1 cent by 0.4 s
+    static constexpr double kTensionScale = 0.33; // semitones per unit stretch
+    static constexpr double kPhantom = 0.01;      // lengthwise bridge pull per unit tension fluctuation
 
     void update (bool init)
     {
         // read targets at the start of this control block
-        const double semis = bar_.x + pedal_.x + vib_.x + attack_;
+        const double semis = bar_.x + pedal_.x + vib_.x + tension_;
         const double f0 = fOpen_ * std::exp2 (semis / 12.0);
         const double w0 = 2.0 * kPi * f0 / fs_;
         polRatio_ = std::exp2 (-prm_.polDetuneCents / 1200.0);
@@ -462,7 +517,7 @@ private:
             p.loss.design (fk, k == 0 ? tL : tL * 0.55, k == 0 ? tH : tH * 0.7, 5000.0, fs_);
             p.disp.c = cDisp_;
             p.compA = init ? 0.0 : p.compB;
-            p.compB = p.loss.phaseDelay (wk) + p.disp.phaseDelay (wk);
+            p.compB = p.loss.phaseDelay (wk) + p.disp.phaseDelay (wk) + bodyPhaseDelay (p.body, k, wk);
             if (init)
                 p.compA = p.compB;
         }
@@ -472,6 +527,21 @@ private:
         waveSpeed_ = c;
         combDelay_ = 2.0 * prm_.pickupPosM / c * fs_;
 
+    }
+
+    // phase delay (samples) of the body absorber 1 - mu * admittance at w
+    static double bodyPhaseDelay (const std::array<Biquad, kBodyModes.size()>& body, int k, double w)
+    {
+        double re = kBodyBroadband, im = 0.0;
+        for (size_t m = 0; m < kBodyModes.size(); ++m)
+        {
+            const auto r = body[m].response (w);
+            re += kBodyModes[m].gain * r[0];
+            im += kBodyModes[m].gain * r[1];
+        }
+        const double mu = k == 0 ? kAbsorbH : kAbsorbV;
+        const double hr = 1.0 - mu * re, hi = -mu * im;
+        return -std::atan2 (hi, hr) / std::max (w, 1e-9);
     }
 
     // Allpass coefficient that puts the open string's 10th partial `cents` sharp.
@@ -550,6 +620,7 @@ private:
         FracDelay line;
         LossFilter loss;
         Dispersion disp;
+        std::array<Biquad, kBodyModes.size()> body;
         double compA = 0, compB = 0;
     };
 
@@ -569,9 +640,12 @@ private:
 public:
     // this string's horizontal wave arriving at the bridge (drives the other strings)
     double bridge() const { return bridge_; }
+    double stretch() const { return stretch_; }      // mean squared wave over one period (tension modulation input)
+    double tensionCents() const { return 100.0 * tension_; }
 
 private:
-    double attack_ = 0, attackDecay_ = 0, ridgePh_ = 0, hpCoef_ = 0.05;
+    double ridgePh_ = 0, hpCoef_ = 0.05;
+    double stretch_ = 0, tension_ = 0, tensionK_ = 0, rotS_ = 0, rotC_ = 1;
     double damp_ = 0, dampTarget_ = 0, energy_ = 0, noiseLev_ = 0, noiseHp_ = 0, dc_ = 0;
     Biquad noiseBp_;
     Rng rng_;

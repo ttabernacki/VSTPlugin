@@ -159,7 +159,7 @@ public:
     void process (float* out, int n)
     {
         const double dt = 1.0 / fs_;
-        const double kappa = kMaxCoupling * std::clamp (prm_.sympathetic, 0.0, 1.0);
+        const double kappa = kBridgeGainMax * std::clamp (prm_.sympathetic, 0.0, 1.0);
         const double level = std::pow (10.0, prm_.levelDb / 20.0) * kOutputScale;
         for (int i = 0; i < n; ++i)
         {

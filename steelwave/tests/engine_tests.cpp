@@ -232,6 +232,7 @@ int main()
         {
             EngineParams q = p;
             q.sympathetic = sym;
+            q.barNoise = 0; // the slide's own noise isn't what this is about
             Script sl;
             sl.at (0.05, [] (SteelEngine& e) { e.noteOn (60, 0.75); });
             sl.at (5.0, [] (SteelEngine& e) { e.noteOn (67, 0.75); });
@@ -323,7 +324,8 @@ int main()
             ref += (double) a[i] * a[i];
         }
         const double rel = 10 * std::log10 (diff / ref);
-        CHECK (rel > -60 && rel < -10, "coupling adds a quiet halo of other strings (%.1f dB re the note)", rel);
+        // through the body: strongest near its resonances, so it depends on the note
+        CHECK (rel > -70 && rel < -10, "coupling adds a quiet halo of other strings (%.1f dB re the note)", rel);
     }
 
     std::printf ("Stability\n");
