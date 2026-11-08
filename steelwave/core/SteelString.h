@@ -429,6 +429,11 @@ public:
             noise = noiseBp_.process (g - noiseHp_) * (spec_.wound ? 0.08 : 0.027) * noiseLev_;
         }
 
+        // The slide's contact noise sets a played string ringing a little. Strings that aren't being
+        // played rest under the picking hand: their scrape is heard, but it doesn't set them ringing
+        // (otherwise they ring on after every slide, at pitches outside the chord).
+        const double noiseExcite = std::clamp ((contact_ - 0.2) / 0.8, 0.0, 1.0);
+
         // pick catching a ringing string: brief extra loss
         double pickGain = 1.0;
         if (dampPulse_ > 0)
@@ -479,13 +484,13 @@ public:
                 y[0] = behindC_ * h + behindTheta_ * yb;
                 yb = behindC_ * yb - behindTheta_ * h;
             }
-            behindLine_.write ((float) (yb + exc * kBehindIn * behindGate_ + noise * 0.1));
+            behindLine_.write ((float) (yb + exc * kBehindIn * behindGate_ + noise * 0.1 * noiseExcite));
         }
         double inst = 0.0;
         for (int k = 0; k < 2; ++k)
         {
             // a little of the contact noise excites the string; most of it is heard directly
-            const double in = y[k] + exc * kExcSplit[k] + noise * 0.1 * kExcSplit[k] + bridgeIn * kBridgeSplit[k];
+            const double in = y[k] + exc * kExcSplit[k] + noise * 0.1 * noiseExcite * kExcSplit[k] + bridgeIn * kBridgeSplit[k];
             pol_[(size_t) k].line.write ((float) in);
             out += in * kPickupSplit[k];
             inst += in * in;

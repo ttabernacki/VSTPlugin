@@ -239,6 +239,33 @@ int main()
             auto z = render (q, 0, sl, 5.6);
             CHECK (rms (z, 5.0, 5.3) < 1.2 * rms (z, 4.7, 5.0), "sympathetic %.1f: sliding a chord that has rung for 5 s doesn't re-pick it", sym);
         }
+        // after a slide nothing is left ringing outside the chord: the bar scraping over the strings
+        // that aren't played (under the picking hand) mustn't set them ringing at their own pitches
+        {
+            auto offChord = [&] (double noise) {
+                EngineParams q = p;
+                q.barNoise = noise;
+                Script sl;
+                sl.at (0.05, [] (SteelEngine& e) { e.noteOn (60, 0.8); });
+                sl.at (0.8, [] (SteelEngine& e) { e.noteOn (65, 0.8); }); // legato E -> A, bar 0 -> 5
+                sl.at (0.85, [] (SteelEngine& e) { e.noteOff (60); });
+                auto z = render (q, 0, sl, 2.2);
+                const double chord[4] = { 73, 69, 64, 61 };
+                double harm = 0, off = 0;
+                for (double f = 60; f < 6000; f += 2.5)
+                {
+                    const double m = std::pow (dftMag (z, f, 1.6, 0.4), 2);
+                    bool h = false;
+                    for (double cm : chord)
+                        for (int k = 1; k < 20; ++k)
+                            h |= std::fabs (f - k * midiHz (cm)) < 8 + 0.004 * k * midiHz (cm);
+                    (h ? harm : off) += m;
+                }
+                return 10 * std::log10 (off / harm);
+            };
+            const double with = offChord (0.5), without = offChord (0.0);
+            CHECK (with < without + 1.5, "0.5 s after a legato slide, sound outside the chord: %.1f dB with bar noise, %.1f dB without", with, without);
+        }
         Script sb;
         sb.at (0.05, [] (SteelEngine& e) { e.noteOn (60, 0.8); });
         sb.at (0.8, [] (SteelEngine& e) { e.noteOff (60); });
