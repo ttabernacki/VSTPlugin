@@ -29,8 +29,8 @@ bar the way they do on the instrument.
 
 | Part | Model |
 |---|---|
-| Pick | Velocity pulse lasting the wave's round trip to the pick point, smoothed over the pick's contact time (harder pick or harder playing = shorter = brighter), plus a metal click. Re-picking a ringing string first catches it briefly |
-| Bar noise | From the bar's speed. On wound strings, band-passed at the rate the wrap ridges pass under the bar (`v / wrap pitch`). On plain strings, a quieter broadband squeak. Fed into the string and heard directly |
+| Pick | Velocity pulse lasting the wave's round trip to the pick point, smoothed over the pick's contact time (harder pick or harder playing = shorter = brighter), plus a metal tick at 2.5-4.5 kHz. A hard pick stretches the string, so the note starts up to ~7 cents sharp and settles in ~70 ms. Re-picking a ringing string first catches it briefly |
+| Bar noise | From the bar's speed, on an S-curve (silent while the bar creeps into place, saturating on fast slides). On wound strings, grainy noise ticking at the rate the wrap ridges pass under the bar. On plain strings, a fainter hiss. Band-limited to 400 Hz-3 kHz and heard mostly directly (only 10% excites the string). About 35 dB below a medium pick on wound strings and 43 dB on plain ones (tested) |
 | Hand block | Fast ramp of both decay times |
 | Pickup | Comb filter at the pickup's position, plus a resonant coil/cable low-pass (single-coil or humbucker) |
 

@@ -209,7 +209,7 @@ inline std::array<StringSpec, 10> e9Strings()
         s[(size_t) i].wound = i >= 5;
         const double t = (midi[i] - 47.0) / (68.0 - 47.0); // 0 low .. 1 high
         s[(size_t) i].t60Low = 11.0 - 5.0 * t;
-        s[(size_t) i].t60High = s[(size_t) i].wound ? 0.55 : 0.9;
+        s[(size_t) i].t60High = s[(size_t) i].wound ? 0.8 : 1.3;
         // B = pi^3 E d^4 / (64 T L^2): ~3 cents at partial 10 for the plain .014 E, less for
         // thinner plain strings and for wound strings (thin core); grows as the bar shortens the string
         s[(size_t) i].inharmCents10 = s[(size_t) i].wound ? 1.5 : 2.0 + 1.5 * (1.0 - t);
@@ -228,7 +228,7 @@ struct StringParams
     double brightness = 0.5;    // scales high-frequency decay (0 dull/old strings .. 1 new)
     double sustain = 1.0;       // scales T60 (0.25..2)
     double barNoise = 0.5;      // contact noise level 0..1
-    double polDetuneCents = 0.7;// vertical vs horizontal polarisation (slow beating)
+    double polDetuneCents = 1.1;// vertical vs horizontal polarisation (slow beating)
 };
 
 class SteelString
@@ -246,6 +246,8 @@ public:
         combLine_.allocate ((int) std::ceil (0.004 * fs) + 8);
         rng_.s = 0x1234567u + (uint32_t) (spec.openMidi * 7919);
         cDisp_ = solveDispersion (fs, fOpen_, spec.inharmCents10);
+        noiseBp_.lowpass (3000.0, 0.7, fs);
+        hpCoef_ = 1.0 - std::exp (-2.0 * kPi * 400.0 / fs);
         bar_.setTime (0.08);
         pedal_.setTime (0.12);
         vib_.setTime (0.002);
@@ -271,6 +273,7 @@ public:
         energy_ = 0;
         noiseLev_ = 0;
         noiseBp_.reset();
+        ridgePh_ = attack_ = 0;
         noiseHp_ = 0;
         dc_ = 0;
         ctl_ = 0;
@@ -310,6 +313,9 @@ public:
         if (ringing) // ~ -10 dB over the catch, whatever the loop length
             pickMin_ = std::pow (0.3, (fs_ / currentHz()) / (0.5 * excDelay_));
         buildExcitation (velocity);
+        // a hard pick stretches the string: it starts a little sharp and settles (tension modulation)
+        attack_ = 0.07 * velocity * velocity * (0.5 + 0.5 * prm_.hardness); // semitones (up to 7 cents)
+        attackDecay_ = std::exp (-1.0 / (0.07 * fs_));
     }
 
     // Hand/bar block: 1 = fully muted (fast decay), 0 = ringing. Ramped.
@@ -328,7 +334,8 @@ public:
         bar_.step (dt);
         pedal_.step (dt);
         vib_.step (dt);
-        const double semis = bar_.x + pedal_.x + vib_.x;
+        attack_ *= attackDecay_;
+        const double semis = bar_.x + pedal_.x + vib_.x + attack_;
         const double period = fs_ / (fOpen_ * std::exp2 (semis / 12.0));
 
         // excitation (after the pick has caught a ringing string)
@@ -342,19 +349,29 @@ public:
         const double barVelSemis = (bar_.x - barPrev) * fs_;
         const double L = kScaleM * std::exp2 (-bar_.x / 12.0);
         const double vBar = std::fabs (L * (std::log (2.0) / 12.0) * barVelSemis); // m/s
-        noiseLev_ += 0.002 * (std::min (vBar / 0.5, 1.5) * prm_.barNoise - noiseLev_);
+        // S-curve in speed: silent while the bar creeps into place, saturating on fast slides
+        const double sx = std::min (vBar / 0.4, 1.0);
+        const double speedLev = sx * sx * (3.0 - 2.0 * sx) * prm_.barNoise;
+        noiseLev_ += (speedLev > noiseLev_ ? 0.002 : 0.0008) * (speedLev - noiseLev_);
         double noise = 0.0;
         if (noiseLev_ > 1e-5)
         {
             const double wn = rng_.next();
+            double g;
             if (spec_.wound)
-                noise = 0.03 * noiseLev_ * (noiseBp_.process (wn) * 3.0 + 0.15 * wn);
-            else
             {
-                const double hp = wn - noiseHp_;
-                noiseHp_ = wn;
-                noise = 0.006 * noiseLev_ * hp;
+                // each wrap ridge passing under the bar is a small soft tick: noise grains at the
+                // ridge rate (rough, not a whistle)
+                ridgePh_ += std::min (vBar / spec_.windPitchM, 6000.0) / fs_;
+                ridgePh_ -= std::floor (ridgePh_);
+                const double tick = std::exp (-ridgePh_ * 6.0);
+                g = wn * (0.35 + 0.65 * tick);
             }
+            else
+                g = 0.35 * wn; // plain string: a faint smooth hiss
+            // band-limit: the bar and pickup hear mostly 400 Hz .. 3.5 kHz of it
+            noiseHp_ += hpCoef_ * (g - noiseHp_); // ~400 Hz one-pole, subtracted below
+            noise = noiseBp_.process (g - noiseHp_) * (spec_.wound ? 0.08 : 0.027) * noiseLev_;
         }
 
         // pick catching a ringing string: brief extra loss
@@ -375,7 +392,8 @@ public:
             const double per = k == 0 ? period : period * polRatio_;
             double y = p.line.read (per - comp);
             y = p.disp.process (p.loss.process (y)) * pickGain;
-            const double in = y + exc * kExcSplit[k] + noise * kExcSplit[k];
+            // a little of the contact noise excites the string; most of it is heard directly
+            const double in = y + exc * kExcSplit[k] + noise * 0.1 * kExcSplit[k];
             p.line.write ((float) in);
             out += in * kPickupSplit[k];
         }
@@ -384,7 +402,7 @@ public:
         combLine_.write ((float) out);
         double s = out - combLine_.read (std::max (combDelay_, 3.0));
         // the direct share of contact noise the pickup hears
-        s += noise * 0.5;
+        s += noise;
         // DC guard
         dc_ += 0.0005 * (s - dc_);
         s -= dc_;
@@ -394,12 +412,12 @@ public:
 
 private:
     static constexpr double kExcSplit[2] = { 0.9, 0.45 };
-    static constexpr double kPickupSplit[2] = { 1.0, 0.35 };
+    static constexpr double kPickupSplit[2] = { 1.0, 0.45 };
 
     void update (bool init)
     {
         // read targets at the start of this control block
-        const double semis = bar_.x + pedal_.x + vib_.x;
+        const double semis = bar_.x + pedal_.x + vib_.x + attack_;
         const double f0 = fOpen_ * std::exp2 (semis / 12.0);
         const double w0 = 2.0 * kPi * f0 / fs_;
         polRatio_ = std::exp2 (-prm_.polDetuneCents / 1200.0);
@@ -429,10 +447,6 @@ private:
         waveSpeed_ = c;
         combDelay_ = 2.0 * prm_.pickupPosM / c * fs_;
 
-        // contact-noise pitch: ridges passing under the bar
-        const double L = kScaleM * std::exp2 (-bar_.x / 12.0);
-        const double vBar = std::fabs (L * (std::log (2.0) / 12.0) * bar_.v);
-        noiseBp_.bandpass (std::clamp (vBar / spec_.windPitchM, 80.0, 9000.0), 3.0, fs_);
     }
 
     // Allpass coefficient that puts the open string's 10th partial `cents` sharp.
@@ -490,12 +504,17 @@ private:
             exc_[(size_t) n] = acc / hsum;
         }
         const double amp = 0.08 + 0.92 * std::pow (vel, 1.6);
+        // metal pick tick: a short decaying burst around 2.5-4.5 kHz (the pick's edge leaving the
+        // string), stronger for hard picks and hard playing
+        Biquad tick;
+        tick.bandpass (2500.0 + 2000.0 * h * vel, 1.4, fs_);
+        const double tickAmp = 0.35 * amp * h * (0.4 + 0.6 * vel);
         double prev = 0;
         for (int n = 0; n < excLen_; ++n)
         {
-            const double env = n < click ? std::exp (-5.0 * n / click) : 0.0;
+            const double env = n < click ? std::exp (-4.0 * n / click) : 0.0;
             const double wn = rng_.next();
-            exc_[(size_t) n] = exc_[(size_t) n] * amp + 0.12 * amp * h * env * (wn - prev);
+            exc_[(size_t) n] = exc_[(size_t) n] * amp + tickAmp * env * tick.process (wn) + 0.08 * amp * h * env * (wn - prev);
             prev = wn;
         }
         excPos_ = 0;
@@ -518,6 +537,7 @@ private:
     std::array<double, 4096> exc_ {};
     int excLen_ = 0, excPos_ = 0, excDelay_ = 0, dampPulse_ = 0, dampLen_ = 1, ctl_ = 0;
     double pickMin_ = 1;
+    double attack_ = 0, attackDecay_ = 0, ridgePh_ = 0, hpCoef_ = 0.05;
     double damp_ = 0, dampTarget_ = 0, energy_ = 0, noiseLev_ = 0, noiseHp_ = 0, dc_ = 0;
     Biquad noiseBp_;
     Rng rng_;
@@ -532,7 +552,7 @@ public:
     void set (Type t)
     {
         type_ = t;
-        if (t == SingleCoil) lp_.lowpass (6000.0, 1.6, fs_);
+        if (t == SingleCoil) lp_.lowpass (6500.0, 1.7, fs_);
         else lp_.lowpass (3600.0, 1.2, fs_);
     }
     void reset() { lp_.reset(); }

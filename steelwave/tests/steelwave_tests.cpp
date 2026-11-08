@@ -199,8 +199,10 @@ int main()
         const double t60 = 60.0 / ((db (a1) - db (a2)) / 2.5);
         const double spec = strings[3].t60Low;
         CHECK (t60 > 0.6 * spec && t60 < 1.4 * spec, "fundamental T60 %.2f s (spec %.2f)", t60, spec);
-        const double h1 = dftMag (x, 10 * f * 1.002, 0.1, 0.3), h2 = dftMag (x, 10 * f * 1.002, 1.0, 0.3);
-        CHECK (db (h1) - db (h2) > db (a1) - db (a2), "upper partials die faster than the fundamental");
+        const double f10 = peakHz (x, 10 * f, 0.1, 0.3, 30);
+        const double h1 = dftMag (x, f10, 0.1, 0.3), h2 = dftMag (x, f10, 1.0, 0.3);
+        const double rate10 = (db (h1) - db (h2)) / 0.9, rate1 = (db (a1) - db (a2)) / 2.5;
+        CHECK (rate10 > 1.5 * rate1, "upper partials die faster: 10th %.1f dB/s vs fundamental %.1f dB/s", rate10, rate1);
         p.sustain = 0.5;
         auto y = render (3, 4.0, 0.8, p);
         const double t60b = 60.0 / ((db (dftMag (y, f, 0.5, 0.5)) - db (dftMag (y, f, 3.0, 0.5))) / 2.5);
@@ -262,22 +264,44 @@ int main()
 
     std::printf ("Bar noise\n");
     {
-        StringParams p;
-        p.barNoise = 1.0;
+        // calibrated against picking: a background texture, not an effect
         auto slide = [&] (double noise, int si) {
-            StringParams q = p;
+            StringParams q;
             q.barNoise = noise;
             return render (si, 1.2, 0.0, q, [&] (SteelString& s, double t) {
                 if (t == 0) s.setDamp (1); // muted, so we hear the contact noise and not the string ringing on
                 if (std::fabs (t - 0.2) < 0.5 / kFs) s.setBar (5, 0.6);
             });
         };
-        auto withN = slide (1.0, 7), without = slide (0.0, 7);
-        CHECK (rms (withN, 0.3, 0.7) > 1e-4 && rms (without, 0.3, 0.7) < 1e-9,
-               "wound string slide with an unpicked string: %.1f dB noise vs silence", db (rms (withN, 0.3, 0.7)));
+        auto pickRef = [&] (int si) { return rms (render (si, 0.6, 0.7, StringParams {}), 0.0, 0.5); };
+        auto withN = slide (0.5, 7), without = slide (0.0, 7);
+        const double rel = db (rms (withN, 0.3, 0.7) / pickRef (7));
+        CHECK (rms (without, 0.3, 0.7) < 1e-9, "Bar noise 0: silent slide");
+        CHECK (rel > -42 && rel < -28, "wound string slide (default level): %.1f dB below a medium pick (28..42)", -rel);
+        auto plain = slide (0.5, 2);
+        const double relP = db (rms (plain, 0.3, 0.7) / pickRef (2));
+        CHECK (relP < rel - 6, "plain string: %.1f dB below a pick, quieter than wound", -relP);
         CHECK (rms (withN, 1.1, 1.2) < 0.2 * rms (withN, 0.3, 0.7), "noise stops when the bar stops");
-        auto plain = slide (1.0, 2);
-        CHECK (rms (plain, 0.3, 0.7) < rms (withN, 0.3, 0.7), "plain string squeaks less than wound");
+        // band-limited: little above 6 kHz, no narrow whistle
+        double band = 0, high = 0, peak = 0, sum = 0;
+        int nb = 0;
+        for (double f = 400; f < 3500; f *= 1.03, ++nb)
+        {
+            const double m = dftMag (withN, f, 0.3, 0.4);
+            band += m * m; sum += m; peak = std::max (peak, m);
+        }
+        for (double f = 6000; f < 12000; f *= 1.03) { const double m = dftMag (withN, f, 0.3, 0.4); high += m * m; }
+        CHECK (db (std::sqrt (high / band)) < -15, "energy above 6 kHz %.1f dB vs 400-3500 Hz (< -15)", db (std::sqrt (high / band)));
+        CHECK (peak < 8.0 * sum / nb, "no narrow resonance in the noise (peak %.1fx the mean)", peak / (sum / nb));
+    }
+
+    std::printf ("Attack pitch\n");
+    {
+        auto x = render (3, 1.0, 1.0, quiet);
+        const double early = cents (peakHz (x, midiHz (64), 0.005, 0.04, 30), midiHz (64));
+        const double late = cents (peakHz (x, midiHz (64), 0.4, 0.4, 30), midiHz (64));
+        CHECK (early > 1.0 && early < 8.0, "hard pick starts %.1f cents sharp (1..8)", early);
+        CHECK (std::fabs (late) < 0.5, "and settles in tune (%.2f cents)", late);
     }
 
     std::printf ("Stability\n");
