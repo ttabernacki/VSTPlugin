@@ -87,6 +87,11 @@ static int pcOf (int s, int bar, double off) { return (kE9Open[(size_t) s] + bar
 
 int main()
 {
+    std::printf ("Footprint\n");
+    // hosts and tests may hold the processor (and so the engine) on the stack; Windows gives a thread
+    // 1 MB (an engine of 359 KB, two to a test, crashed the Windows build)
+    CHECK (sizeof (SteelEngine) < 64 * 1024, "SteelEngine is %zu KB (< 64 KB: buffers live on the heap)", sizeof (SteelEngine) / 1024);
+
     std::printf ("Copedent\n");
     {
         const auto o = copedentOffsets ((1u << PedA) | (1u << PedB));

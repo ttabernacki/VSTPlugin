@@ -802,7 +802,9 @@ private:
     static constexpr double kNoiseDirect = 0.25, kNoiseExcite = 0.035;
     static constexpr double kExchangeSec = 3.0; // full exchange between the planes at the default (a mild bloom; faster costs sustain)
     Glide bar_, pedal_, vib_;
-    std::array<double, 4096> exc_ {};
+    // the pick's excitation, on the heap (allocated with the string, never on the audio thread) so a
+    // SteelEngine stays small enough to live on a 1 MB Windows stack
+    std::vector<double> exc_ = std::vector<double> (4096, 0.0);
     int excLen_ = 0, excPos_ = 0, excDelay_ = 0, dampPulse_ = 0, dampLen_ = 1, ctl_ = 0;
     double pickMin_ = 1;
     double bridge_ = 0;
