@@ -87,3 +87,6 @@ add_subdirectory(bass-leveler)
 
 # --- Note Space (third plug-in in this repo) -------------------------------------------
 add_subdirectory(notespace)
+
+# --- Steelwave (physically modelled pedal steel; string model + tests so far) ----------
+add_subdirectory(steelwave)
