@@ -34,12 +34,14 @@ SteelwaveEditor::SteelwaveEditor (SteelwaveProcessor& p) : juce::AudioProcessorE
     key.setup (*this, proc.apvts, "key", "KEY");
     pickup.setup (*this, proc.apvts, "pickup", "PICKUP");
     volcc.setup (*this, proc.apvts, "volcc", "VOLUME PEDAL");
+    voltype.setup (*this, proc.apvts, "voltype", "PEDAL TYPE");
     glide.setup (*this, proc.apvts, "glide", "GLIDE");
     strum.setup (*this, proc.apvts, "strum", "STRUM");
     pick.setup (*this, proc.apvts, "hardness", "PICK");
     bright.setup (*this, proc.apvts, "brightness", "BRIGHTNESS");
     sustain.setup (*this, proc.apvts, "sustain", "SUSTAIN");
     noise.setup (*this, proc.apvts, "barnoise", "BAR NOISE");
+    behind.setup (*this, proc.apvts, "behindbar", "BEHIND BAR");
     vibRate.setup (*this, proc.apvts, "vibrate", "VIB RATE");
     vibDepth.setup (*this, proc.apvts, "vibdepth", "VIB DEPTH");
     sym.setup (*this, proc.apvts, "sympathetic", "SYMPATHETIC");
@@ -67,15 +69,16 @@ void SteelwaveEditor::resized()
         c.label.setBounds (cell.removeFromTop (14));
         c.box.setBounds (cell.reduced (0, 1));
     };
-    place (set, row.removeFromLeft (row.getWidth() * 2 / 5).withTrimmedRight (10));
-    const int w = row.getWidth() / 3;
+    place (set, row.removeFromLeft (row.getWidth() * 3 / 10).withTrimmedRight (10));
+    const int w = row.getWidth() / 9;
     place (key, row.removeFromLeft (w).withTrimmedRight (10));
-    place (pickup, row.removeFromLeft (w).withTrimmedRight (10));
-    place (volcc, row);
+    place (pickup, row.removeFromLeft (w * 2).withTrimmedRight (10));
+    place (volcc, row.removeFromLeft (w * 3).withTrimmedRight (10));
+    place (voltype, row);
     r.removeFromTop (10);
     auto knobs = r.removeFromTop (112);
-    const int kw = knobs.getWidth() / 10;
-    for (auto* k : { &glide, &strum, &pick, &bright, &sustain, &noise, &vibRate, &vibDepth, &sym, &level })
+    const int kw = knobs.getWidth() / 11;
+    for (auto* k : { &glide, &strum, &pick, &bright, &sustain, &noise, &behind, &vibRate, &vibDepth, &sym, &level })
     {
         auto cell = knobs.removeFromLeft (kw);
         k->label.setBounds (cell.removeFromTop (16));

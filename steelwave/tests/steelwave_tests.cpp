@@ -340,6 +340,32 @@ int main()
         CHECK (on > off + 1.0, "on a body resonance the note decays faster (%.1f vs %.1f dB/s)", on, off);
     }
 
+    std::printf ("Behind the bar\n");
+    {
+        // bar at fret 4 on the E string: the 1/5 behind the bar rings near 1598 Hz, between the note's partials
+        auto at = [&] (double behind, double bar) {
+            StringParams q = quiet;
+            q.behindBar = behind;
+            return render (3, 1.0, 0.7, q, [&] (SteelString& s, double t) { if (t == 0) { s.setBar (bar, 0); s.pluck (0.7); } });
+        };
+        const double fb = midiHz (64) / (1.0 - std::exp2 (-4.0 / 12.0));
+        auto on = at (1.0, 4), off = at (0.0, 4), half = at (0.5, 4);
+        const double rel = db (dftMag (on, fb, 0.01, 0.1)) - db (dftMag (on, midiHz (68), 0.01, 0.1));
+        CHECK (db (dftMag (on, fb, 0.01, 0.1)) - db (dftMag (off, fb, 0.01, 0.1)) > 15, "fret 4: the segment behind the bar rings at %.0f Hz (%.1f dB re the note)", fb, rel);
+        CHECK (rel > -36 && rel < -20, "faint: %.1f dB below the note at Behind bar 100%%", -rel);
+        const double hr = db (dftMag (half, fb, 0.01, 0.1)) - db (dftMag (on, fb, 0.01, 0.1));
+        CHECK (hr > -8 && hr < -4, "Behind bar 50%%: %.1f dB", hr);
+        auto open1 = at (1.0, 0), open0 = at (0.0, 0);
+        bool same = true;
+        for (size_t i = 0; i < open1.size(); ++i) same &= open1[i] == open0[i];
+        CHECK (same, "open string (bar at the nut): nothing behind it");
+        // at fret 12 both halves share a pitch: they trade a little energy, the note isn't drained or pulled
+        auto u1 = at (1.0, 12), u0 = at (0.0, 12);
+        const double drain = db (rms (u0, 0.3, 0.9)) - db (rms (u1, 0.3, 0.9));
+        const double pull = cents (peakHz (u1, midiHz (76), 0.3, 0.6), midiHz (76));
+        CHECK (std::fabs (drain) < 2.0 && std::fabs (pull) < 1.0, "fret 12 (unison behind the bar): level %+.1f dB, pitch %+.2f cents", -drain, pull);
+    }
+
     std::printf ("Stability\n");
     {
         std::mt19937 g (7);

@@ -35,7 +35,7 @@ private:
 
     bassui::KnobLookAndFeel laf;
     SteelwaveProcessor& proc;
-    Choice set, key, pickup, volcc;
-    bassui::Knob glide, strum, pick, bright, sustain, noise, vibRate, vibDepth, sym, level;
+    Choice set, key, pickup, volcc, voltype;
+    bassui::Knob glide, strum, pick, bright, sustain, noise, behind, vibRate, vibDepth, sym, level;
     juce::Rectangle<int> neckArea;
 };

@@ -258,6 +258,7 @@ struct StringParams
     double barNoise = 0.5;      // contact noise level 0..1
     double polDetuneCents = 1.1;// vertical vs horizontal polarisation (slow beating)
     double nonlinear = 1.0;     // tension modulation and its growl (0 = a linear string)
+    double behindBar = 0.5;     // how freely the string behind the bar rings (0 = muted by the hand)
 };
 
 class SteelString
@@ -273,6 +274,7 @@ public:
         for (auto& p : pol_)
             p.line.allocate (maxD);
         combLine_.allocate ((int) std::ceil (0.004 * fs) + 8);
+        behindLine_.allocate (maxD); // the segment behind the bar is never longer than 3/4 of the string
         rng_.s = 0x1234567u + (uint32_t) (spec.openMidi * 7919);
         cDisp_ = solveDispersion (fs, fOpen_, spec.inharmCents10);
         for (auto& p : pol_)
@@ -305,6 +307,9 @@ public:
         }
         stretch_ = tension_ = 0;
         combLine_.clear();
+        behindLine_.clear();
+        behindLoss_.z = 0;
+        behindTheta_ = behindAmt_ = behindGate_ = behindOut_ = 0;
         bar_.jump (0);
         pedal_.jump (0);
         vib_.jump (0);
@@ -456,6 +461,26 @@ public:
             y[0] = rotC_ * h + rotS_ * v;
             y[1] = rotC_ * v - rotS_ * h;
         }
+        // the string behind the bar (bar to nut): short, high and out of key, heavily damped, trading
+        // energy with the played string through the bar (lossless rotation, so it can't run away).
+        // The bar moving back and forth (vibrato) moves it the opposite way.
+        {
+            const double frontFrac = std::exp2 (-(bar_.x + vib_.x) / 12.0);
+            const double behindFrac = std::max (1.0 - frontFrac, 1e-3);
+            const double perB = fs_ * behindFrac / (fOpen_ * std::exp2 ((pedal_.x + tension_) / 12.0));
+            double yb = behindLoss_.process (behindLine_.read (std::max (perB - behindComp_, 3.0)));
+            // the pick's impulse passes the bar and rings the short segment at its own pitch; that
+            // passes back through the bar and the pickup hears it go by (not fed into the played
+            // string's loop, so it can't build up on the note's own resonances)
+            behindOut_ = yb * kBehindOut * behindAmt_;
+            if (behindTheta_ > 0.0) // where the two segments share a pitch they also trade energy
+            {
+                const double h = y[0];
+                y[0] = behindC_ * h + behindTheta_ * yb;
+                yb = behindC_ * yb - behindTheta_ * h;
+            }
+            behindLine_.write ((float) (yb + exc * kBehindIn * behindGate_ + noise * 0.1));
+        }
         double inst = 0.0;
         for (int k = 0; k < 2; ++k)
         {
@@ -474,6 +499,7 @@ public:
         const double pull = (spec_.wound ? 2.0 : 1.0) * kPhantom * prm_.nonlinear * (inst - stretch_);
         bridge_ = absorbed + 0.05 * pull;
 
+        out += behindOut_;
         // pickup position comb (velocity pickup at a fixed distance from the bridge)
         combLine_.write ((float) out);
         double s = out - combLine_.read (std::max (combDelay_, 3.0));
@@ -507,7 +533,27 @@ private:
         const double sus = std::clamp (prm_.sustain, 0.25, 2.0);
         const double bright = std::exp2 ((prm_.brightness - 0.5) * 2.0);
         const double tL = std::exp (std::log (spec_.t60Low * sus) * (1 - damp_) + std::log (0.10) * damp_);
-        const double tH = std::exp (std::log (spec_.t60High * sus * bright) * (1 - damp_) + std::log (0.04) * damp_);
+        // the bar is a heavy rod resting on the string, not a hard stop: the shorter the front string,
+        // the more its losses at the bar show (a little darker high up the neck)
+        const double barSoft = 1.0 - 0.35 * (1.0 - std::exp2 (-bar_.x / 12.0));
+        const double tH = std::exp (std::log (spec_.t60High * sus * bright * barSoft) * (1 - damp_) + std::log (0.04) * damp_);
+        {
+            // behind the bar: rings briefly (nut and bar contact damp it), coupled once the bar is
+            // past the first fret (closer in, the segment is too short to ring)
+            const double frontFrac = std::exp2 (-bar_.x / 12.0);
+            const double behindFrac = std::max (1.0 - frontFrac, 1e-3);
+            const double fB = fOpen_ * std::exp2 ((pedal_.x + tension_) / 12.0) / behindFrac;
+            behindLoss_.design (std::min (fB, 0.4 * fs_), std::exp (std::log (1.0) * (1 - damp_) + std::log (0.05) * damp_),
+                                std::exp (std::log (0.12) * (1 - damp_) + std::log (0.02) * damp_), 5000.0, fs_);
+            behindComp_ = behindLoss_.phaseDelay (2.0 * kPi * std::min (fB, 0.4 * fs_) / fs_);
+            const double ramp = std::clamp ((bar_.x - 0.3) / 1.2, 0.0, 1.0);
+            const double perB = fs_ / fB;
+            const double shortRamp = std::clamp ((perB - 4.0) / 4.0, 0.0, 1.0); // too short to ring below ~4-8 samples
+            behindGate_ = ramp * shortRamp;
+            behindAmt_ = std::clamp (prm_.behindBar, 0.0, 1.0) * behindGate_;
+            behindTheta_ = kBehindMax * behindAmt_;
+            behindC_ = std::sqrt (1.0 - behindTheta_ * behindTheta_);
+        }
 
         for (int k = 0; k < 2; ++k)
         {
@@ -628,7 +674,11 @@ private:
     StringSpec spec_;
     StringParams prm_;
     std::array<Pol, 2> pol_;
-    FracDelay combLine_;
+    FracDelay combLine_, behindLine_;
+    LossFilter behindLoss_;
+    double behindTheta_ = 0, behindC_ = 1, behindComp_ = 0, behindAmt_ = 0, behindGate_ = 0, behindOut_ = 0;
+    static constexpr double kBehindMax = 0.002; // resonant exchange per pass at Behind bar = 1 (weak: the bar is heavy)
+    static constexpr double kBehindIn = 0.5, kBehindOut = 0.06; // the pick's impulse through the bar, and back
     Glide bar_, pedal_, vib_;
     std::array<double, 4096> exc_ {};
     int excLen_ = 0, excPos_ = 0, excDelay_ = 0, dampPulse_ = 0, dampLen_ = 1, ctl_ = 0;

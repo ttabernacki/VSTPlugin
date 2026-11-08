@@ -56,7 +56,7 @@ private:
     int lastSetParam_ = -1;
     std::atomic<float>*pSet = nullptr, *pKey = nullptr, *pGlide = nullptr, *pStrum = nullptr, *pHard = nullptr, *pBright = nullptr,
         *pSustain = nullptr, *pNoise = nullptr, *pVibRate = nullptr, *pVibDepth = nullptr, *pSym = nullptr, *pPickup = nullptr,
-        *pVolCc = nullptr, *pLevel = nullptr;
+        *pVolCc = nullptr, *pLevel = nullptr, *pBehind = nullptr, *pVolType = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SteelwaveProcessor)
 };

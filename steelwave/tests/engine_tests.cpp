@@ -266,6 +266,30 @@ int main()
         CHECK (rms (v, 0.1, 0.5) < 1e-6 && rms (v, 0.8, 1.1) > 1e-3, "volume pedal: silent heel-down, swells in");
     }
 
+    std::printf ("Volume pedal tone\n");
+    {
+        // a held chord; heard at full volume and with the pedal at half level (divider t = 0.5)
+        auto tone = [&] (EngineParams::VolumePedal type, double cc) {
+            EngineParams q = p;
+            q.volumePedal = type;
+            Script sc;
+            sc.at (0.0, [cc] (SteelEngine& e) { e.controller (11, cc); });
+            sc.at (0.05, [] (SteelEngine& e) { e.noteOn (60, 0.9); });
+            auto x = render (q, 0, sc, 0.8);
+            double hi = 0, lo = 0;
+            for (double f = 3500; f < 7000; f *= 1.05) hi += std::pow (10, presence (x, 12 + 12 * std::log2 (f / 8.1758), 0.3, 0.4) / 10);
+            for (double f = 300; f < 700; f *= 1.05) lo += std::pow (10, presence (x, 12 + 12 * std::log2 (f / 8.1758), 0.3, 0.4) / 10);
+            return 10 * std::log10 (hi / lo);
+        };
+        const double half = std::pow (0.5, 1.0 / 2.5);
+        const double p250 = tone (EngineParams::Passive250k, half) - tone (EngineParams::Passive250k, 1.0);
+        const double p500 = tone (EngineParams::Passive500k, half) - tone (EngineParams::Passive500k, 1.0);
+        const double act = tone (EngineParams::Active, half) - tone (EngineParams::Active, 1.0);
+        CHECK (p250 < -3.0, "passive 250k pedal half down: highs %.1f dB vs full up", p250);
+        CHECK (p500 < p250 - 2.0, "500k pot darker still (%.1f dB)", p500);
+        CHECK (std::fabs (act) < 0.5, "active pedal: no tone change (%.2f dB)", act);
+    }
+
     std::printf ("Single-note sets\n");
     {
         Script sc;

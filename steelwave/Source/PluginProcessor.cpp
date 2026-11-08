@@ -57,9 +57,13 @@ APVTS::ParameterLayout SteelwaveProcessor::createLayout()
                                                       .withValueFromStringFunction (pctIn)));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "sympathetic", 1 }, "Sympathetic", Range (0.0f, 1.0f), 0.5f,
                                                   Attr().withStringFromValueFunction (pct).withValueFromStringFunction (pctIn)));
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "behindbar", 1 }, "Behind bar", Range (0.0f, 1.0f), 0.5f,
+                                                  Attr().withStringFromValueFunction (pct).withValueFromStringFunction (pctIn)));
     l.add (std::make_unique<AudioParameterChoice> (ParameterID { "pickup", 1 }, "Pickup", StringArray { "Single coil", "Humbucker" }, 0));
     l.add (std::make_unique<AudioParameterChoice> (ParameterID { "volcc", 1 }, "Volume pedal",
                                                    StringArray { "CC11 Expression", "CC7 Volume", "CC4 Foot", "CC2 Breath", "Off" }, 0));
+    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "voltype", 1 }, "Pedal type",
+                                                   StringArray { "Passive 250k", "Passive 500k", "Active (no tone loss)" }, 0));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "level", 1 }, "Level", Range (-24.0f, 12.0f), 0.0f,
                                                   Attr().withStringFromValueFunction ([] (float v, int) { return String (v > 0 ? "+" : "") + String (v, 1) + " dB"; })
                                                       .withValueFromStringFunction (num)));
@@ -84,6 +88,8 @@ SteelwaveProcessor::SteelwaveProcessor()
     pPickup = apvts.getRawParameterValue ("pickup");
     pVolCc = apvts.getRawParameterValue ("volcc");
     pLevel = apvts.getRawParameterValue ("level");
+    pBehind = apvts.getRawParameterValue ("behindbar");
+    pVolType = apvts.getRawParameterValue ("voltype");
     for (auto& s : uiSemis)
         s = 0.0f;
 }
@@ -111,6 +117,8 @@ sw::EngineParams SteelwaveProcessor::readParams() const
     p.pickup = (int) pPickup->load() == 0 ? sw::Pickup::SingleCoil : sw::Pickup::Humbucker;
     p.volumeCc = kVolumeCcs[juce::jlimit (0, 4, (int) pVolCc->load())];
     p.levelDb = pLevel->load();
+    p.behindBar = pBehind->load();
+    p.volumePedal = (sw::EngineParams::VolumePedal) juce::jlimit (0, 2, (int) pVolType->load());
     return p;
 }
 

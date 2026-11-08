@@ -81,11 +81,13 @@ Sets: Scale, Scale high (bar +12), Whole-step bends, Half-step bends.
 | Brightness | 0-100 % | How long the high partials ring (old → new strings) |
 | Sustain | 25-200 % | Decay times |
 | Bar noise | 0-100 % | Contact noise of the bar sliding over the strings |
+| Behind bar | 0-100 % | How freely the strings behind the bar ring (0 = muted by the hand) |
 | Vib rate / depth | 3-8 Hz, 0-50 cents | Bar vibrato at full mod wheel |
 | Sympathetic | 0-100 % | Unpicked strings ringing along through the bridge |
 | Level | -24..+12 dB | |
 
-Also: Set, Key, Pickup (single coil / humbucker) and the Volume pedal CC. The panel shows the neck, with
+Also: Set, Key, Pickup (single coil / humbucker), the Volume pedal CC, and Pedal type (passive 250k,
+passive 500k, or active). The panel shows the neck, with
 the bar, the strings ringing and their notes, the current chord, and what the wheel will do (which
 pedals, or "voice-led").
 
@@ -113,10 +115,13 @@ The pick and pickup are placed in metres from the bridge, so their comb filters 
 | Body and bridge | Five cabinet/changer resonances (104-1180 Hz) plus a broadband part absorb energy from every string at the bridge. The vertical plane pushes on the top and loses ~4x more than the horizontal. Partials near a body resonance die faster, so each note decays unevenly, as on a real instrument. What the body absorbs drives the other strings (sympathetic resonance, strongest near the body modes). This is passive by construction: a string gets back at most 81% of what the strings gave the body, so the network always loses energy |
 | Two planes | Each string's horizontal and vertical vibrations trade energy through the bridge: a slow, lossless rotation, full exchange in 1.5-2.5 s, a little different per string. With the faster-decaying vertical plane this gives the two-stage decay of real strings: a fast early drop (~19 dB/s) and then a long, slowly blooming tail (~11 dB/s) |
 | Hand | Palm/hand blocks ramp both decay times down |
+| Behind the bar | The bar splits each string. The bar-to-nut part (1 - 2^(-fret/12) of the string) is short, high and usually out of key: at fret 3 on the E string it rings ~2 kHz over a G4. Moving the bar or vibrato moves it the opposite way to the note. It's a short, heavily damped second loop (T60 ~1 s). The pick's impulse passes through the bar and rings it, and the pickup hears it go by (about 30 dB below the note at Behind bar 100%). Where both halves share a pitch (fret 12) they also trade a little energy, losslessly: no drain, pitch within 0.3 cents |
+| Bar | A heavy rod resting on the string, not a hard stop: high partials die a little faster the further up the neck (up to ~25% at the 24th fret) |
+| Volume pedal | A passive pedal is a pot between the pickup and the cable. Part-way down, the resistance it leaves in the path (R t(1-t)) and ~700 pF of cable make a low-pass: open at both ends, darkest around half level (250k: ~3.6 kHz, about 7 dB less treble; 500k darker). Swells get brighter as they open, as with a real passive pedal. Active pedals have no loss |
 | Pickup | Comb at the pickup's position, plus a resonant coil/cable low-pass |
 
 **Engine** (`core/SteelEngine.h`): 10 strings sharing one bar, sample-accurate MIDI, strums, the
-volume pedal and vibrato. 10 strings use about 6% of one core at 48 kHz.
+volume pedal and vibrato. 10 strings use about 7% of one core at 48 kHz.
 
 ## Build, test, listen
 ```
@@ -130,8 +135,8 @@ strictness 10. Bundles are in the `Steelwave-<os>` artifacts.
 
 The tests cover:
 - tuning, glides, decay, picking, bar noise, tension modulation, the two-stage decay, body
-  resonances and stability (`steelwave_tests`);
+  resonances, behind the bar and stability (`steelwave_tests`);
 - every voicing in every key, the single-note maps, the wheel, legato, release/sustain, the volume
-  pedal, CC pedals, sympathetic coupling and a 60 s random-MIDI stress run (`steelwave_engine_tests`);
+  pedal and its tone, CC pedals, sympathetic coupling and a 60 s random-MIDI stress run (`steelwave_engine_tests`);
 - host-style tests: parameters, state, keyswitches, bit-identical output at any block size, sample
   rates, bypass and the editor (`SteelwavePluginTests`).

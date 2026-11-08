@@ -35,6 +35,9 @@ struct EngineParams
     Pickup::Type pickup = Pickup::SingleCoil;
     double levelDb = 0.0;
     int volumeCc = 11;          // < 0: no volume pedal
+    enum VolumePedal { Passive250k, Passive500k, Active };
+    VolumePedal volumePedal = Passive250k; // passive pedals lose treble part-way down
+    double behindBar = 0.5;     // string behind the bar ringing (0 = muted by the hand)
 };
 
 class SteelEngine
@@ -71,6 +74,8 @@ public:
         ccTravel_.fill (0.0);
         sustainPedal_ = false;
         vol_ = volTarget_ = 1.0;
+        volLp_ = 0;
+        volG_ = 1.0;
         vibPh_ = driftPh_ = 0;
         clock_ = 0;
         rebuildSingle();
@@ -188,7 +193,12 @@ public:
             }
             vol_ += volCoef_ * (volTarget_ - vol_);
             const double g = std::pow (std::clamp (vol_, 0.0, 1.0), 2.5); // volume pedals are strongly tapered
-            out[i] = pickup_.process ((float) sum) * (float) (level * g);
+            if ((clock_ & 15) == 0)
+                updateVolumeTone (g);
+            double x = pickup_.process ((float) sum);
+            volLp_ += volG_ * (x - volLp_); // the pot's resistance into the cable's capacitance
+            x = volLp_;
+            out[i] = (float) (x * level * g);
             ++clock_;
         }
     }
@@ -222,6 +232,7 @@ private:
         sp.brightness = prm_.brightness;
         sp.sustain = prm_.sustain;
         sp.barNoise = prm_.barNoise;
+        sp.behindBar = prm_.behindBar;
         for (auto& s : str_)
             s.setParams (sp);
         pickup_.set (prm_.pickup);
@@ -445,6 +456,22 @@ private:
     SingleMap single_;
     std::vector<int> held_; // reserved up front: never reallocates on the audio thread
     int set_ = 0, chordSlot_ = -1, bar_ = 0;
+    // Passive volume pedal: a pot between the pickup and the cable. Part-way down, the resistance it
+    // leaves in the signal path (the two halves of the pot in parallel, R t (1 - t), t = the divider
+    // ratio) and the cable's capacitance (~700 pF, 20 ft) make a low-pass: darkest around half way
+    // (250k: ~3.6 kHz), open at both ends. An active pedal has no loss.
+    void updateVolumeTone (double t)
+    {
+        double fc = 1e9;
+        if (prm_.volumePedal != EngineParams::Active)
+        {
+            const double R = prm_.volumePedal == EngineParams::Passive500k ? 500e3 : 250e3, C = 700e-12;
+            const double rth = R * t * (1.0 - t);
+            fc = 1.0 / (2.0 * kPi * std::max (rth, 1.0) * C);
+        }
+        volG_ = fc >= 0.45 * fs_ ? 1.0 : 1.0 - std::exp (-2.0 * kPi * fc / fs_);
+    }
+    double volLp_ = 0, volG_ = 1.0;
     double wheel_ = 0, mod_ = 0, vol_ = 1, volTarget_ = 1, volCoef_ = 0.002, vibPh_ = 0, driftPh_ = 0;
     bool sustainPedal_ = false;
     int64_t clock_ = 0;

@@ -96,11 +96,11 @@ int main()
     {
         SteelwaveProcessor p;
         const char* ids[] = { "set", "key", "glide", "strum", "hardness", "brightness", "sustain", "barnoise", "vibrate", "vibdepth",
-                              "sympathetic", "pickup", "volcc", "level" };
+                              "sympathetic", "pickup", "volcc", "level", "behindbar", "voltype" };
         int missing = 0;
         for (auto* id : ids)
             missing += p.apvts.getParameter (id) == nullptr;
-        CHECK (missing == 0 && p.getParameters().size() == 14, "14 parameters");
+        CHECK (missing == 0 && p.getParameters().size() == 16, "16 parameters");
         CHECK ((int) getPlain (p, "key") == 4 && (int) getPlain (p, "set") == 0, "defaults: key of E, chord set 1");
         CHECK (p.acceptsMidi() && ! p.producesMidi(), "takes MIDI");
         juce::AudioProcessor::BusesLayout mono, stereo, withIn;
