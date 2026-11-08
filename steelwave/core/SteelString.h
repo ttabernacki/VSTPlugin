@@ -90,6 +90,12 @@ private:
     int mask_ = 0, w_ = 0;
 };
 
+// Max bridge coupling (per sample, see SteelString::process) and the loop-gain headroom it needs.
+// Coupled loops resonating together are stable while (n-1) * coupling < 1 - g: keeping 1 - g at
+// least 5x the coupling leaves room for 5 strings sharing an exact resonance (E9 has pairs at most).
+constexpr double kMaxCoupling = 1.5e-4;
+constexpr double kCouplingHeadroom = 5.0 * kMaxCoupling;
+
 // Loop loss: g (1-a) / (1 - a z^-1). Designed from T60 at low frequencies and at fHigh.
 struct LossFilter
 {
@@ -98,6 +104,8 @@ struct LossFilter
     {
         const double perSec = f0; // loop passes per second
         g = std::pow (10.0, -3.0 / (perSec * std::max (t60Low, 1e-3)));
+        // headroom for bridge coupling: per-period coupling gain from 9 other strings stays below 1 - g
+        g = std::min (g, 1.0 - kCouplingHeadroom);
         const double gh = std::pow (10.0, -3.0 / (perSec * std::max (t60High, 1e-3)));
         const double r = std::clamp (gh / g, 0.0, 1.0);
         const double w = 2.0 * kPi * std::min (fHigh, 0.45 * fs) / fs;
@@ -273,6 +281,7 @@ public:
         energy_ = 0;
         noiseLev_ = 0;
         noiseBp_.reset();
+        bridge_ = 0;
         ridgePh_ = attack_ = 0;
         noiseHp_ = 0;
         dc_ = 0;
@@ -284,8 +293,10 @@ public:
     const StringSpec& spec() const { return spec_; }
 
     // positions in semitones above the open string; glide in seconds (0 = jump)
-    void setBar (double semis, double glideSec)
+    // noise = false: the bar is lifted and put down (no contact noise for this move)
+    void setBar (double semis, double glideSec, bool noise = true)
     {
+        silentMove_ = ! noise;
         if (glideSec <= 0) { bar_.jump (semis); return; }
         bar_.setTime (glideSec);
         bar_.target = semis;
@@ -297,10 +308,15 @@ public:
         pedal_.target = semis;
     }
     void setVibrato (double semis) { vib_.target = semis; }
+    // how hard the bar presses this string (1 = a played string, less for ones just under the bar)
+    void setContact (double c) { contact_ = std::clamp (c, 0.0, 1.0); }
 
     double currentSemis() const { return bar_.x + pedal_.x + vib_.x; }
     double currentHz() const { return fOpen_ * std::pow (2.0, currentSemis() / 12.0); }
     bool isSounding() const { return energy_ > 1e-9 || excPos_ < excLen_ || excDelay_ > 0; }
+    double level() const { return energy_; } // mean square at the bridge (roughly)
+    // ringing audibly and not being blocked
+    bool isRinging() const { return (energy_ > 1e-12 || excPos_ < excLen_ || excDelay_ > 0) && dampTarget_ < 0.5; }
 
     // Pick the string. velocity 0..1. If it's already ringing, the pick first catches it briefly.
     void pluck (double velocity)
@@ -321,7 +337,9 @@ public:
     // Hand/bar block: 1 = fully muted (fast decay), 0 = ringing. Ramped.
     void setDamp (double amount) { dampTarget_ = std::clamp (amount, 0.0, 1.0); }
 
-    float process()
+    // `bridgeIn`: what the other strings put into this one through the bridge, already scaled by the
+    // coupling amount (<= kMaxCoupling times the sum of the other strings' bridge() keeps it stable).
+    float process (double bridgeIn = 0.0)
     {
         constexpr int kCtl = 16;
         if (ctl_-- <= 0)
@@ -351,7 +369,9 @@ public:
         const double vBar = std::fabs (L * (std::log (2.0) / 12.0) * barVelSemis); // m/s
         // S-curve in speed: silent while the bar creeps into place, saturating on fast slides
         const double sx = std::min (vBar / 0.4, 1.0);
-        const double speedLev = sx * sx * (3.0 - 2.0 * sx) * prm_.barNoise;
+        if (silentMove_ && std::fabs (bar_.target - bar_.x) < 1e-4)
+            silentMove_ = false;
+        const double speedLev = silentMove_ ? 0.0 : sx * sx * (3.0 - 2.0 * sx) * prm_.barNoise * contact_;
         noiseLev_ += (speedLev > noiseLev_ ? 0.002 : 0.0008) * (speedLev - noiseLev_);
         double noise = 0.0;
         if (noiseLev_ > 1e-5)
@@ -393,7 +413,12 @@ public:
             double y = p.line.read (per - comp);
             y = p.disp.process (p.loss.process (y)) * pickGain;
             // a little of the contact noise excites the string; most of it is heard directly
-            const double in = y + exc * kExcSplit[k] + noise * 0.1 * kExcSplit[k];
+            double in = y + exc * kExcSplit[k] + noise * 0.1 * kExcSplit[k];
+            if (k == 0)
+            {
+                bridge_ = y;
+                in += bridgeIn;
+            }
             p.line.write ((float) in);
             out += in * kPickupSplit[k];
         }
@@ -537,6 +562,15 @@ private:
     std::array<double, 4096> exc_ {};
     int excLen_ = 0, excPos_ = 0, excDelay_ = 0, dampPulse_ = 0, dampLen_ = 1, ctl_ = 0;
     double pickMin_ = 1;
+    double bridge_ = 0;
+    bool silentMove_ = false;
+    double contact_ = 1.0;
+
+public:
+    // this string's horizontal wave arriving at the bridge (drives the other strings)
+    double bridge() const { return bridge_; }
+
+private:
     double attack_ = 0, attackDecay_ = 0, ridgePh_ = 0, hpCoef_ = 0.05;
     double damp_ = 0, dampTarget_ = 0, energy_ = 0, noiseLev_ = 0, noiseHp_ = 0, dc_ = 0;
     Biquad noiseBp_;

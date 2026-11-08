@@ -1,0 +1,453 @@
+#pragma once
+
+// Steelwave engine: 10 E9 strings sharing one bar, pedals and knee levers, the chord and
+// single-note sets, bridge coupling, vibrato, volume pedal and pickup (no JUCE).
+//
+// MIDI (the plug-in passes events in with sample offsets; the engine is sample-accurate):
+//   C1..G1 (24..31)   keyswitch chord sets 1-8      G#1..B1 (32..35)  single-note sets 1-4
+//   C2 and up         play (see Voicing.h for the layout)
+//   pitch wheel       bend (chord sets: up = a 4th up, down = a 3rd up; single: next/previous scale note)
+//   mod wheel         bar vibrato depth          CC64 sustain (let strings ring after release)
+//   volume pedal CC   (11 by default)            CC20..26 A, B, C pedals, LKL, LKR, RKL, RKR (real E9 on top)
+
+#include "SteelString.h"
+#include "Voicing.h"
+
+namespace sw
+{
+constexpr int kChordSets = 8, kSingleSets = 4, kSets = kChordSets + kSingleSets;
+constexpr int kKeyswitchLo = 24, kKeyswitchHi = 35, kPlayLo = 36;
+constexpr int kPedalCcFirst = 20;
+
+inline const char* setName (int s)
+{
+    return s < kChordSets ? chordSetDefs()[(size_t) s].name : singleSetDefs()[(size_t) (s - kChordSets)].name;
+}
+
+struct EngineParams
+{
+    int keyPc = 4;              // E
+    double glide = 0.25;        // legato bar slide, s
+    double strumMs = 12.0;      // pick spread across a chord
+    double hardness = 0.75, brightness = 0.5, sustain = 1.0, barNoise = 0.5;
+    double vibRate = 5.5, vibDepth = 0.15; // Hz, semitones at full mod wheel
+    double sympathetic = 0.5;   // bridge coupling 0..1
+    Pickup::Type pickup = Pickup::SingleCoil;
+    double levelDb = 0.0;
+    int volumeCc = 11;          // < 0: no volume pedal
+};
+
+class SteelEngine
+{
+public:
+    SteelEngine()
+    {
+        (void) chordSets(); // build the voicing tables up front, not on the audio thread
+        held_.reserve (128);
+    }
+
+    void prepare (double fs)
+    {
+        fs_ = fs;
+        const auto specs = e9Strings();
+        for (int i = 0; i < kStrings; ++i)
+            str_[(size_t) i].prepare (fs, specs[(size_t) i]);
+        pickup_.prepare (fs);
+        reset();
+    }
+
+    void reset()
+    {
+        for (auto& s : str_)
+            s.reset();
+        pickup_.reset();
+        held_.clear();
+        for (auto& st : sst_)
+            st = {};
+        nPicks_ = 0;
+        chordSlot_ = -1;
+        bar_ = 0;
+        wheel_ = mod_ = 0;
+        ccTravel_.fill (0.0);
+        sustainPedal_ = false;
+        vol_ = volTarget_ = 1.0;
+        vibPh_ = driftPh_ = 0;
+        clock_ = 0;
+        rebuildSingle();
+        applyParams();
+    }
+
+    void setParams (const EngineParams& p)
+    {
+        const bool keyChanged = p.keyPc != prm_.keyPc;
+        prm_ = p;
+        applyParams();
+        if (keyChanged)
+        {
+            stopAll();
+            rebuildSingle();
+        }
+    }
+    const EngineParams& params() const { return prm_; }
+
+    void setSet (int s)
+    {
+        s = std::clamp (s, 0, kSets - 1);
+        if (s == set_)
+            return;
+        stopAll();
+        set_ = s;
+        rebuildSingle();
+    }
+    int currentSet() const { return set_; }
+    bool chordMode() const { return set_ < kChordSets; }
+
+    // --- MIDI ------------------------------------------------------------------------------
+    void noteOn (int note, double vel)
+    {
+        if (note >= kKeyswitchLo && note <= kKeyswitchHi)
+        {
+            setSet (note - kKeyswitchLo);
+            return;
+        }
+        if (note < kPlayLo || note > 127)
+            return;
+        vel = std::clamp (vel, 0.0, 1.0);
+        if (chordMode())
+            chordOn (note, vel);
+        else
+            singleOn (note, vel);
+    }
+    void noteOff (int note)
+    {
+        if (note < kPlayLo || note > 127)
+            return;
+        if (chordMode())
+            chordOff (note);
+        else
+            singleOff (note);
+    }
+    void pitchWheel (double w) // -1..1
+    {
+        wheel_ = std::clamp (w, -1.0, 1.0);
+        updatePedals (0.008);
+    }
+    void controller (int cc, double v) // v 0..1
+    {
+        if (cc == 1)
+            mod_ = v;
+        else if (cc == 64)
+        {
+            const bool on = v >= 0.5;
+            if (sustainPedal_ && ! on)
+                releaseUnheld();
+            sustainPedal_ = on;
+        }
+        else if (cc == prm_.volumeCc)
+            volTarget_ = v;
+        else if (cc >= kPedalCcFirst && cc < kPedalCcFirst + kControls)
+        {
+            ccTravel_[(size_t) (cc - kPedalCcFirst)] = v;
+            updatePedals (0.01);
+        }
+        else if (cc == 120 || cc == 123)
+            stopAll();
+    }
+    void allNotesOff() { stopAll(); }
+
+    // --- audio -----------------------------------------------------------------------------
+    void process (float* out, int n)
+    {
+        const double dt = 1.0 / fs_;
+        const double kappa = kMaxCoupling * std::clamp (prm_.sympathetic, 0.0, 1.0);
+        const double level = std::pow (10.0, prm_.levelDb / 20.0) * kOutputScale;
+        for (int i = 0; i < n; ++i)
+        {
+            // scheduled picks (strums)
+            for (int k = 0; k < nPicks_;)
+                if (picks_[(size_t) k].at <= clock_)
+                {
+                    str_[(size_t) picks_[(size_t) k].string].pluck (picks_[(size_t) k].vel);
+                    picks_[(size_t) k] = picks_[(size_t) --nPicks_];
+                }
+                else
+                    ++k;
+            // bar vibrato: a hand rocking the bar, so its rate wanders a little
+            driftPh_ += 0.37 * dt;
+            vibPh_ += prm_.vibRate * (1.0 + 0.04 * std::sin (2 * kPi * driftPh_)) * dt;
+            vibPh_ -= std::floor (vibPh_);
+            const double vib = mod_ * prm_.vibDepth * std::sin (2 * kPi * vibPh_);
+            double bsum = 0;
+            for (auto& s : str_)
+                bsum += s.bridge();
+            double sum = 0;
+            for (auto& s : str_)
+            {
+                s.setVibrato (vib);
+                sum += s.process (kappa * (bsum - s.bridge()));
+            }
+            vol_ += volCoef_ * (volTarget_ - vol_);
+            const double g = std::pow (std::clamp (vol_, 0.0, 1.0), 2.5); // volume pedals are strongly tapered
+            out[i] = pickup_.process ((float) sum) * (float) (level * g);
+            ++clock_;
+        }
+    }
+
+    // --- for display -------------------------------------------------------------------------
+    int bar() const { return bar_; }
+    int chordSlot() const { return chordSlot_; }
+    double wheel() const { return wheel_; }
+    double volume() const { return vol_; }
+    bool stringSounding (int s) const { return str_[(size_t) s].isSounding(); }
+    double stringLevel (int s) const { return str_[(size_t) s].level(); }
+    double stringSemis (int s) const { return str_[(size_t) s].currentSemis(); }
+
+    static constexpr double kOutputScale = 0.12;
+    static constexpr double kLandSec = 0.006;
+    static constexpr double kIdleContact = 0.2;
+
+private:
+    struct StringState
+    {
+        double rest = 0, up = 0, down = 0; // pedal offsets (semitones) at rest / full wheel up / down
+        int owner = -1;                     // single sets: the key playing this string
+        bool inChord = false;
+    };
+    struct Pick { int64_t at; int string; double vel; };
+
+    void applyParams()
+    {
+        StringParams sp;
+        sp.hardness = prm_.hardness;
+        sp.brightness = prm_.brightness;
+        sp.sustain = prm_.sustain;
+        sp.barNoise = prm_.barNoise;
+        for (auto& s : str_)
+            s.setParams (sp);
+        pickup_.set (prm_.pickup);
+        volCoef_ = 1.0 - std::exp (-1.0 / (0.01 * fs_));
+        if (prm_.volumeCc < 0)
+            volTarget_ = 1.0;
+    }
+
+    double offsetFor (int s) const
+    {
+        const auto& st = sst_[(size_t) s];
+        double o = st.rest + (wheel_ >= 0 ? wheel_ * (st.up - st.rest) : -wheel_ * (st.down - st.rest));
+        o += cc_[(size_t) s];
+        return std::clamp (o, -4.0, 6.0);
+    }
+    void updatePedals (double glide)
+    {
+        const auto c = copedentOffsets (ccTravel_);
+        for (int s = 0; s < kStrings; ++s)
+            cc_[(size_t) s] = c[(size_t) s];
+        for (int s = 0; s < kStrings; ++s)
+            str_[(size_t) s].setPedal (offsetFor (s), glide);
+    }
+
+    void block (int s) { str_[(size_t) s].setDamp (1.0); cancelPicks (s); }
+    void cancelPicks (int s)
+    {
+        for (int k = 0; k < nPicks_;)
+            if (picks_[(size_t) k].string == s) picks_[(size_t) k] = picks_[(size_t) --nPicks_];
+            else ++k;
+    }
+    void schedule (int s, double delaySec, double vel)
+    {
+        cancelPicks (s);
+        if (nPicks_ < (int) picks_.size())
+            picks_[(size_t) nPicks_++] = { clock_ + (int64_t) (delaySec * fs_), s, vel };
+    }
+    double humanize() { return rng_.next(); } // -1..1
+
+    // the bar is lifted and put down somewhere else: anything still ringing is blocked first
+    void moveBarTo (int bar, bool legato)
+    {
+        if (bar == bar_ && ! legato)
+            return;
+        for (int s = 0; s < kStrings; ++s)
+        {
+            if (legato)
+                str_[(size_t) s].setBar (bar, prm_.glide);
+            else
+                str_[(size_t) s].setBar (bar, kLandSec * 0.8, false);
+        }
+        bar_ = bar;
+    }
+
+    void stopAll()
+    {
+        for (int s = 0; s < kStrings; ++s)
+        {
+            block (s);
+            sst_[(size_t) s] = {};
+        }
+        nPicks_ = 0;
+        held_.clear();
+        chordSlot_ = -1;
+        updatePedals (0.01);
+    }
+    void releaseUnheld()
+    {
+        if (chordMode())
+        {
+            if (held_.empty())
+                for (int s = 0; s < kStrings; ++s)
+                    block (s);
+        }
+        else
+            for (int s = 0; s < kStrings; ++s)
+                if (sst_[(size_t) s].owner < 0)
+                    block (s);
+    }
+
+    // --- chord sets ------------------------------------------------------------------------
+    void chordOn (int note, double vel)
+    {
+        held_.erase (std::remove (held_.begin(), held_.end(), note), held_.end());
+        const bool legato = ! held_.empty();
+        held_.push_back (note);
+        playChord (note % 12, vel, legato, true);
+    }
+    void chordOff (int note)
+    {
+        const bool wasTop = ! held_.empty() && held_.back() == note;
+        held_.erase (std::remove (held_.begin(), held_.end(), note), held_.end());
+        if (! held_.empty())
+        {
+            if (wasTop) // back to the chord still held: slide there, nothing new picked
+                playChord (held_.back() % 12, 0.0, true, false);
+            return;
+        }
+        // last key up: a palm block over all the strings (sympathetic ringing included)
+        if (! sustainPedal_)
+            for (int s = 0; s < kStrings; ++s)
+                block (s);
+    }
+    void playChord (int slot, double vel, bool legato, bool pickNew)
+    {
+        const auto& v = chordSets()[(size_t) set_][(size_t) slot];
+        const int bar = fitBar (v.bar + keyShift (prm_.keyPc));
+        const bool barMoves = bar != bar_;
+        bool inNew[kStrings] = {}, wasIn[kStrings] = {};
+        for (int s = 0; s < kStrings; ++s)
+            wasIn[s] = sst_[(size_t) s].inChord;
+        for (int s : v.strings)
+            inNew[s] = true;
+        // strings leaving the chord, or that would be dragged along by a lifted bar, are blocked
+        for (int s = 0; s < kStrings; ++s)
+        {
+            if (inNew[s])
+                continue;
+            if (sst_[(size_t) s].inChord || (barMoves && ! legato))
+                block (s);
+            sst_[(size_t) s] = {};
+        }
+        // the bar's contact noise comes mostly from the strings being played
+        for (int s = 0; s < kStrings; ++s)
+            str_[(size_t) s].setContact (inNew[s] ? 1.0 : kIdleContact);
+        for (int s : v.strings)
+        {
+            auto& st = sst_[(size_t) s];
+            st.rest = v.rest[(size_t) s];
+            st.up = v.up[(size_t) s];
+            st.down = v.down[(size_t) s];
+            st.inChord = true;
+            st.owner = -1;
+            str_[(size_t) s].setPedal (offsetFor (s), legato ? prm_.glide : 0.004);
+        }
+        moveBarTo (bar, legato);
+        chordSlot_ = slot;
+        // a lifted bar takes a few ms to land: pick after that, or the attack would scoop
+        if (! pickNew)
+            return;
+        // pick: low string first; on a legato slide only the strings that aren't already ringing
+        int order[kStrings];
+        const int no = std::min ((int) v.strings.size(), kStrings);
+        std::copy (v.strings.begin(), v.strings.begin() + no, order);
+        std::sort (order, order + no, [] (int a, int b) { return kE9Open[(size_t) a] < kE9Open[(size_t) b]; });
+        const double spread = prm_.strumMs * 1e-3 * chordSetDefs()[(size_t) set_].strumScale;
+        double t = barMoves && ! legato ? kLandSec : 0.0;
+        for (int k = 0; k < no; ++k)
+        {
+            const int s = order[k];
+            // a slide carries the strings already ringing in the chord, however quiet: never re-picked
+            if (legato && wasIn[s] && str_[(size_t) s].isRinging())
+                continue;
+            schedule (s, t + 0.002 * std::fabs (humanize()), vel * (legato ? 0.6 : 1.0) * (1.0 + 0.06 * humanize()));
+            t += spread;
+        }
+    }
+
+    // --- single-note sets --------------------------------------------------------------------
+    void rebuildSingle()
+    {
+        if (! chordMode())
+            single_.build (set_ - kChordSets, prm_.keyPc);
+    }
+    void singleOn (int note, double vel)
+    {
+        const SingleNote n = single_.lookup (note);
+        if (n.string < 0)
+            return;
+        double delay = 0;
+        if (single_.bar() != bar_)
+        {
+            for (int s = 0; s < kStrings; ++s)
+                block (s);
+            moveBarTo (single_.bar(), false);
+            delay = kLandSec;
+        }
+        held_.erase (std::remove (held_.begin(), held_.end(), note), held_.end());
+        const bool legato = ! held_.empty();
+        auto& st = sst_[(size_t) n.string];
+        const bool sameString = legato && st.owner >= 0 && st.owner != note;
+        held_.push_back (note);
+        st.owner = note;
+        st.inChord = false;
+        st.rest = n.offset;
+        st.up = n.bends ? n.offset + n.bendUp : n.offset;
+        st.down = n.bends ? n.offset + n.bendDown : n.offset;
+        if (sameString) // a legato line on one string: slide there instead of picking again
+        {
+            str_[(size_t) n.string].setPedal (offsetFor (n.string), prm_.glide * 0.6);
+            return;
+        }
+        str_[(size_t) n.string].setPedal (offsetFor (n.string), 0.003);
+        cancelPicks (n.string);
+        if (delay > 0)
+            schedule (n.string, delay, vel);
+        else
+            str_[(size_t) n.string].pluck (vel);
+    }
+    void singleOff (int note)
+    {
+        held_.erase (std::remove (held_.begin(), held_.end(), note), held_.end());
+        for (int s = 0; s < kStrings; ++s)
+            if (sst_[(size_t) s].owner == note)
+            {
+                sst_[(size_t) s].owner = -1;
+                if (! sustainPedal_)
+                    block (s);
+            }
+    }
+
+    double fs_ = 48000.0;
+    EngineParams prm_;
+    std::array<SteelString, kStrings> str_;
+    std::array<StringState, kStrings> sst_ {};
+    std::array<double, kStrings> cc_ {};
+    std::array<double, kControls> ccTravel_ {};
+    std::array<Pick, 64> picks_ {};
+    int nPicks_ = 0;
+    Pickup pickup_;
+    SingleMap single_;
+    std::vector<int> held_; // reserved up front: never reallocates on the audio thread
+    int set_ = 0, chordSlot_ = -1, bar_ = 0;
+    double wheel_ = 0, mod_ = 0, vol_ = 1, volTarget_ = 1, volCoef_ = 0.002, vibPh_ = 0, driftPh_ = 0;
+    bool sustainPedal_ = false;
+    int64_t clock_ = 0;
+    Rng rng_;
+};
+} // namespace sw

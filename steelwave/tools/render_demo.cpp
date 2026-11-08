@@ -5,7 +5,11 @@
 //   03_bar_slides.wav wound-string slide with bar noise, then a legato chord slide
 //   04_swells.wav     picked behind the volume pedal and swelled in, ambient style
 //   05_vibrato.wav    held chord with bar vibrato, then a hand block
-#include "../core/SteelString.h"
+// The whole instrument, played through its MIDI interface (what the plug-in does):
+//   06_chords_wheel.wav  Classic set in E: I, wheel up to IV and down to iii, legato slides to V and IV
+//   07_single_line.wav   single-note set: a melody with scale bends, and a held note under a bending one
+//   08_pad_swells.wav    Pad set behind the volume pedal, mod-wheel vibrato, sympathetic strings
+#include "../core/SteelEngine.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -97,6 +101,123 @@ struct Steel
         return out;
     }
 };
+
+
+// Plays the engine from a list of timed MIDI-like events.
+struct Midi
+{
+    struct E { double t; std::function<void (SteelEngine&)> f; };
+    std::vector<E> ev;
+    void on (double t, int note, double vel) { ev.push_back ({ t, [=] (SteelEngine& e) { e.noteOn (note, vel); } }); }
+    void off (double t, int note) { ev.push_back ({ t, [=] (SteelEngine& e) { e.noteOff (note); } }); }
+    void cc (double t, int c, double v) { ev.push_back ({ t, [=] (SteelEngine& e) { e.controller (c, v); } }); }
+    // a smooth wheel move, sent as MIDI would (every 10 ms)
+    void wheel (double t0, double t1, double from, double to)
+    {
+        for (double t = t0; t <= t1 + 1e-9; t += 0.01)
+        {
+            const double x = (t - t0) / std::max (t1 - t0, 1e-9), v = from + (to - from) * (0.5 - 0.5 * std::cos (kPi * std::min (x, 1.0)));
+            ev.push_back ({ t, [=] (SteelEngine& e) { e.pitchWheel (v); } });
+        }
+    }
+    void ramp (double t0, double t1, int c, double from, double to)
+    {
+        for (double t = t0; t <= t1 + 1e-9; t += 0.01)
+        {
+            const double v = from + (to - from) * std::min ((t - t0) / std::max (t1 - t0, 1e-9), 1.0);
+            ev.push_back ({ t, [=] (SteelEngine& e) { e.controller (c, v); } });
+        }
+    }
+    std::vector<float> render (int set, double seconds, EngineParams p = {})
+    {
+        const double fs = 48000.0;
+        SteelEngine e;
+        e.prepare (fs);
+        e.setParams (p);
+        e.setSet (set);
+        std::stable_sort (ev.begin(), ev.end(), [] (const E& a, const E& b) { return a.t < b.t; });
+        std::vector<float> out ((size_t) (seconds * fs));
+        size_t pos = 0, k = 0;
+        while (pos < out.size())
+        {
+            size_t next = k < ev.size() ? std::min (out.size(), (size_t) (ev[k].t * fs)) : out.size();
+            if (next > pos) { e.process (out.data() + pos, (int) (next - pos)); pos = next; }
+            while (k < ev.size() && (size_t) (ev[k].t * fs) <= pos)
+                ev[k++].f (e);
+        }
+        return out;
+    }
+};
+
+static void engineDemos (const std::string& dir)
+{
+    { // 06: chord set, wheel and legato (C = I, D = ii, F = IV, G = V, A = vi)
+        Midi m;
+        m.on (0.3, 60, 0.75);              // E
+        m.wheel (1.4, 1.75, 0, 1);         // A+B -> A
+        m.wheel (2.6, 2.9, 1, 0);
+        m.wheel (3.4, 3.6, 0, -1);         // LKR -> G#m
+        m.wheel (4.2, 4.4, -1, 0);
+        m.on (5.0, 67, 0.75);              // legato to V (B): the bar slides to 7
+        m.off (5.1, 60);
+        m.wheel (6.0, 6.3, 0, 1);          // V up -> E
+        m.wheel (7.0, 7.3, 1, 0);
+        m.on (7.8, 65, 0.75);              // legato to IV (A)
+        m.off (7.9, 67);
+        m.wheel (8.8, 9.1, 0, -1);         // IV down -> C#m
+        m.wheel (9.6, 9.9, -1, 0);
+        m.off (10.6, 65);
+        m.on (11.0, 69, 0.7);              // vi, then up to ii
+        m.wheel (11.8, 12.1, 0, 1);
+        m.off (13.2, 69);
+        m.wheel (13.25, 13.3, 1, 0);
+        m.on (13.6, 60, 0.8);              // home, with vibrato
+        m.ramp (14.3, 15.5, 1, 0, 0.8);
+        m.off (17.0, 60);
+        writeWav16 (dir + "06_chords_wheel.wav", m.render (0, 17.6), 48000.0);
+    }
+    { // 07: single-note set (white keys: E major scale from C3)
+        Midi m;
+        const int line[][2] = { { 55, 0 }, { 57, 0 }, { 59, 1 }, { 60, 0 }, { 62, 1 }, { 60, 0 }, { 59, 0 }, { 57, 1 } };
+        double t = 0.3;
+        for (auto& n : line)
+        {
+            m.on (t, n[0], 0.7);
+            if (n[1]) { m.wheel (t + 0.25, t + 0.5, 0, 1); m.wheel (t + 0.75, t + 0.85, 1, 0); }
+            m.off (t + (n[1] ? 0.9 : 0.42), n[0]);
+            t += n[1] ? 1.0 : 0.45;
+        }
+        // hold E4 on the black key (doesn't bend) while G#4 above it bends to A and back
+        t += 0.3;
+        m.on (t, 61, 0.65);
+        m.on (t + 0.01, 62, 0.7);
+        m.wheel (t + 0.7, t + 1.1, 0, 1);
+        m.wheel (t + 1.9, t + 2.2, 1, 0);
+        m.off (t + 3.0, 61);
+        m.off (t + 3.0, 62);
+        writeWav16 (dir + "07_single_line.wav", m.render (kChordSets, t + 3.6), 48000.0);
+    }
+    { // 08: pad set behind the volume pedal
+        Midi m;
+        EngineParams p;
+        p.sympathetic = 0.8;
+        p.glide = 0.6;
+        m.cc (0.0, 11, 0.0);
+        const int prog[] = { 60, 69, 65, 67 };
+        double t = 0.3;
+        for (int i = 0; i < 4; ++i)
+        {
+            m.on (t, prog[i], 0.6);
+            if (i > 0) m.off (t + 0.05, prog[i - 1]);
+            m.ramp (t + 0.05, t + 0.9, 11, 0.0, 1.0);
+            m.ramp (t + 2.1, t + 2.9, 11, 1.0, 0.0);
+            t += 3.0;
+        }
+        m.ramp (6.0, 7.0, 1, 0, 0.5);
+        m.off (t, prog[3]);
+        writeWav16 (dir + "08_pad_swells.wav", m.render (7, t + 0.5, p), 48000.0);
+    }
+}
 
 int main (int argc, char** argv)
 {
@@ -202,5 +323,6 @@ int main (int argc, char** argv)
         });
         writeWav16 (dir + "05_vibrato.wav", x, Steel::fs);
     }
+    engineDemos (dir);
     return 0;
 }

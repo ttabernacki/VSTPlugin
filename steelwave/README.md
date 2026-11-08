@@ -1,53 +1,133 @@
 # Steelwave
 
-A physically modelled E9 pedal steel. No samples: every sound is synthesised. The output is dry,
-DI-style mono for your own amp and pedals.
+A physically modelled E9 pedal steel instrument (VST3, AU on macOS, and a standalone app). No samples:
+every sound is synthesised. The output is dry, DI-style mono for your own amp and pedals.
 
-**Status: milestone 1, the string model.** The playable plug-in (chord sets, pedals, knee levers,
-MIDI) is not built yet. This folder has the DSP core, its tests and a demo renderer.
+You play it like a keyboard steel. Pick a set (chords or single notes) and a key. The white keys play
+the diatonic chords or the scale, and the pitch wheel moves them the way a steel player's pedals do.
+Underneath, everything happens on a real 10-string E9 neck: one bar shared by all strings, A/B/C
+pedals and four knee levers.
 
-## The string model (`core/SteelString.h`)
-Each string is two digital waveguide loops, one per vibration plane (horizontal and vertical).
-They are detuned by under a cent and decay at different rates, which gives the slow beating of a
-real string. Each loop is:
-- **Time-varying fractional delay:** 6-point Lagrange interpolation, with the length recomputed
-  every sample from a smoothed pitch. Bar slides and pedal bends are continuous, with no zipper or clicks.
-- **Loss filter:** one pole, designed from T60 at low frequencies and at 5 kHz. Decay times stay
-  in seconds as the bar moves.
-- **Stiffness:** an allpass cascade, solved per string from a physical target (how sharp the 10th
-  partial is, 1.5-3.5 cents). The string gets stiffer as the bar shortens it.
-- **Tuning compensation:** the loop's phase delay at the fundamental is subtracted, so every
-  string is within 0.06 cents at every bar position and sample rate (tested).
+## Playing it
+
+| Input | Does |
+|---|---|
+| **C1-G1** (MIDI 24-31) | Keyswitch: chord sets 1-8 |
+| **G#1-B1** (32-35) | Keyswitch: single-note sets 1-4 |
+| **C2 and up** | Play (layout below; the octave doesn't matter for chords) |
+| **Pitch wheel** | Bend (below) |
+| **Mod wheel** | Bar vibrato (rate and depth knobs) |
+| **Expression, CC11** | Volume pedal (strongly tapered like a real one). Choosable: CC11/7/4/2/off |
+| **Sustain, CC64** | Strings ring after you let go (otherwise letting go is a palm block) |
+| **CC20-26** | The real E9 pedals and levers on top of anything: A, B, C, LKL, LKR, RKL, RKR |
+
+### Chord sets
+The layout is relative to the key, read like C major: white keys are I ii iii IV V vi vii°.
+Black keys:
+- C#: I in another voicing
+- D#: II
+- F#: iv
+- G#: #V°
+- A#: bVII
+
+The pitch wheel bends to another diatonic chord:
+- **Up:** the chord a 4th up (I→IV, ii→V, V→I ...).
+- **Down:** the chord a 3rd up, by lowering the root (I→iii, IV→vi ...).
+
+Playing a new chord while still holding the last one slides the bar there (legato, **Glide** sets the
+time) without picking the strings again. Releasing back to a chord still held slides back.
+
+| Set | Strings | Notes |
+|---|---|---|
+| 1 Classic | 3-6 | The standard 4-string grips |
+| 2 Full | 3-6, 8, 10 | 5-6 strings, with the bass |
+| 3 High | 1-5 | Including the chromatic strings 1 and 2 |
+| 4 Low | 5-10 | |
+| 5 Close | 3-5 | Triads |
+| 6 Octave up | 3-6 | Bar 12 and up |
+| 7 Wide | 3, 5, 6, 8, 10 | Spread voicings |
+| 8 Pad | 1-10, 6-8 at once | Slow strum |
+
+**How the voicings are found:** they're found on the neck (`core/Voicing.h`), not typed in. For each
+chord the search looks for:
+- one bar position, strings from the set's group and at most two pedals/levers held;
+- exactly the chord's notes, root in the bass where possible;
+- no unisons and no big gaps.
+
+The wheel bends use a real pedal/lever combination when one reaches the target chord. That's 109 of
+the 192 bends, e.g. I→IV is A+B, I→iii is LKR, vi→ii is B+C. Otherwise each string moves at most 2
+semitones to the nearest chord note, like a custom changer would. For example, IV→V moves every string
+up a whole step.
+
+In the key of E, the Classic I is open E at the nut: wheel up gives A+B, wheel down gives LKR. Other
+keys move the bar (kept between frets 0 and 22).
+
+### Single-note sets
+- **White keys:** the major scale of the key (C3 plays the root near E3). They bend with the wheel to
+  the next or previous scale note.
+- **Black keys:** the white key below them, held still and on another string where possible. Hold one
+  under a bending white key for the classic "one note bends, one doesn't" move.
+- All notes sit at one bar position, on whichever string (open, or with its pedal/lever) has them. This
+  is how steel players play scales.
+
+Sets: Scale, Scale high (bar +12), Whole-step bends, Half-step bends.
+
+## Controls
+| Knob | Range | |
+|---|---|---|
+| Glide | 30-1200 ms | Legato bar slide time |
+| Strum | 0-60 ms | Pick spread across a chord, low string first |
+| Pick | 0-100 % | Soft thumb/flesh → hard metal fingerpicks (attack brightness, tick) |
+| Brightness | 0-100 % | How long the high partials ring (old → new strings) |
+| Sustain | 25-200 % | Decay times |
+| Bar noise | 0-100 % | Contact noise of the bar sliding over the strings |
+| Vib rate / depth | 3-8 Hz, 0-50 cents | Bar vibrato at full mod wheel |
+| Sympathetic | 0-100 % | Unpicked strings ringing along through the bridge |
+| Level | -24..+12 dB | |
+
+Also: Set, Key, Pickup (single coil / humbucker) and the Volume pedal CC. The panel shows the neck, with
+the bar, the strings ringing and their notes, the current chord, and what the wheel will do (which
+pedals, or "voice-led").
+
+## The model
+**Strings** (`core/SteelString.h`). Each string is two digital waveguide loops, one per vibration
+plane. Each loop has:
+- a time-varying fractional delay (6-point Lagrange) recomputed every sample, so slides and bends are
+  continuous;
+- loss and stiffness filters (stiffness solved per string from physical inharmonicity);
+- tuning compensation, within 0.06 cents everywhere.
 
 Pitch is split the way the instrument does it:
-- **Bar:** shortens the string. The wave speed stays the same.
-- **Pedals and knee levers:** change the tension, so the wave speed changes.
-- **Vibrato:** bar rocking, applied on top.
+- the **bar** shortens the string;
+- **pedals and levers** change the tension;
+- **vibrato** rocks the bar.
 
-The pick and pickup are placed in metres from the bridge. Their comb filters therefore track the
-bar the way they do on the instrument.
+The pick and pickup are placed in metres from the bridge, so their comb filters follow the bar.
 
 | Part | Model |
 |---|---|
-| Pick | Velocity pulse lasting the wave's round trip to the pick point, smoothed over the pick's contact time (harder pick or harder playing = shorter = brighter), plus a metal tick at 2.5-4.5 kHz. A hard pick stretches the string, so the note starts up to ~7 cents sharp and settles in ~70 ms. Re-picking a ringing string first catches it briefly |
-| Bar noise | From the bar's speed, on an S-curve (silent while the bar creeps into place, saturating on fast slides). On wound strings, grainy noise ticking at the rate the wrap ridges pass under the bar. On plain strings, a fainter hiss. Band-limited to 400 Hz-3 kHz and heard mostly directly (only 10% excites the string). About 35 dB below a medium pick on wound strings and 43 dB on plain ones (tested) |
-| Hand block | Fast ramp of both decay times |
-| Pickup | Comb filter at the pickup's position, plus a resonant coil/cable low-pass (single-coil or humbucker) |
+| Pick | Velocity pulse lasting the wave's round trip to the pick point, smoothed over the pick's contact time (harder = brighter), plus a metal tick at 2.5-4.5 kHz. A hard pick stretches the string, so the note starts up to ~7 cents sharp and settles in ~70 ms. Re-picking a ringing string first catches it briefly |
+| Bar noise | From the bar's speed, on an S-curve (silent while the bar creeps into place). On wound strings, grainy ticks at the rate the wrap ridges pass under the bar. Band-limited to 400 Hz-3 kHz and heard mostly directly. Played strings make it; strings merely under the bar make 20 %. About 35 dB below a medium pick (tested). A lifted and re-placed bar makes none |
+| Bridge | Every string feeds the others (sympathetic resonance). Stable by construction: each loop keeps 5x the coupling as gain headroom |
+| Hand | Palm/hand blocks ramp both decay times down |
+| Pickup | Comb at the pickup's position, plus a resonant coil/cable low-pass |
 
-CPU: 10 strings use about 4% of one core at 48 kHz.
+**Engine** (`core/SteelEngine.h`): 10 strings sharing one bar, sample-accurate MIDI, strums, the
+volume pedal and vibrato. 10 strings use about 4% of one core at 48 kHz.
 
-## Build and listen
+## Build, test, listen
 ```
-cmake -B build -DORBITPAN_BUILD_PLUGIN=OFF
-cmake --build build --target steelwave_tests steelwave_demo
-./build/steelwave/steelwave_tests
-./build/steelwave/steelwave_demo <folder>   # writes 01_picks .. 05_vibrato .wav
+cmake -B build                                   # fetches JUCE
+cmake --build build --target Steelwave_VST3 Steelwave_Standalone steelwave_tests steelwave_engine_tests SteelwavePluginTests
+ctest --test-dir build -R steelwave
+./build/steelwave/steelwave_demo <folder>        # 01-05 the string model, 06-08 the whole instrument via MIDI
 ```
+CI builds VST3 and the standalone app for Windows, macOS (plus AU) and Linux, and runs pluginval at
+strictness 10. Bundles are in the `Steelwave-<os>` artifacts.
 
-## Roadmap
-1. ~~String model~~
-2. 10-string E9 engine: A/B/C pedals and LKL/LKR/RKL levers, bridge coupling between strings,
-   volume pedal (CC11), sustain pedal
-3. Chord and single-note sets: white keys diatonic and bending, black keys held, keyswitches,
-   transpose, legato bar glides, mod-wheel vibrato
-4. JUCE plug-in (VST3, AU, standalone) with a plain knob panel
+The tests cover:
+- tuning, glides, decay, picking, bar noise and stability (`steelwave_tests`);
+- every voicing in every key, the single-note maps, the wheel, legato, release/sustain, the volume
+  pedal, CC pedals, sympathetic coupling and a 60 s random-MIDI stress run (`steelwave_engine_tests`);
+- host-style tests: parameters, state, keyswitches, bit-identical output at any block size, sample
+  rates, bypass and the editor (`SteelwavePluginTests`).
