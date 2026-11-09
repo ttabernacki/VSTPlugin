@@ -50,6 +50,13 @@ time) without picking the strings again. Releasing back to a chord still held sl
 | 7 Wide | 3, 5, 6, 8, 10 | Spread voicings |
 | 8 Pad | 1-10, 6-8 at once | Slow strum |
 
+**The chords climb with the keyboard.** Each key's chord is voiced to sit a semitone higher than the key
+below it (C# is the alternate I, voiced near I), so going up the keys goes up in pitch, the way block
+chords do on a keyboard. A key change moves the whole set together, so that order holds in every key.
+The octave you play in picks the register: the home octave is MIDI 60-71, an octave up moves the bar up
+12 frets, and an octave down moves it down 12, where it fits. The bar can go to fret 26, two past the
+neck's markings.
+
 **How the voicings are found:** they're found on the neck (`core/Voicing.h`), not typed in. For each
 chord the search looks for:
 - one bar position, strings from the set's group and at most two pedals/levers held;

@@ -131,18 +131,44 @@ int main()
                 real += v.downHow != "voice-led";
                 total += 2;
                 for (int key = 0; key < 12; ++key)
-                {
-                    const int b = fitBar (v.bar + keyShift (key));
-                    if (b < 0 || b > 22) ++badBar;
-                }
+                    for (int note : { 48, 60, 72 })
+                    {
+                        const int b = chordBar (si, v, key, note);
+                        if (b < 0 || b > kTopFret) ++badBar;
+                    }
             }
         CHECK (bad == 0, "every chord is exactly its triad, within the set's string count (%d wrong)", bad);
         CHECK (badBend == 0, "every bend lands on the target chord (root and third, nothing else), strings move <= 3 semitones (%d wrong)", badBend);
-        CHECK (badBar == 0, "every key keeps the bar between 0 and 22");
+        CHECK (badBar == 0, "every key and octave keeps the bar on the neck (frets 0-26)");
+        // the chords climb as you go up the keys: going up the white keys always goes up in pitch,
+        // in every set and every key (the user's report: C to D went down)
+        auto mean = [] (int si, int slot, int key, int note) {
+            const auto& v = chordSets()[(size_t) si][(size_t) slot];
+            const int b = chordBar (si, v, key, note);
+            double m = 0;
+            for (int st : v.strings) m += kE9Open[(size_t) st] + b + v.rest[(size_t) st];
+            return m / (double) v.strings.size();
+        };
+        int falls = 0, blackOut = 0;
+        const int whites[] = { 0, 2, 4, 5, 7, 9, 11 };
+        for (int si = 0; si < kChordSets; ++si)
+            for (int key = 0; key < 12; ++key)
+            {
+                for (int w = 1; w < 7; ++w)
+                    if (mean (si, whites[w], key, 60) <= mean (si, whites[w - 1], key, 60)) ++falls;
+                for (int bk : { 3, 6, 8, 10 }) // black keys sit (within a semitone) between their neighbours
+                    if (mean (si, bk, key, 60) < mean (si, bk - 1, key, 60) - 1.0 || mean (si, bk, key, 60) > mean (si, bk + 1, key, 60) + 1.0) ++blackOut;
+            }
+        CHECK (falls == 0, "going up the white keys always climbs, every set, every key (%d falls)", falls);
+        CHECK (blackOut == 0, "black keys sit between their neighbours (%d out of place)", blackOut);
+        CHECK (mean (0, 2, 0, 60) > mean (0, 0, 0, 60), "key of C, Classic: C (C major, %.1f) to D (Dm, %.1f) goes up", mean (0, 0, 0, 60), mean (0, 2, 0, 60));
+        // the octave played picks the register
+        CHECK (chordBar (0, chordSets()[0][0], 4, 72) == chordBar (0, chordSets()[0][0], 4, 60) + 12, "an octave up the keyboard: the bar moves up 12 frets");
+        CHECK (chordBar (0, chordSets()[0][0], 7, 48) == chordBar (0, chordSets()[0][0], 7, 60) || chordBar (0, chordSets()[0][0], 7, 48) == chordBar (0, chordSets()[0][0], 7, 60) - 12, "an octave down: 12 frets lower where it fits");
         std::printf ("    (%d of %d bends use real E9 pedals/levers)\n", real, total);
         const auto& I = chordSets()[0][0];
         CHECK (I.bar == 0 && I.restCombo == 0 && I.upHow == "A+B" && I.downHow == "LKR", "Classic I: open E at the nut, wheel up = A+B (IV), down = LKR (iii)");
-        CHECK (chordSets()[0][1].bar != I.bar, "the black-key I is another voicing (bar %d)", chordSets()[0][1].bar);
+        CHECK (chordSets()[0][1].strings != I.strings || chordSets()[0][1].bar != I.bar, "the black-key I is another voicing");
     }
 
     std::printf ("Single-note sets\n");

@@ -662,7 +662,7 @@ private:
     void playChord (int slot, double vel, bool legato, bool pickNew, int note = -1)
     {
         const auto& v = chordSets()[(size_t) set_][(size_t) slot];
-        const int bar = fitBar (v.bar + keyShift (prm_.keyPc));
+        const int bar = chordBar (set_, v, prm_.keyPc, note);
         const bool barMoves = bar != bar_;
         const double glide = glideFor (std::abs (bar - bar_), pickNew ? vel : 0.6);
         // MPE: the chord follows its note's finger (bend = bar slide, pressure, slide = fade)

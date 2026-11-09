@@ -416,13 +416,13 @@ void SteelwaveEditor::paint (juce::Graphics& g)
     const int sounding = proc.uiSounding.load();
     const float rowH = (float) a.getHeight() / (float) sw::kStrings;
     const float x0 = (float) a.getX() + 64.0f, x1 = (float) a.getRight() - 40.0f;
-    auto fretX = [&] (float semis) { // fret spacing as on the instrument (24.5" scale, 24 frets shown)
+    auto fretX = [&] (float semis) { // fret spacing as on the instrument (24.5" scale; the bar can go 2 past the 24th)
         const float L = 1.0f - std::pow (2.0f, -semis / 12.0f);
-        const float Lmax = 1.0f - std::pow (2.0f, -24.0f / 12.0f);
+        const float Lmax = 1.0f - std::pow (2.0f, -(float) sw::kTopFret / 12.0f);
         return x0 + (x1 - x0) * juce::jlimit (0.0f, 1.0f, L / Lmax);
     };
     g.setColour (kLine);
-    for (int f = 0; f <= 24; ++f)
+    for (int f = 0; f <= sw::kTopFret; ++f)
         g.drawVerticalLine ((int) fretX ((float) f), (float) a.getY(), (float) a.getBottom());
     g.setFont (juce::FontOptions (9.0f));
     for (int f : { 3, 5, 7, 9, 12, 15, 17, 19, 21, 24 })

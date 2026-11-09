@@ -188,6 +188,7 @@ struct ChordVoicing
     std::array<double, kStrings> rest {}, up {}, down {};
     uint32_t restCombo = 0;
     std::string upHow, downHow; // e.g. "A+B" or "voice-led"
+    double meanPitch = 0;       // average MIDI pitch of the strings at rest (key of E, bar as found)
 };
 
 namespace detail
@@ -288,17 +289,26 @@ inline double bestTarget (const std::vector<int>& strs, int bar, const std::arra
     return best;
 }
 
-inline ChordVoicing searchChord (const ChordSetDef& def, const Slot& slot, int avoidBar)
+constexpr double kRegisterWeight = 1.5; // cost per semitone a voicing sits off its key's place in the register
+constexpr double kOrderPenalty = 500.0; // a key's chord not above the key below it: only if nothing else fits
+
+struct Candidate { ChordVoicing v; double cost; };
+
+// The best `keep` voicings of a chord, cheapest first. targetMean >= 0 pulls the voicing's average
+// pitch toward it (so chords climb with the keyboard); avoid: don't repeat this voicing.
+inline std::vector<Candidate> searchCandidates (const ChordSetDef& def, const Slot& slot, const ChordVoicing* avoid,
+                                               double targetMean, size_t keep)
 {
+    std::vector<Candidate> found; // sorted by cost, at most `keep`
+    auto threshold = [&] { return found.size() < keep ? 1e18 : found.back().cost; };
     constexpr int keyPc = 4; // voicings are found in E (bar 0 = E); other keys move the bar
     const uint32_t want = chordPcs (slot.rest, keyPc);
     const int root = (keyPc + slot.rest.root) % 12;
-    ChordVoicing best;
-    double bestCost = 1e18;
-    for (int bar = def.barLo; bar <= def.barHi; ++bar)
+    // chords placed by register get a few more frets to climb into
+    const int barHi = targetMean >= 0 ? std::min (def.barHi + 9, 22) : def.barHi;
+    for (int bar = def.barLo; bar <= barHi; ++bar)
     {
-        if (avoidBar >= 0 && std::abs (bar - avoidBar) < 3)
-            continue;
+
         for (uint32_t m : playableCombos())
         {
             if (controlCount (m) > 2)
@@ -346,24 +356,115 @@ inline ChordVoicing searchChord (const ChordSetDef& def, const Slot& slot, int a
                         skipped += s > strs[i - 1] && s < strs[i];
                 double cost = 2.5 * controlCount (m) + 0.12 * (bar - def.barLo) + (p.front() % 12 != root ? 2.0 : 0.0) + gaps
                               + 0.8 * (def.maxSize - sz) + 0.4 * skipped;
-                if (cost >= bestCost)
+                double mean = 0;
+                for (int q : p)
+                    mean += q;
+                mean /= (double) p.size();
+                if (avoid && p.size() == avoid->strings.size())
+                {
+                    // the same notes as the voicing to avoid (whatever pedals are down): not a new voicing
+                    std::vector<int> q;
+                    for (int s : avoid->strings)
+                        q.push_back (kE9Open[(size_t) s] + avoid->bar + (int) avoid->rest[(size_t) s]);
+                    std::sort (q.begin(), q.end());
+                    if (q == p)
+                        continue;
+                }
+                if (targetMean >= 0)
+                    cost += kRegisterWeight * std::fabs (mean - targetMean);
+                if (cost >= threshold())
                     continue;
                 ChordVoicing v;
                 v.bar = bar;
                 v.strings = strs;
                 v.rest = od;
                 v.restCombo = m;
+                v.meanPitch = mean;
                 cost += bestTarget (strs, bar, od, slot.up, keyPc, +1, v.up, v.upHow);
                 cost += bestTarget (strs, bar, od, slot.down, keyPc, -1, v.down, v.downHow);
-                if (cost < bestCost)
+                if (cost < threshold())
                 {
-                    bestCost = cost;
-                    best = v;
+                    // the same notes reached another way (a pedal that touches none of these strings) is
+                    // the same voicing: keep only the cheapest, so the list holds different voicings
+                    auto same = std::find_if (found.begin(), found.end(), [&] (const Candidate& x) {
+                        if (x.v.strings != strs || x.v.bar != bar)
+                            return false;
+                        for (int q : strs)
+                            if (x.v.rest[(size_t) q] != od[(size_t) q])
+                                return false;
+                        return true;
+                    });
+                    if (same != found.end())
+                    {
+                        if (same->cost <= cost)
+                            continue;
+                        found.erase (same);
+                    }
+                    auto at = std::upper_bound (found.begin(), found.end(), cost, [] (double c, const Candidate& x) { return c < x.cost; });
+                    found.insert (at, Candidate { v, cost });
+                    if (found.size() > keep)
+                        found.pop_back();
                 }
             }
         }
     }
-    return best;
+    return found;
+}
+
+inline ChordVoicing searchChord (const ChordSetDef& def, const Slot& slot, const ChordVoicing* avoid = nullptr, double targetMean = -1.0)
+{
+    auto c = searchCandidates (def, slot, avoid, targetMean, 1);
+    return c.empty() ? ChordVoicing {} : c.front().v;
+}
+
+// All 12 keys of a set, chosen together: I where it sits most naturally, then for every other key one
+// of its best voicings, such that each key's chord sits above the key below it (the cheapest such
+// sequence, by dynamic programming over the candidates)
+inline std::array<ChordVoicing, 12> searchSet (const ChordSetDef& def)
+{
+    std::array<ChordVoicing, 12> out {};
+    out[0] = searchChord (def, chordSlots()[0]);
+    const double home = out[0].meanPitch;
+    std::array<std::vector<Candidate>, 12> cand;
+    cand[0] = { Candidate { out[0], 0.0 } };
+    for (size_t k = 1; k < 12; ++k)
+        cand[k] = searchCandidates (def, chordSlots()[k], chordSlots()[k].variant ? &out[0] : nullptr, home + (double) k, 150);
+    // the alternate I (a variant, C#) sits near I but outside the climb: D follows straight on from C
+    std::vector<size_t> chain;
+    for (size_t k = 0; k < 12; ++k)
+        if (chordSlots()[k].variant)
+            out[k] = cand[k].empty() ? out[0] : cand[k].front().v;
+        else
+            chain.push_back (k);
+    std::vector<std::vector<double>> total (chain.size());
+    std::vector<std::vector<int>> from (chain.size());
+    total[0] = { 0.0 };
+    from[0] = { -1 };
+    for (size_t c = 1; c < chain.size(); ++c)
+    {
+        const auto& now = cand[chain[c]];
+        const auto& prev = cand[chain[c - 1]];
+        total[c].assign (now.size(), 1e18);
+        from[c].assign (now.size(), 0);
+        for (size_t j = 0; j < now.size(); ++j)
+            for (size_t i = 0; i < prev.size(); ++i)
+            {
+                const bool climbs = now[j].v.meanPitch > prev[i].v.meanPitch + 0.25;
+                const double t = total[c - 1][i] + now[j].cost + (climbs ? 0.0 : kOrderPenalty);
+                if (t < total[c][j])
+                {
+                    total[c][j] = t;
+                    from[c][j] = (int) i;
+                }
+            }
+    }
+    int j = (int) (std::min_element (total.back().begin(), total.back().end()) - total.back().begin());
+    for (size_t c = chain.size() - 1; c >= 1; --c)
+    {
+        out[chain[c]] = cand[chain[c]][(size_t) j].v;
+        j = from[c][(size_t) j];
+    }
+    return out;
 }
 } // namespace detail
 
@@ -374,12 +475,10 @@ inline const std::array<std::array<ChordVoicing, 12>, 8>& chordSets()
         std::array<std::array<ChordVoicing, 12>, 8> a {};
         for (size_t si = 0; si < 8; ++si)
         {
-            for (size_t k = 0; k < 12; ++k)
-                if (! chordSlots()[k].variant)
-                    a[si][k] = detail::searchChord (chordSetDefs()[si], chordSlots()[k], -1);
-            for (size_t k = 0; k < 12; ++k)
-                if (chordSlots()[k].variant)
-                    a[si][k] = detail::searchChord (chordSetDefs()[si], chordSlots()[k], a[si][0].bar);
+            // I first, where it sits most naturally; every other key then aims a semitone higher per key
+            // up the keyboard (C# = I + 1, D = I + 2 ... B = I + 11), so the chords climb as you go up
+            // the keys, the way block chords do on a keyboard
+            a[si] = detail::searchSet (chordSetDefs()[si]);
         }
         return a;
     }();
@@ -393,6 +492,44 @@ inline int keyShift (int keyPc)
     int t = ((keyPc - 4) % 12 + 12) % 12;
     return t > 7 ? t - 12 : t;
 }
+// the highest bar position: the neck is marked to 24, and the bar can go a couple of frets past it (the
+// string is still ~13 cm long there, beyond the pick and the pickup), so every set fits in every key
+constexpr int kTopFret = 26;
+
+// How far a whole chord set moves for a key: all 12 chords together (so they keep climbing up the
+// keyboard), by the key's shift from E, or an octave either side of it, whichever keeps every chord
+// on the neck (frets 0-26).
+inline int setBarShift (int setIndex, int keyPc)
+{
+    const auto& set = chordSets()[(size_t) setIndex];
+    int lo = 99, hi = -99;
+    for (const auto& v : set)
+    {
+        lo = std::min (lo, v.bar);
+        hi = std::max (hi, v.bar);
+    }
+    const int t = keyShift (keyPc);
+    for (int s : { t, t + 12, t - 12 })
+        if (lo + s >= 0 && hi + s <= kTopFret)
+            return s;
+    return t; // can't all fit: chords off the neck get wrapped individually
+}
+
+// The bar for a chord: the set's key shift, plus an octave up or down for the octave played
+// (MIDI 60-71 is home; 72 and up an octave higher, 59 and below an octave lower) where it fits.
+inline int chordBar (int setIndex, const ChordVoicing& v, int keyPc, int note)
+{
+    const int base = v.bar + setBarShift (setIndex, keyPc);
+    const int oct = note < 0 ? 0 : std::clamp (note / 12 - 5, -1, 1);
+    for (int o : { oct, 0 })
+        if (base + 12 * o >= 0 && base + 12 * o <= kTopFret)
+            return base + 12 * o;
+    int b = base;
+    while (b < 0) b += 12;
+    while (b > kTopFret) b -= 12;
+    return b;
+}
+
 inline int fitBar (int bar)
 {
     while (bar < 0) bar += 12;
