@@ -20,6 +20,9 @@ endif()
 
 # --- Plugin -----------------------------------------------------------------------
 option(ORBITPAN_BUILD_PLUGIN "Build the JUCE VST3 plugin" ON)
+# Link-time optimisation for the plug-ins: a little faster at run time, much slower to build. CI turns it
+# off for everyday pushes and on for release builds (tags and manual runs).
+option(ORBITPAN_LTO "Link-time optimisation for the plug-ins" ON)
 if(ORBITPAN_BUILD_PLUGIN)
     include(FetchContent)
     # Point FETCHCONTENT_SOURCE_DIR_JUCE at a local JUCE checkout to avoid the download.
@@ -28,6 +31,12 @@ if(ORBITPAN_BUILD_PLUGIN)
         GIT_TAG 8.0.4
         GIT_SHALLOW ON)
     FetchContent_MakeAvailable(JUCE)
+
+    # every plug-in links this: JUCE's LTO flags when ORBITPAN_LTO is on, nothing otherwise
+    add_library(orbitpan_lto INTERFACE)
+    if(ORBITPAN_LTO)
+        target_link_libraries(orbitpan_lto INTERFACE juce::juce_recommended_lto_flags)
+    endif()
 
     # Ableton Live loads VST3 on Windows and macOS (and AU on macOS).
     set(ORBITPAN_FORMATS VST3 Standalone)
@@ -79,7 +88,7 @@ if(ORBITPAN_BUILD_PLUGIN)
             juce::juce_audio_utils
         PUBLIC
             juce::juce_recommended_config_flags
-            juce::juce_recommended_lto_flags)
+            orbitpan_lto)
 endif()
 
 # --- Bass Note Leveler (second plug-in in this repo) ---------------------------------

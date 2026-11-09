@@ -31,7 +31,7 @@ if(TARGET juce::juce_audio_utils)
     target_compile_definitions(NoteSpace PUBLIC JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
     target_link_libraries(NoteSpace
         PRIVATE juce::juce_audio_utils
-        PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_lto_flags)
+        PUBLIC juce::juce_recommended_config_flags orbitpan_lto)
 
     # Host-style tests of the real processor (parameters, state, blocks, stress)
     juce_add_console_app(NoteSpacePluginTests PRODUCT_NAME "note_space_plugin_tests")

@@ -159,8 +159,8 @@ cmake --build build --target Steelwave_VST3 Steelwave_Standalone steelwave_tests
 ctest --test-dir build -R steelwave
 ./build/steelwave/steelwave_demo <folder>        # 01-05 the string model, 06-08 the whole instrument via MIDI
 ```
-CI builds VST3 and the standalone app for Windows, macOS (plus AU) and Linux, and runs pluginval at
-strictness 10. Bundles are in the `Steelwave-<os>` artifacts.
+CI builds the VST3 and the standalone app for Windows (link-time optimised on tags and manual runs only), and runs pluginval at
+strictness 10. Bundles are in the `Steelwave-windows` artifact.
 
 The tests cover:
 - tuning, glides, decay, picking, bar noise, tension modulation, the two-stage decay, body

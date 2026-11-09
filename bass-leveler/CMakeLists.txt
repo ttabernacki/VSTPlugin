@@ -31,7 +31,7 @@ if(TARGET juce::juce_audio_utils)
     target_compile_definitions(BassNoteLeveler PUBLIC JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
     target_link_libraries(BassNoteLeveler
         PRIVATE juce::juce_audio_utils
-        PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_lto_flags)
+        PUBLIC juce::juce_recommended_config_flags orbitpan_lto)
 
     # Host-style tests of the real processor (parameters, state incl. the learned table, blocks, stress)
     juce_add_console_app(BassLevelerPluginTests PRODUCT_NAME "bass_leveler_plugin_tests")

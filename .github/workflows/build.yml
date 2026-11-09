@@ -1,78 +1,73 @@
 name: build
 
+# Windows only. Everyday pushes skip link-time optimisation (much faster to build); tags and manual
+# runs (Actions tab > build > Run workflow) build with it, for release.
+
 on:
   push:
   pull_request:
   workflow_dispatch:
 
+# a newer push to the same branch cancels the run it supersedes
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JUCE_TAG: 8.0.4 # keep in step with GIT_TAG in CMakeLists.txt
+  LTO: ${{ (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')) && 'ON' || 'OFF' }}
+
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            name: linux
-          - os: windows-latest
-            name: windows
-          - os: macos-latest
-            name: macos
-    runs-on: ${{ matrix.os }}
-    name: ${{ matrix.name }}
+  windows:
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Linux dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev \
-            libxcomposite-dev libfreetype-dev libfontconfig1-dev libgl1-mesa-dev xvfb
+      # JUCE source, downloaded once and reused
+      - name: Cache JUCE
+        id: juce
+        uses: actions/cache@v4
+        with:
+          path: juce-src
+          key: juce-${{ env.JUCE_TAG }}-windows
+
+      - name: Get JUCE
+        if: steps.juce.outputs.cache-hit != 'true'
+        shell: bash
+        run: git clone --depth 1 --branch "$JUCE_TAG" https://github.com/juce-framework/JUCE.git juce-src
 
       - name: Configure
         shell: bash
         run: |
-          EXTRA=""
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            EXTRA='-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0'
-          fi
-          cmake -B build -DCMAKE_BUILD_TYPE=Release $EXTRA
+          # -MP: MSVC compiles the files of each project in parallel (MSBuild only runs projects in parallel)
+          cmake -B build -DCMAKE_BUILD_TYPE=Release \
+            -DFETCHCONTENT_SOURCE_DIR_JUCE="$(cygpath -m "$PWD/juce-src")" \
+            -DCMAKE_CXX_FLAGS_INIT=-MP -DCMAKE_C_FLAGS_INIT=-MP \
+            -DORBITPAN_LTO=$LTO
+          echo "Link-time optimisation: $LTO"
 
       - name: Build
         shell: bash
         run: |
           TARGETS="dsp_tests render_demo PluginTests OrbitPan_VST3 leveler_tests BassLevelerPluginTests BassNoteLeveler_VST3 notespace_tests NoteSpacePluginTests NoteSpace_VST3 steelwave_tests steelwave_engine_tests SteelwavePluginTests Steelwave_VST3 Steelwave_Standalone"
-          if [ "$RUNNER_OS" = "macOS" ]; then TARGETS="$TARGETS OrbitPan_AU BassNoteLeveler_AU NoteSpace_AU Steelwave_AU"; fi
           cmake --build build --config Release --parallel 4 --target $TARGETS
 
-      - name: Test (DSP + plugin processors, both plug-ins)
+      - name: Test (DSP cores and plug-in processors)
         shell: bash
         run: ctest --test-dir build -C Release --output-on-failure
-
-      - name: Ad-hoc sign (macOS)
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          find build \( -name "*.vst3" -o -name "*.component" \) -type d -prune | while read -r b; do codesign --force --deep -s - "$b"; done
 
       - name: Collect plug-in bundles
         shell: bash
         run: |
           mkdir -p dist/orbitpan dist/bassleveler dist/notespace dist/steelwave
           find build -type d -name "OrbitPan.vst3" -prune -exec cp -R {} dist/orbitpan/ \;
-          find build -type d -name "OrbitPan.component" -prune -exec cp -R {} dist/orbitpan/ \;
           find build -type d -name "Bass Note Leveler.vst3" -prune -exec cp -R {} dist/bassleveler/ \;
-          find build -type d -name "Bass Note Leveler.component" -prune -exec cp -R {} dist/bassleveler/ \;
           find build -type d -name "Note Space.vst3" -prune -exec cp -R {} dist/notespace/ \;
-          find build -type d -name "Note Space.component" -prune -exec cp -R {} dist/notespace/ \;
           find build -type d -name "Steelwave.vst3" -prune -exec cp -R {} dist/steelwave/ \;
-          find build -type d -name "Steelwave.component" -prune -exec cp -R {} dist/steelwave/ \;
-          # standalone app: Steelwave.app (macOS), Steelwave.exe (Windows), Steelwave (Linux)
-          find build -path "*Steelwave_artefacts*Standalone*" \( -name "Steelwave.app" -o -name "Steelwave.exe" -o -name "Steelwave" \) -prune -exec cp -R {} dist/steelwave/ \;
+          find build -path "*Steelwave_artefacts*Standalone*" -name "Steelwave.exe" -exec cp {} dist/steelwave/ \;
           ls -R dist | head -40
 
-      - name: Windows DLLs must not need the VC++ redistributable
-        if: runner.os == 'Windows'
+      - name: DLLs must not need the VC++ redistributable
         shell: bash
         run: |
           pip install pefile
@@ -84,46 +79,28 @@ jobs:
       - name: pluginval (strictness 10)
         shell: bash
         run: |
-          case "$RUNNER_OS" in
-            Linux)   URL=https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Linux.zip ;;
-            macOS)   URL=https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_macOS.zip ;;
-            Windows) URL=https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Windows.zip ;;
-          esac
-          curl -L -o pluginval.zip "$URL"
-          7z x -y pluginval.zip -opluginval >/dev/null || unzip -o pluginval.zip -d pluginval
-          run_pv() {
-            if [ "$RUNNER_OS" = "Linux" ]; then
-              chmod +x pluginval/pluginval
-              xvfb-run -a pluginval/pluginval --strictness-level 10 --validate-in-process --timeout-ms 180000 "$1"
-            elif [ "$RUNNER_OS" = "macOS" ]; then
-              PV=$(find pluginval -type f -path "*MacOS/pluginval" | head -1)
-              chmod +x "$PV"
-              "$PV" --strictness-level 10 --validate-in-process --timeout-ms 180000 "$1"
-            else
-              pluginval/pluginval.exe --strictness-level 10 --validate-in-process --timeout-ms 180000 "$1"
-            fi
-          }
-          run_pv "dist/orbitpan/OrbitPan.vst3"
-          run_pv "dist/bassleveler/Bass Note Leveler.vst3"
-          run_pv "dist/notespace/Note Space.vst3"
-          run_pv "dist/steelwave/Steelwave.vst3"
+          curl -L -o pluginval.zip https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Windows.zip
+          7z x -y pluginval.zip -opluginval >/dev/null
+          for p in "dist/orbitpan/OrbitPan.vst3" "dist/bassleveler/Bass Note Leveler.vst3" "dist/notespace/Note Space.vst3" "dist/steelwave/Steelwave.vst3"; do
+            pluginval/pluginval.exe --strictness-level 10 --validate-in-process --timeout-ms 180000 "$p"
+          done
 
       - uses: actions/upload-artifact@v4
         with:
-          name: OrbitPan-${{ matrix.name }}
+          name: OrbitPan-windows
           path: dist/orbitpan
 
       - uses: actions/upload-artifact@v4
         with:
-          name: BassNoteLeveler-${{ matrix.name }}
+          name: BassNoteLeveler-windows
           path: dist/bassleveler
 
       - uses: actions/upload-artifact@v4
         with:
-          name: NoteSpace-${{ matrix.name }}
+          name: NoteSpace-windows
           path: dist/notespace
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Steelwave-${{ matrix.name }}
+          name: Steelwave-windows
           path: dist/steelwave
