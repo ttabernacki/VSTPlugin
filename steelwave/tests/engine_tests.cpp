@@ -436,6 +436,110 @@ int main()
         CHECK (slow.first < 0.5, "an eased-in move doesn't (%.2f cents)", slow.first);
     }
 
+    std::printf ("Performance controls\n");
+    {
+        // run an engine with timed events, sampling one string's pitch (semitones) as it goes
+        auto play = [&] (EngineParams q, std::function<void (Script&)> moves, double until, int traceString,
+                         std::vector<std::pair<double, double>>& trace, std::vector<float>* audio = nullptr) {
+            SteelEngine e;
+            e.prepare (kFs);
+            e.setParams (q);
+            Script sc;
+            moves (sc);
+            std::sort (sc.ev.begin(), sc.ev.end(), [] (auto& a, auto& b) { return a.first < b.first; });
+            std::vector<float> buf (32);
+            size_t k = 0;
+            for (double t = 0; t < until; t += 32.0 / kFs)
+            {
+                while (k < sc.ev.size() && sc.ev[k].first <= t) sc.ev[k++].second (e);
+                e.process (buf.data(), 32);
+                trace.push_back ({ t, e.stringSemis (traceString) });
+                if (audio) audio->insert (audio->end(), buf.begin(), buf.end());
+            }
+        };
+        auto at = [] (const std::vector<std::pair<double, double>>& tr, double t) {
+            for (auto& [tt, v] : tr) if (tt >= t) return v;
+            return tr.back().second;
+        };
+        auto swing = [] (const std::vector<std::pair<double, double>>& tr, double t0, double t1) {
+            double lo = 1e9, hi = -1e9;
+            for (auto& [t, v] : tr) if (t >= t0 && t < t1) { lo = std::min (lo, v); hi = std::max (hi, v); }
+            return hi - lo;
+        };
+        std::vector<std::pair<double, double>> tr;
+        // pedal key B (MIDI 37) under an E chord: string 3 G# -> A, travelling like a pedal
+        play (p, [] (Script& sc) {
+            sc.at (0.05, [] (SteelEngine& e) { e.noteOn (60, 0.7); });
+            sc.at (0.5, [] (SteelEngine& e) { e.noteOn (kPedalKeyLo + PedB, 0.2); }); // gentle: ~210 ms
+            sc.at (1.2, [] (SteelEngine& e) { e.noteOff (kPedalKeyLo + PedB); });
+        }, 1.8, 2, tr);
+        const double mid = at (tr, 0.6), down = at (tr, 1.0), up = at (tr, 1.7);
+        CHECK (mid > 0.15 && mid < 0.85, "pedal key B pressed gently: 100 ms in, string 3 is %.2f of the way to A (travelling)", mid);
+        CHECK (std::fabs (down - 1.0) < 0.03 && std::fabs (up) < 0.03, "held: A (%+.3f), let go: back to G# (%+.3f)", down - 1.0, up);
+        tr.clear();
+        play (p, [] (Script& sc) {
+            sc.at (0.05, [] (SteelEngine& e) { e.noteOn (60, 0.7); });
+            sc.at (0.5, [] (SteelEngine& e) { e.noteOn (kPedalKeyLo + PedB, 1.0); }); // hard: ~80 ms
+        }, 0.7, 2, tr);
+        CHECK (at (tr, 0.6) > 0.95, "hit hard, the pedal is down within 100 ms (%.2f)", at (tr, 0.6));
+        // pedal keys off: those keys play chords again
+        {
+            EngineParams q = p;
+            q.pedalKeys = false;
+            SteelEngine e;
+            e.prepare (kFs);
+            e.setParams (q);
+            std::vector<float> b (4800);
+            e.noteOn (kPedalKeyLo + PedB, 0.8);
+            e.process (b.data(), 4800);
+            CHECK (e.chordSlot() == 1, "pedal keys off: MIDI 37 plays the C# chord slot again");
+        }
+        // aftertouch shakes the bar
+        tr.clear();
+        play (p, [] (Script& sc) {
+            sc.at (0.05, [] (SteelEngine& e) { e.noteOn (60, 0.7); });
+            sc.at (0.6, [] (SteelEngine& e) { e.aftertouch (1.0); });
+        }, 1.4, 3, tr);
+        CHECK (swing (tr, 0.1, 0.55) < 0.005 && swing (tr, 0.9, 1.4) > 0.2, "aftertouch: no vibrato, then +-%.0f cents with full pressure", 50 * swing (tr, 0.9, 1.4));
+        // auto vibrato comes in on its own once a note has been held
+        {
+            EngineParams q = p;
+            q.autoVibrato = 1.0;
+            q.vibDelay = 0.5;
+            tr.clear();
+            play (q, [] (Script& sc) { sc.at (0.05, [] (SteelEngine& e) { e.noteOn (60, 0.7); }); }, 1.8, 3, tr);
+            CHECK (swing (tr, 0.1, 0.5) < 0.005 && swing (tr, 1.3, 1.8) > 0.2, "auto vibrato: still for %.1f s, then it comes in (+-%.0f cents)", q.vibDelay, 50 * swing (tr, 1.3, 1.8));
+        }
+        // mod wheel as the A+B pedals, or as a bar slide
+        {
+            EngineParams q = p;
+            q.modWheel = EngineParams::ModPedalsAB;
+            tr.clear();
+            play (q, [] (Script& sc) { sc.at (0.05, [] (SteelEngine& e) { e.noteOn (60, 0.7); e.controller (1, 1.0); }); }, 0.6, 4, tr);
+            CHECK (std::fabs (tr.back().second - 2.0) < 0.05, "mod wheel as A+B: string 5 up a whole step (%.2f)", tr.back().second);
+            q.modWheel = EngineParams::ModBarSlide;
+            tr.clear();
+            play (q, [] (Script& sc) {
+                sc.at (0.05, [] (SteelEngine& e) { e.noteOn (60, 0.7); });
+                sc.at (0.3, [] (SteelEngine& e) { e.controller (1, 0.5); });
+            }, 0.8, 3, tr);
+            CHECK (std::fabs (tr.back().second - 1.0) < 0.05, "mod wheel as a bar slide: half way = 1 fret (%.2f)", tr.back().second);
+        }
+        // auto swell: soft notes fade in, firm ones pick
+        {
+            EngineParams q = p;
+            q.swellBelow = 0.5;
+            q.swellTime = 0.5;
+            std::vector<float> soft, hard;
+            tr.clear();
+            play (q, [] (Script& sc) { sc.at (0.05, [] (SteelEngine& e) { e.noteOn (60, 0.3); }); }, 1.0, 3, tr, &soft);
+            tr.clear();
+            play (q, [] (Script& sc) { sc.at (0.05, [] (SteelEngine& e) { e.noteOn (60, 0.8); }); }, 1.0, 3, tr, &hard);
+            CHECK (rms (soft, 0.05, 0.12) < 0.1 * rms (soft, 0.5, 0.6), "auto swell: a soft note fades in (%.0f dB in the first 70 ms re 0.5 s)", db (rms (soft, 0.05, 0.12) / rms (soft, 0.5, 0.6)));
+            CHECK (rms (hard, 0.05, 0.12) > rms (hard, 0.5, 0.6), "a firm note picks as usual");
+        }
+    }
+
     std::printf ("Sympathetic strings\n");
     {
         auto run = [&] (double sym) {

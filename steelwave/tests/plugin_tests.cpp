@@ -102,8 +102,10 @@ int main()
             missing += p.apvts.getParameter (id) == nullptr;
         for (const auto& a : swadv::params())
             missing += p.apvts.getParameter (a.id) == nullptr;
-        const int expected = 16 + (int) swadv::params().size();
-        CHECK (missing == 0 && p.getParameters().size() == expected, "%d parameters (16 + %d advanced)", expected, (int) swadv::params().size());
+        for (auto* id : { "pedalkeys", "pedalspeed", "modwheel", "aftertouch", "swellbelow", "swelltime", "autovib", "vibdelay" })
+            missing += p.apvts.getParameter (id) == nullptr;
+        const int expected = 16 + 8 + (int) swadv::params().size();
+        CHECK (missing == 0 && p.getParameters().size() == expected, "%d parameters (16 + 8 controls + %d advanced)", expected, (int) swadv::params().size());
         int offCentre = 0;
         for (const auto& a : swadv::params())
             if (std::fabs (p.apvts.getParameter (a.id)->getValue() - 0.5f) > 1e-3f)
@@ -227,6 +229,41 @@ int main()
         CHECK (rms (y, 0.2, 0.6) > 1e-3, "volume pedal Off: plays at full level");
     }
 
+    std::printf ("Controls\n");
+    {
+        // pedal key B through MIDI, aftertouch through channel pressure and poly pressure
+        SteelwaveProcessor p;
+        prepare (p, kFs, 256);
+        std::vector<Ev> ev = { { S (0.05), MM::noteOn (1, 60, (juce::uint8) 100) },
+                               { S (0.3), MM::noteOn (1, sw::kPedalKeyLo + sw::PedB, (juce::uint8) 127) } };
+        auto x = render (p, ev, 0.9, { 256 });
+        CHECK (p.uiTravel[sw::PedB].load() > 0.99f && dftDb (x, hz (57), 0.5, 0.3) - dftDb (x, hz (56), 0.5, 0.3) > 20,
+               "pedal key B (MIDI 37) pulls G# to A, and the panel shows the B pedal down");
+        setPlain (p, "pedalkeys", 0);
+        render (p, { { 0, MM::noteOff (1, sw::kPedalKeyLo + sw::PedB) } }, 0.4, { 256 });
+        auto y = render (p, { { 0, MM::noteOn (1, sw::kPedalKeyLo + sw::PedB, (juce::uint8) 100) } }, 0.3, { 256 });
+        CHECK (p.uiSlot.load() == 1, "pedal keys Off: MIDI 37 plays a chord again");
+        for (int kind = 0; kind < 2; ++kind)
+        {
+            SteelwaveProcessor q;
+            prepare (q, kFs, 256);
+            std::vector<Ev> e2 = { { S (0.05), MM::noteOn (1, 60, (juce::uint8) 100) },
+                                   { S (0.3), kind == 0 ? MM::channelPressureChange (1, 127) : MM::aftertouchChange (1, 60, 127) } };
+            float lo = 1e9f, hi = -1e9f;
+            int64_t pos = 0;
+            juce::AudioBuffer<float> buf (2, 256);
+            for (int b = 0; b < (int) (1.2 * kFs / 256); ++b, pos += 256)
+            {
+                juce::MidiBuffer m;
+                for (auto& e : e2) if (e.at >= pos && e.at < pos + 256) m.addEvent (e.m, (int) (e.at - pos));
+                buf.clear();
+                q.processBlock (buf, m);
+                if (pos > S (0.7)) { lo = std::min (lo, q.uiSemis[3].load()); hi = std::max (hi, q.uiSemis[3].load()); }
+            }
+            CHECK (hi - lo > 0.2f, "%s pressure shakes the bar (+-%.0f cents)", kind == 0 ? "channel" : "poly", 50.0f * (hi - lo));
+        }
+    }
+
     std::printf ("Advanced parameters\n");
     {
         // a chord at bar 7 through a part-way volume pedal, with a stab of the wheel into its stop:
@@ -289,9 +326,12 @@ int main()
         ed->setSize (900, 520);
         auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
         CHECK (img.getWidth() == 900, "editor opens and paints");
-        if (auto* se = dynamic_cast<SteelwaveEditor*> (ed.get())) se->showPage (true);
+        if (auto* se = dynamic_cast<SteelwaveEditor*> (ed.get())) se->showPage (SteelwaveEditor::AdvancedPage);
         auto img2 = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
         CHECK (img2.getWidth() == 900, "advanced page opens and paints");
+        if (auto* se = dynamic_cast<SteelwaveEditor*> (ed.get())) se->showPage (SteelwaveEditor::ControlsPage);
+        auto img3 = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
+        CHECK (img3.getWidth() == 900, "controls page opens and paints");
     }
 
     std::printf ("\n%s (%d failure%s)\n", failures ? "FAILED" : "ALL PASSED", failures, failures == 1 ? "" : "s");

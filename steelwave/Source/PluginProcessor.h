@@ -47,6 +47,7 @@ public:
     std::atomic<int> uiSet { 0 }, uiSlot { -1 }, uiBar { 0 }, uiSounding { 0 };
     std::atomic<float> uiWheel { 0.0f }, uiVolume { 1.0f };
     std::array<std::atomic<float>, sw::kStrings> uiSemis {};
+    std::array<std::atomic<float>, sw::kControls> uiTravel {}; // pedals and levers, 0..1
 
 private:
     sw::EngineParams readParams() const;
@@ -57,7 +58,9 @@ private:
     int lastSetParam_ = -1;
     std::atomic<float>*pSet = nullptr, *pKey = nullptr, *pGlide = nullptr, *pStrum = nullptr, *pHard = nullptr, *pBright = nullptr,
         *pSustain = nullptr, *pNoise = nullptr, *pVibRate = nullptr, *pVibDepth = nullptr, *pSym = nullptr, *pPickup = nullptr,
-        *pVolCc = nullptr, *pLevel = nullptr, *pBehind = nullptr, *pVolType = nullptr;
+        *pVolCc = nullptr, *pLevel = nullptr, *pBehind = nullptr, *pVolType = nullptr, *pPedalKeys = nullptr,
+        *pPedalSpeed = nullptr, *pModWheel = nullptr, *pAftertouch = nullptr, *pSwellBelow = nullptr, *pSwellTime = nullptr,
+        *pAutoVib = nullptr, *pVibDelay = nullptr;
     std::vector<std::atomic<float>*> pAdv; // in swadv::params() order
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SteelwaveProcessor)

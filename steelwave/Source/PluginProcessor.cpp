@@ -67,6 +67,32 @@ APVTS::ParameterLayout SteelwaveProcessor::createLayout()
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "level", 1 }, "Level", Range (-24.0f, 12.0f), 0.0f,
                                                   Attr().withStringFromValueFunction ([] (float v, int) { return String (v > 0 ? "+" : "") + String (v, 1) + " dB"; })
                                                       .withValueFromStringFunction (num)));
+    // the Controls page: how the instrument is played
+    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "pedalkeys", 1 }, "Pedal keys",
+                                                   StringArray { "Off", "On (MIDI 36-42)" }, 1));
+    {
+        Range r (0.3f, 3.0f);
+        r.setSkewForCentre (1.0f);
+        l.add (std::make_unique<AudioParameterFloat> (ParameterID { "pedalspeed", 1 }, "Pedal speed", r, 1.0f,
+                                                      Attr().withStringFromValueFunction ([] (float v, int) { return String (v, 2) + "x"; })
+                                                          .withValueFromStringFunction (num)));
+    }
+    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "modwheel", 1 }, "Mod wheel",
+                                                   StringArray { "Vibrato", "A+B pedals", "Bar slide (2 frets)", "Off" }, 0));
+    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "aftertouch", 1 }, "Aftertouch", StringArray { "Vibrato", "Off" }, 0));
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "swellbelow", 1 }, "Auto swell", Range (0.0f, 1.0f), 0.0f,
+                                                  Attr().withStringFromValueFunction ([] (float v, int) {
+                                                      return v <= 0.0f ? String ("Off") : "vel < " + String (roundToInt (v * 127.0f)); })
+                                                      .withValueFromStringFunction ([] (const String& t) { return t.getFloatValue() / 127.0f; })));
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "swelltime", 1 }, "Swell time", Range (0.1f, 3.0f, 0.0f, 0.5f), 0.6f,
+                                                  Attr().withStringFromValueFunction ([] (float v, int) { return String (v, 2) + " s"; })
+                                                      .withValueFromStringFunction (num)));
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "autovib", 1 }, "Auto vibrato", Range (0.0f, 1.0f), 0.0f,
+                                                  Attr().withStringFromValueFunction (pct).withValueFromStringFunction (pctIn)));
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "vibdelay", 1 }, "Vibrato delay", Range (0.0f, 2.0f), 0.5f,
+                                                  Attr().withStringFromValueFunction ([] (float v, int) { return String (v, 2) + " s"; })
+                                                      .withValueFromStringFunction (num)));
+
     // the Advanced page: the model's calibration. Each knob's default sits at 12 o'clock.
     for (const auto& a : swadv::params())
     {
@@ -102,6 +128,16 @@ SteelwaveProcessor::SteelwaveProcessor()
     pLevel = apvts.getRawParameterValue ("level");
     pBehind = apvts.getRawParameterValue ("behindbar");
     pVolType = apvts.getRawParameterValue ("voltype");
+    pPedalKeys = apvts.getRawParameterValue ("pedalkeys");
+    pPedalSpeed = apvts.getRawParameterValue ("pedalspeed");
+    pModWheel = apvts.getRawParameterValue ("modwheel");
+    pAftertouch = apvts.getRawParameterValue ("aftertouch");
+    pSwellBelow = apvts.getRawParameterValue ("swellbelow");
+    pSwellTime = apvts.getRawParameterValue ("swelltime");
+    pAutoVib = apvts.getRawParameterValue ("autovib");
+    pVibDelay = apvts.getRawParameterValue ("vibdelay");
+    for (auto& t : uiTravel)
+        t = 0.0f;
     for (const auto& a : swadv::params())
         pAdv.push_back (apvts.getRawParameterValue (a.id));
     for (auto& s : uiSemis)
@@ -133,6 +169,14 @@ sw::EngineParams SteelwaveProcessor::readParams() const
     p.levelDb = pLevel->load();
     p.behindBar = pBehind->load();
     p.volumePedal = (sw::EngineParams::VolumePedal) juce::jlimit (0, 2, (int) pVolType->load());
+    p.pedalKeys = (int) pPedalKeys->load() == 1;
+    p.pedalSpeed = pPedalSpeed->load();
+    p.modWheel = (sw::EngineParams::ModWheel) juce::jlimit (0, 3, (int) pModWheel->load());
+    p.aftertouchVibrato = (int) pAftertouch->load() == 0;
+    p.swellBelow = pSwellBelow->load();
+    p.swellTime = pSwellTime->load();
+    p.autoVibrato = pAutoVib->load();
+    p.vibDelay = pVibDelay->load();
     const auto& adv = swadv::params();
     for (size_t i = 0; i < adv.size(); ++i)
         p.*(adv[i].field) = pAdv[i]->load();
@@ -157,6 +201,10 @@ void SteelwaveProcessor::handle (const juce::MidiMessage& m)
         engine.noteOff (m.getNoteNumber());
     else if (m.isPitchWheel())
         engine.pitchWheel ((m.getPitchWheelValue() - 8192) / 8191.0);
+    else if (m.isChannelPressure())
+        engine.aftertouch (m.getChannelPressureValue() / 127.0);
+    else if (m.isAftertouch()) // polyphonic pressure: the bar is one bar, so the latest key's pressure
+        engine.aftertouch (m.getAfterTouchValue() / 127.0);
     else if (m.isController())
         engine.controller (m.getControllerNumber(), m.getControllerValue() / 127.0);
     else if (m.isAllNotesOff() || m.isAllSoundOff())
@@ -232,6 +280,8 @@ void SteelwaveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
         uiSemis[(size_t) s] = (float) engine.stringSemis (s);
     }
     uiSounding = bits;
+    for (int k = 0; k < sw::kControls; ++k)
+        uiTravel[(size_t) k] = (float) engine.controlTravel (k);
 }
 
 // Bypassed, an instrument is silent; notes still in the engine are let go so nothing is stuck on return.

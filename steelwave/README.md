@@ -14,9 +14,11 @@ pedals and four knee levers.
 |---|---|
 | **C1-G1** (MIDI 24-31) | Keyswitch: chord sets 1-8 |
 | **G#1-B1** (32-35) | Keyswitch: single-note sets 1-4 |
-| **C2 and up** | Play (layout below; the octave doesn't matter for chords) |
+| **MIDI 36-42** | Pedal keys (on by default; the lowest 7 keys of a 61-key board): A, B, C, LKL, LKR, RKL, RKR. Hold them like pedals: they travel like pedals (hit harder for a faster pedal, ~80-250 ms) and land on their stops |
+| **MIDI 43 and up** | Play (layout below; the octave doesn't matter for chords). With pedal keys off, from MIDI 36 |
 | **Pitch wheel** | Bend (below) |
-| **Mod wheel** | Bar vibrato (rate and depth knobs) |
+| **Mod wheel** | Selectable: bar vibrato (default), the A+B pedals (a non-springing strip holds a pedal bend), a bar slide of up to 2 frets, or off |
+| **Aftertouch** | Bar vibrato: press into the keys (channel or poly pressure) |
 | **Expression, CC11** | Volume pedal (strongly tapered like a real one). Choosable: CC11/7/4/2/off |
 | **Sustain, CC64** | Strings ring after you let go (otherwise letting go is a palm block) |
 | **CC20-26** | The real E9 pedals and levers on top of anything: A, B, C, LKL, LKR, RKL, RKR |
@@ -72,7 +74,17 @@ keys move the bar (kept between frets 0 and 22).
 
 Sets: Scale, Scale high (bar +12), Whole-step bends, Half-step bends.
 
-## Controls
+## Controls page
+How it's played:
+- **Pedal keys** (on/off) and **Pedal speed**.
+- **Mod wheel** function and **Aftertouch** (vibrato/off).
+- **Auto swell:** notes softer than a set velocity fade in like a volume-pedal swell; harder notes pick as usual. **Swell time** sets how long it takes to open.
+- **Auto vibrato** and **Vib delay:** vibrato that comes in on its own once a note has been held.
+
+Vibrato depth is the strongest of the mod wheel, aftertouch and auto vibrato. The page also shows the
+pedals and levers live and summarises what each control does. The same pedal strip is on the Play page.
+
+## Play page knobs
 | Knob | Range | |
 |---|---|---|
 | Glide | 30-1200 ms | Legato bar slide time |

@@ -9,6 +9,9 @@
 //   pitch wheel       bend (chord sets: up = a 4th up, down = a 3rd up; single: next/previous scale note)
 //   mod wheel         bar vibrato depth          CC64 sustain (let strings ring after release)
 //   volume pedal CC   (11 by default)            CC20..26 A, B, C pedals, LKL, LKR, RKL, RKR (real E9 on top)
+//   pedal keys        MIDI 36..42 (the lowest keys of a 61-key board), when on: A B C LKL LKR RKL RKR,
+//                     held like pedals, with real travel time (harder = faster)
+//   aftertouch        bar vibrato (channel or poly pressure)
 
 #include "SteelString.h"
 #include "Voicing.h"
@@ -18,6 +21,7 @@ namespace sw
 constexpr int kChordSets = 8, kSingleSets = 4, kSets = kChordSets + kSingleSets;
 constexpr int kKeyswitchLo = 24, kKeyswitchHi = 35, kPlayLo = 36;
 constexpr int kPedalCcFirst = 20;
+constexpr int kPedalKeyLo = 36; // A B C LKL LKR RKL RKR on 36..42 when pedal keys are on
 
 inline const char* setName (int s)
 {
@@ -46,6 +50,17 @@ struct EngineParams
     double tensionMod = 1.0, growl = 1.0, bodyDamping = 1.0, bodySize = 1.0, barSoftness = 0.35, behindDecay = 1.0;
     double cabinetDrop = 1.0, stopBounce = 1.0;
     double thumbHardness = 0.65, dragTime = 1.0, pickVariation = 1.0;
+
+    // --- performance controls ---
+    bool pedalKeys = true;         // MIDI 36..42 play the pedals and levers
+    double pedalSpeed = 1.0;       // x how fast pedal keys travel (hard: ~80 ms, soft: ~250 ms at 1x)
+    enum ModWheel { ModVibrato, ModPedalsAB, ModBarSlide, ModOff };
+    ModWheel modWheel = ModVibrato;
+    bool aftertouchVibrato = true; // pressure shakes the bar
+    double swellBelow = 0.0;       // auto swell: notes softer than this velocity fade in (0 = off)
+    double swellTime = 0.6;        // s
+    double autoVibrato = 0.0;      // vibrato that comes in on its own as a note is held (0..1 of Vib depth)
+    double vibDelay = 0.5;         // s before it starts
 };
 
 class SteelEngine
@@ -80,6 +95,13 @@ public:
         bar_ = 0;
         wheel_ = mod_ = 0;
         ccTravel_.fill (0.0);
+        keyTravel_.fill (0.0);
+        keyTarget_.fill (0.0);
+        keyRate_.fill (1.0);
+        swell_.fill (1.0);
+        swellRate_.fill (0.0);
+        pressure_ = pressureS_ = barSlide_ = 0.0;
+        lastPick_ = 0;
         sustainPedal_ = false;
         vol_ = volTarget_ = 1.0;
         volLp_ = 0;
@@ -124,6 +146,11 @@ public:
             setSet (note - kKeyswitchLo);
             return;
         }
+        if (prm_.pedalKeys && note >= kPedalKeyLo && note < kPedalKeyLo + kControls)
+        {
+            pedalKey (note - kPedalKeyLo, true, vel);
+            return;
+        }
         if (note < kPlayLo || note > 127)
             return;
         vel = std::clamp (vel, 0.0, 1.0);
@@ -134,6 +161,11 @@ public:
     }
     void noteOff (int note)
     {
+        if (prm_.pedalKeys && note >= kPedalKeyLo && note < kPedalKeyLo + kControls)
+        {
+            pedalKey (note - kPedalKeyLo, false, 0.0);
+            return;
+        }
         if (note < kPlayLo || note > 127)
             return;
         if (chordMode())
@@ -169,7 +201,17 @@ public:
     void controller (int cc, double v) // v 0..1
     {
         if (cc == 1)
+        {
             mod_ = v;
+            if (prm_.modWheel == EngineParams::ModPedalsAB)
+                updatePedals (0.01);
+            else if (prm_.modWheel == EngineParams::ModBarSlide)
+            {
+                barSlide_ = kBarSlideMax * v;
+                for (auto& st : str_)
+                    st.setBar (bar_ + barSlide_, 0.03);
+            }
+        }
         else if (cc == 64)
         {
             const bool on = v >= 0.5;
@@ -197,6 +239,7 @@ public:
             stopAll();
     }
     void allNotesOff() { stopAll(); }
+    void aftertouch (double v) { pressure_ = std::clamp (v, 0.0, 1.0); }
 
     // --- audio -----------------------------------------------------------------------------
     void process (float* out, int n)
@@ -206,11 +249,14 @@ public:
         const double level = std::pow (10.0, prm_.levelDb / 20.0) * kOutputScale;
         for (int i = 0; i < n; ++i)
         {
+            // pedal keys travelling
+            if ((clock_ & 31) == 0)
+                movePedalKeys (32.0 / fs_);
             // scheduled picks (strums)
             for (int k = 0; k < nPicks_;)
                 if (picks_[(size_t) k].at <= clock_)
                 {
-                    str_[(size_t) picks_[(size_t) k].string].pluck (picks_[(size_t) k].vel);
+                    pick (picks_[(size_t) k].string, picks_[(size_t) k].vel);
                     picks_[(size_t) k] = picks_[(size_t) --nPicks_];
                 }
                 else
@@ -219,15 +265,31 @@ public:
             driftPh_ += 0.37 * dt;
             vibPh_ += prm_.vibRate * (1.0 + 0.04 * std::sin (2 * kPi * driftPh_)) * dt;
             vibPh_ -= std::floor (vibPh_);
-            const double vib = mod_ * prm_.vibDepth * std::sin (2 * kPi * vibPh_);
+            // how much the bar shakes: the mod wheel, pressure into the keys, or vibrato coming in on its
+            // own once a note has been held (the strongest wins)
+            pressureS_ += pressureCoef_ * ((prm_.aftertouchVibrato ? pressure_ : 0.0) - pressureS_);
+            const double held = (double) (clock_ - lastPick_) / fs_ - prm_.vibDelay;
+            const double autoV = prm_.autoVibrato * (held <= 0.0 ? 0.0 : held >= 0.6 ? 1.0 : 0.5 - 0.5 * std::cos (kPi * held / 0.6));
+            const double depth = std::max ({ prm_.modWheel == EngineParams::ModVibrato ? mod_ : 0.0, pressureS_, anyHeld() ? autoV : 0.0 });
+            const double vib = depth * prm_.vibDepth * std::sin (2 * kPi * vibPh_);
             double bsum = 0;
             for (auto& s : str_)
                 bsum += s.bridge();
             double sum = 0;
-            for (auto& s : str_)
+            for (int k = 0; k < kStrings; ++k)
             {
+                auto& s = str_[(size_t) k];
                 s.setVibrato (vib);
-                sum += s.process (kappa * (bsum - s.bridge()));
+                const double y = s.process (kappa * (bsum - s.bridge()));
+                // auto swell: a soft note fades in, like a volume pedal under that string
+                double& sg = swell_[(size_t) k];
+                if (sg < 1.0)
+                {
+                    sg = std::min (1.0, sg + swellRate_[(size_t) k]);
+                    sum += y * sg * sg;
+                }
+                else
+                    sum += y;
             }
             vol_ += volCoef_ * (volTarget_ - vol_);
             const double g = std::pow (std::clamp (vol_, 0.0, 1.0), 2.5); // volume pedals are strongly tapered
@@ -248,6 +310,7 @@ public:
     double volume() const { return vol_; }
     bool stringSounding (int s) const { return str_[(size_t) s].isSounding(); }
     double stringLevel (int s) const { return str_[(size_t) s].level(); }
+    double controlTravel (int k) const { return travel()[(size_t) k]; }
     double stringSemis (int s) const { return str_[(size_t) s].currentSemis(); }
 
     static constexpr double kOutputScale = 0.12;
@@ -256,6 +319,7 @@ public:
     static constexpr double kCabinetDrop = 0.026; // semitones per string's worth of added tension (A+B ~ -2 cents)
     static constexpr double kStopBounce = 0.03;   // semitones of overshoot from a fast hit
     static constexpr double kStopAt = 0.995;
+    static constexpr double kBarSlideMax = 2.0; // mod wheel as a bar slide: up to 2 frets
 
 private:
     struct StringState
@@ -296,6 +360,7 @@ private:
             s.setParams (sp);
         pickup_.set (prm_.pickup, prm_.coilShiftOct, prm_.coilQ);
         volCoef_ = 1.0 - std::exp (-1.0 / (0.01 * fs_));
+        pressureCoef_ = 1.0 - std::exp (-1.0 / (0.03 * fs_)); // aftertouch arrives in steps: smooth it
         if (prm_.volumeCc < 0)
             volTarget_ = 1.0;
     }
@@ -331,7 +396,7 @@ private:
     }
     void updatePedals (double glide)
     {
-        const auto c = copedentOffsets (ccTravel_);
+        const auto c = copedentOffsets (travel());
         for (int s = 0; s < kStrings; ++s)
             cc_[(size_t) s] = c[(size_t) s];
         for (int s = 0; s < kStrings; ++s)
@@ -361,12 +426,69 @@ private:
         for (int s = 0; s < kStrings; ++s)
         {
             if (legato)
-                str_[(size_t) s].setBar (bar, prm_.glide);
+                str_[(size_t) s].setBar (bar + barSlide_, prm_.glide);
             else
-                str_[(size_t) s].setBar (bar, kLandSec * 0.8, false);
+                str_[(size_t) s].setBar (bar + barSlide_, kLandSec * 0.8, false);
         }
         bar_ = bar;
     }
+
+    // what each pedal/lever is doing: the furthest of its CC, its pedal key and (A, B) the mod wheel
+    std::array<double, kControls> travel() const
+    {
+        std::array<double, kControls> t {};
+        for (int k = 0; k < kControls; ++k)
+            t[(size_t) k] = std::max (ccTravel_[(size_t) k], keyTravel_[(size_t) k]);
+        if (prm_.modWheel == EngineParams::ModPedalsAB)
+        {
+            t[PedA] = std::max (t[PedA], mod_);
+            t[PedB] = std::max (t[PedB], mod_);
+        }
+        return t;
+    }
+    void pedalKey (int k, bool down, double vel)
+    {
+        keyTarget_[(size_t) k] = down ? 1.0 : 0.0;
+        // a pedal pressed hard goes down in ~80 ms, gently in ~250 ms; released, it springs back in ~150 ms
+        const double sec = (down ? 0.25 - 0.17 * std::clamp (vel, 0.0, 1.0) : 0.15) / std::clamp (prm_.pedalSpeed, 0.2, 5.0);
+        keyRate_[(size_t) k] = 1.0 / sec;
+    }
+    void movePedalKeys (double dt)
+    {
+        bool moved = false;
+        for (int k = 0; k < kControls; ++k)
+        {
+            double& x = keyTravel_[(size_t) k];
+            const double tgt = keyTarget_[(size_t) k];
+            if (x == tgt)
+                continue;
+            const double old = x;
+            x = tgt > x ? std::min (tgt, x + keyRate_[(size_t) k] * dt) : std::max (tgt, x - keyRate_[(size_t) k] * dt);
+            moved = true;
+            const bool arrive = old < kStopAt && x >= kStopAt, leave = old > 1.0 - kStopAt && x <= 1.0 - kStopAt;
+            if (arrive || leave)
+                for (int s = 0; s < kStrings; ++s)
+                    if (const int c = e9Copedent()[(size_t) k][(size_t) s]; c != 0)
+                        str_[(size_t) s].bump ((arrive ? 1.0 : -0.5) * stopBounce (keyRate_[(size_t) k]) * (c > 0 ? 1.0 : -1.0));
+        }
+        if (moved)
+            updatePedals (1.5 * dt);
+    }
+    // every pick goes through here: soft notes swell in when auto swell is on
+    void pick (int s, double vel)
+    {
+        lastPick_ = clock_;
+        if (prm_.swellBelow > 0.0 && vel < prm_.swellBelow)
+        {
+            swell_[(size_t) s] = 0.0;
+            swellRate_[(size_t) s] = 1.0 / (std::max (prm_.swellTime, 0.02) * fs_);
+            vel = std::max (vel, 0.6); // the attack is hidden under the swell: pick it firmly
+        }
+        else
+            swell_[(size_t) s] = 1.0;
+        str_[(size_t) s].pluck (vel);
+    }
+    bool anyHeld() const { return ! held_.empty() || sustainPedal_; }
 
     void stopAll()
     {
@@ -513,7 +635,7 @@ private:
         if (delay > 0)
             schedule (n.string, delay, vel);
         else
-            str_[(size_t) n.string].pluck (vel);
+            pick (n.string, vel);
     }
     void singleOff (int note)
     {
@@ -532,7 +654,10 @@ private:
     std::array<SteelString, kStrings> str_;
     std::array<StringState, kStrings> sst_ {};
     std::array<double, kStrings> cc_ {};
-    std::array<double, kControls> ccTravel_ {};
+    std::array<double, kControls> ccTravel_ {}, keyTravel_ {}, keyTarget_ {}, keyRate_ {};
+    std::array<double, kStrings> swell_ {}, swellRate_ {};
+    double pressure_ = 0, pressureS_ = 0, pressureCoef_ = 0.001, barSlide_ = 0;
+    int64_t lastPick_ = 0;
     std::array<Pick, 64> picks_ {};
     int nPicks_ = 0;
     Pickup pickup_;

@@ -7,9 +7,9 @@ int main (int argc, char** argv)
     if (argc < 2)
         return 2;
     juce::ScopedJuceInitialiser_GUI init;
-    struct Shot { const char* name; int set; int note; int wheel; bool advanced; };
-    const Shot shots[] = { { "ui_chord_bent", 0, 60, 12000, false }, { "ui_single", 8, 52, 8192, false }, { "ui_pad_v", 7, 67, 4000, false },
-                           { "ui_advanced", 0, 60, 8192, true } };
+    struct Shot { const char* name; int set; int note; int wheel; int page; };
+    const Shot shots[] = { { "ui_chord_bent", 0, 60, 12000, 0 }, { "ui_single", 8, 52, 8192, 0 }, { "ui_pad_v", 7, 67, 4000, 0 },
+                           { "ui_controls", 0, 60, 8192, 1 }, { "ui_advanced", 0, 60, 8192, 2 } };
     for (const auto& s : shots)
     {
         SteelwaveProcessor proc;
@@ -22,15 +22,15 @@ int main (int argc, char** argv)
         {
             juce::MidiBuffer midi;
             if (i == 1) midi.addEvent (juce::MidiMessage::noteOn (1, s.note, (juce::uint8) 100), 0);
+            if (i == 2) midi.addEvent (juce::MidiMessage::noteOn (1, sw::kPedalKeyLo + sw::PedB, (juce::uint8) 110), 0); // B pedal key down
             if (i == 20) midi.addEvent (juce::MidiMessage::pitchWheel (1, s.wheel), 0);
             buf.clear();
             proc.processBlock (buf, midi);
         }
         std::unique_ptr<juce::AudioProcessorEditor> ed (proc.createEditor());
         ed->setSize (900, 520);
-        if (s.advanced)
-            if (auto* se = dynamic_cast<SteelwaveEditor*> (ed.get()))
-                se->showPage (true);
+        if (auto* se = dynamic_cast<SteelwaveEditor*> (ed.get()))
+            se->showPage (s.page);
         auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
         juce::File f (juce::String (argv[1]) + "/" + s.name + ".png");
         f.deleteFile();

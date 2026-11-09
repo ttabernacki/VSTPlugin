@@ -15,13 +15,16 @@ public:
     void resized() override;
     void parentHierarchyChanged() override { useSoftwareRendering(); }
     void visibilityChanged() override { useSoftwareRendering(); }
-    void showPage (bool adv); // false = PLAY, true = ADVANCED
+    enum Page { PlayPage, ControlsPage, AdvancedPage };
+    void showPage (int page);
 
 private:
     void timerCallback() override
     {
-        if (! advanced)
+        if (page == PlayPage)
             repaint (neckArea);
+        else if (page == ControlsPage)
+            repaint (pedalStrip);
     }
     void useSoftwareRendering()
     {
@@ -45,9 +48,17 @@ private:
     juce::Rectangle<int> neckArea;
 
     // Advanced page: the model's calibration, grouped
-    juce::TextButton playTab { "PLAY" }, advTab { "ADVANCED" }, resetAdv { "Reset to calibrated" };
+    juce::TextButton playTab { "PLAY" }, ctlTab { "CONTROLS" }, advTab { "ADVANCED" }, resetAdv { "Reset to calibrated" };
     std::vector<std::unique_ptr<bassui::Knob>> advKnobs; // in swadv::params() order
     std::array<juce::Rectangle<int>, swadv::kGroups> groupAreas;
     juce::TooltipWindow tooltips { this, 300 };
-    bool advanced = false;
+
+    // Controls page: how it's played
+    Choice pedalKeys, modWheel, aftertouch;
+    bassui::Knob pedalSpeed, swellBelow, swellTime, autoVib, vibDelay;
+    std::array<juce::Rectangle<int>, 3> ctlAreas;
+    juce::Rectangle<int> pedalStrip;
+    void drawPedals (juce::Graphics&, juce::Rectangle<int>) const;
+
+    int page = PlayPage;
 };

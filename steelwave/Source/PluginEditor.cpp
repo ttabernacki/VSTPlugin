@@ -47,6 +47,23 @@ SteelwaveEditor::SteelwaveEditor (SteelwaveProcessor& p) : juce::AudioProcessorE
     sym.setup (*this, proc.apvts, "sympathetic", "SYMPATHETIC");
     level.setup (*this, proc.apvts, "level", "LEVEL");
 
+    pedalKeys.setup (*this, proc.apvts, "pedalkeys", "PEDAL KEYS");
+    modWheel.setup (*this, proc.apvts, "modwheel", "MOD WHEEL");
+    aftertouch.setup (*this, proc.apvts, "aftertouch", "AFTERTOUCH");
+    pedalSpeed.setup (*this, proc.apvts, "pedalspeed", "PEDAL SPEED");
+    swellBelow.setup (*this, proc.apvts, "swellbelow", "AUTO SWELL");
+    swellTime.setup (*this, proc.apvts, "swelltime", "SWELL TIME");
+    autoVib.setup (*this, proc.apvts, "autovib", "AUTO VIBRATO");
+    vibDelay.setup (*this, proc.apvts, "vibdelay", "VIB DELAY");
+    pedalKeys.box.setTooltip ("The lowest 7 keys of a 61-key board (MIDI 36-42) play A, B, C, LKL, LKR, RKL, RKR: hold them like pedals.");
+    pedalSpeed.slider.setTooltip ("How fast the pedal keys travel. Hit a pedal key harder for a faster pedal (about 80-250 ms at 1x).");
+    modWheel.box.setTooltip ("What the mod wheel does: vibrato, the A+B pedals (a non-springing strip holds a pedal bend), or a bar slide of up to 2 frets.");
+    aftertouch.box.setTooltip ("Pressing into the keys shakes the bar (vibrato depth).");
+    swellBelow.slider.setTooltip ("Notes played softer than this fade in like a volume-pedal swell; harder notes pick as usual. Off at 0.");
+    swellTime.slider.setTooltip ("How long an auto swell takes to open.");
+    autoVib.slider.setTooltip ("Vibrato that comes in on its own once a note has been held (re Vib depth).");
+    vibDelay.slider.setTooltip ("How long a note is held before auto vibrato starts.");
+
     for (const auto& a : swadv::params())
     {
         auto k = std::make_unique<bassui::Knob>();
@@ -55,15 +72,16 @@ SteelwaveEditor::SteelwaveEditor (SteelwaveProcessor& p) : juce::AudioProcessorE
         k->slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 66, 15);
         advKnobs.push_back (std::move (k));
     }
-    for (auto* b : { &playTab, &advTab })
+    for (auto* b : { &playTab, &ctlTab, &advTab })
     {
         b->setClickingTogglesState (false);
         b->setColour (juce::TextButton::buttonColourId, kPanel2);
         b->setColour (juce::TextButton::buttonOnColourId, kAccent.darker (0.6f));
         addAndMakeVisible (*b);
     }
-    playTab.onClick = [this] { showPage (false); };
-    advTab.onClick = [this] { showPage (true); };
+    playTab.onClick = [this] { showPage (PlayPage); };
+    ctlTab.onClick = [this] { showPage (ControlsPage); };
+    advTab.onClick = [this] { showPage (AdvancedPage); };
     resetAdv.setColour (juce::TextButton::buttonColourId, kPanel2);
     resetAdv.setTooltip ("Put every Advanced knob back to the calibrated value (12 o'clock).");
     resetAdv.onClick = [this] {
@@ -81,7 +99,7 @@ SteelwaveEditor::SteelwaveEditor (SteelwaveProcessor& p) : juce::AudioProcessorE
     setResizeLimits (840, 485, 1400, 808);
     getConstrainer()->setFixedAspectRatio (900.0 / 520.0);
     setSize (900, 520);
-    showPage (false);
+    showPage (PlayPage);
     startTimerHz (20);
 }
 
@@ -91,20 +109,32 @@ SteelwaveEditor::~SteelwaveEditor()
     setLookAndFeel (nullptr);
 }
 
-void SteelwaveEditor::showPage (bool adv)
+void SteelwaveEditor::showPage (int p)
 {
-    advanced = adv;
-    playTab.setToggleState (! adv, juce::dontSendNotification);
+    page = p;
+    const bool play = p == PlayPage, ctl = p == ControlsPage, adv = p == AdvancedPage;
+    playTab.setToggleState (play, juce::dontSendNotification);
+    ctlTab.setToggleState (ctl, juce::dontSendNotification);
     advTab.setToggleState (adv, juce::dontSendNotification);
     for (auto* c : std::initializer_list<Choice*> { &set, &key, &pickup, &volcc, &voltype })
     {
-        c->box.setVisible (! adv);
-        c->label.setVisible (! adv);
+        c->box.setVisible (play);
+        c->label.setVisible (play);
     }
     for (auto* k : { &glide, &strum, &pick, &bright, &sustain, &noise, &behind, &vibRate, &vibDepth, &sym, &level })
     {
-        k->slider.setVisible (! adv);
-        k->label.setVisible (! adv);
+        k->slider.setVisible (play);
+        k->label.setVisible (play);
+    }
+    for (auto* c : std::initializer_list<Choice*> { &pedalKeys, &modWheel, &aftertouch })
+    {
+        c->box.setVisible (ctl);
+        c->label.setVisible (ctl);
+    }
+    for (auto* k : { &pedalSpeed, &swellBelow, &swellTime, &autoVib, &vibDelay })
+    {
+        k->slider.setVisible (ctl);
+        k->label.setVisible (ctl);
     }
     for (auto& k : advKnobs)
     {
@@ -115,14 +145,76 @@ void SteelwaveEditor::showPage (bool adv)
     repaint();
 }
 
+// the pedals and levers, lit by how far down they are
+void SteelwaveEditor::drawPedals (juce::Graphics& g, juce::Rectangle<int> area) const
+{
+    const int n = sw::kControls;
+    const float w = (float) area.getWidth() / (float) n;
+    for (int k = 0; k < n; ++k)
+    {
+        const auto cell = juce::Rectangle<float> ((float) area.getX() + w * (float) k, (float) area.getY(), w, (float) area.getHeight()).reduced (3.0f, 0.0f);
+        const float t = juce::jlimit (0.0f, 1.0f, proc.uiTravel[(size_t) k].load());
+        g.setColour (kLine);
+        g.fillRoundedRectangle (cell, 4.0f);
+        g.setColour (kWarm.withAlpha (0.25f + 0.75f * t));
+        g.fillRoundedRectangle (cell.withTrimmedTop (cell.getHeight() * (1.0f - t)), 4.0f);
+        g.setColour (t > 0.5f ? kBg : kText);
+        g.setFont (juce::FontOptions (10.0f, juce::Font::bold));
+        g.drawText (sw::controlName (k), cell, juce::Justification::centred);
+    }
+}
+
 void SteelwaveEditor::resized()
 {
     auto r = getLocalBounds().reduced (14);
     auto header = r.removeFromTop (34);
     advTab.setBounds (header.removeFromRight (96).reduced (0, 4));
     header.removeFromRight (6);
-    playTab.setBounds (header.removeFromRight (70).reduced (0, 4));
+    ctlTab.setBounds (header.removeFromRight (90).reduced (0, 4));
+    header.removeFromRight (6);
+    playTab.setBounds (header.removeFromRight (64).reduced (0, 4));
     r.removeFromTop (6);
+
+    // --- Controls page: pedals & wheels, swell & vibrato, then a map of what does what
+    {
+        auto a = r;
+        const int rowH = 112;
+        for (int i = 0; i < 2; ++i)
+        {
+            auto row = a.removeFromTop (rowH).reduced (0, 3);
+            ctlAreas[(size_t) i] = row;
+            row.removeFromLeft (110);
+            const int cw = row.getWidth() / 5;
+            auto knobCell = [&] (bassui::Knob& k) {
+                auto cell = row.removeFromLeft (cw).reduced (4, 4);
+                k.label.setBounds (cell.removeFromTop (16));
+                k.slider.setBounds (cell);
+            };
+            auto choiceCell = [&] (Choice& c) {
+                auto cell = row.removeFromLeft (cw).reduced (6, 0).withSizeKeepingCentre (cw - 12, 44);
+                c.label.setBounds (cell.removeFromTop (14));
+                c.box.setBounds (cell.reduced (0, 1));
+            };
+            if (i == 0)
+            {
+                choiceCell (pedalKeys);
+                knobCell (pedalSpeed);
+                choiceCell (modWheel);
+                choiceCell (aftertouch);
+            }
+            else
+            {
+                knobCell (swellBelow);
+                knobCell (swellTime);
+                knobCell (autoVib);
+                knobCell (vibDelay);
+            }
+        }
+        a.removeFromTop (3);
+        ctlAreas[2] = a;
+        pedalStrip = a.reduced (14, 0).removeFromTop (44).translated (0, 28);
+    }
+
 
     // --- Advanced page: four groups, one row each
     {
@@ -183,7 +275,41 @@ void SteelwaveEditor::paint (juce::Graphics& g)
     g.setFont (juce::FontOptions (11.0f));
     g.drawText ("physically modelled E9 pedal steel  |  no samples", 120, 14, playTab.getX() - 134, 26, juce::Justification::centredRight);
 
-    if (advanced)
+    if (page == ControlsPage)
+    {
+        const char* titles[] = { "PEDALS & WHEELS", "SWELL & VIBRATO", "WHAT DOES WHAT" };
+        for (int i = 0; i < 3; ++i)
+        {
+            const auto ca = ctlAreas[(size_t) i];
+            g.setColour (kPanel);
+            g.fillRoundedRectangle (ca.toFloat(), 8.0f);
+            g.setColour (kAccent);
+            g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+            if (i < 2)
+                g.drawFittedText (titles[i], ca.withWidth (106).reduced (12, 0), juce::Justification::centredLeft, 2);
+            else
+                g.drawText (titles[i], ca.reduced (14, 8).removeFromTop (16), juce::Justification::centredLeft);
+        }
+        drawPedals (g, pedalStrip);
+        auto t = ctlAreas[2].reduced (14, 8);
+        t.removeFromTop (16 + 12 + 44 + 8);
+        const bool keys = (int) proc.apvts.getRawParameterValue ("pedalkeys")->load() == 1;
+        const int mw = (int) proc.apvts.getRawParameterValue ("modwheel")->load();
+        const char* mwText[] = { "vibrato", "the A+B pedals", "a bar slide (up to 2 frets)", "nothing" };
+        const bool at = (int) proc.apvts.getRawParameterValue ("aftertouch")->load() == 0;
+        juce::String txt;
+        txt << (keys ? "Pedal keys: the lowest 7 keys of a 61-key board (MIDI 36-42) are A  B  C  LKL  LKR  RKL  RKR. Hold them like pedals; hit harder for a faster pedal.\n"
+                     : "Pedal keys are off: MIDI 36-42 play notes. CC20-26 still work the pedals and levers.\n")
+            << "Pitch wheel: bends the chord (up: a 4th up, down: a 3rd up).   Mod wheel: " << mwText[juce::jlimit (0, 3, mw)] << ".\n"
+            << "Aftertouch: " << (at ? "vibrato (press into the keys)" : "off") << ".   Expression pedal: the volume pedal (Play page).   Sustain: let strings ring.\n"
+            << "Keyswitches MIDI 24-35: chord sets 1-8, single-note sets 1-4.";
+        g.setColour (kText);
+        g.setFont (juce::FontOptions (12.0f));
+        g.drawFittedText (txt, t, juce::Justification::topLeft, 6);
+        return;
+    }
+
+    if (page == AdvancedPage)
     {
         g.setColour (kDim);
         g.setFont (juce::FontOptions (11.0f));
@@ -298,6 +424,8 @@ void SteelwaveEditor::paint (juce::Graphics& g)
         else
             g.fillRoundedRectangle (t.withWidth (std::max (2.0f, t.getWidth() * v)), 3.0f);
     };
+    drawPedals (g, info.removeFromTop (22)); // pedals and levers down, live
+    info.removeFromTop (4);
     meter ("wheel", proc.uiWheel.load(), true);
     meter ("volume", proc.uiVolume.load(), false);
     g.setColour (kDim);
