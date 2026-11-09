@@ -286,6 +286,7 @@ struct StringParams
     double pickupHorizontal = 0.8;// pickup sensitivity to horizontal motion (vertical = 1)
     double thumbHardness = 0.65;  // thumb pick hardness re the finger picks
     double dragTime = 1.0;        // x how long a pick drags the string before letting go
+    double catchMs = 4.0;         // re-picking a ringing string: how long the pick catches it first
 };
 
 class SteelString
@@ -401,7 +402,7 @@ public:
         const double vary = std::clamp (prm_.pickVariation, 0.0, 2.0);
         const double dragMs = (0.8 + 1.7 * (1.0 - velocity)) * (spec_.thumb ? 1.3 : 1.0) * std::clamp (prm_.dragTime, 0.0, 4.0)
                               * (1.0 + 0.15 * vary * rng_.next());
-        excDelay_ = (int) (std::max (dragMs, ringing ? 4.0 : 0.0) * 1e-3 * fs_);
+        excDelay_ = (int) (std::max (dragMs, ringing ? std::clamp (prm_.catchMs, 0.5, 10.0) : 0.0) * 1e-3 * fs_);
         dampPulse_ = dampLen_ = ringing ? excDelay_ : 0;
         if (ringing) // ~ -10 dB over the catch, whatever the loop length
             pickMin_ = std::pow (0.3, (fs_ / currentHz()) / (0.5 * excDelay_));

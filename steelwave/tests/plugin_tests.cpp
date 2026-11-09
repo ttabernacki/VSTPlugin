@@ -102,10 +102,11 @@ int main()
             missing += p.apvts.getParameter (id) == nullptr;
         for (const auto& a : swadv::params())
             missing += p.apvts.getParameter (a.id) == nullptr;
-        for (auto* id : { "pedalkeys", "pedalspeed", "modwheel", "aftertouch", "swellbelow", "swelltime", "autovib", "vibdelay" })
+        for (auto* id : { "pedalkeys", "pedalspeed", "modwheel", "aftertouch", "swellbelow", "swelltime", "autovib", "vibdelay",
+                          "slidein", "slidefrom", "slidetime", "glidefeel", "barrange", "timing", "mpe", "bendrange" })
             missing += p.apvts.getParameter (id) == nullptr;
-        const int expected = 16 + 8 + (int) swadv::params().size();
-        CHECK (missing == 0 && p.getParameters().size() == expected, "%d parameters (16 + 8 controls + %d advanced)", expected, (int) swadv::params().size());
+        const int expected = 16 + 16 + (int) swadv::params().size();
+        CHECK (missing == 0 && p.getParameters().size() == expected, "%d parameters (16 + 16 controls + %d advanced)", expected, (int) swadv::params().size());
         int offCentre = 0;
         for (const auto& a : swadv::params())
             if (std::fabs (p.apvts.getParameter (a.id)->getValue() - 0.5f) > 1e-3f)
@@ -264,6 +265,40 @@ int main()
         }
     }
 
+    std::printf ("MIDI learn, presets, MPE\n");
+    {
+        SteelwaveProcessor p;
+        prepare (p, kFs, 256);
+        // learn: Brightness waits for a CC; CC21 (normally the B pedal) arrives and is assigned
+        p.learnTarget = p.paramIndex ("brightness");
+        render (p, { { 0, MM::controllerEvent (1, 21, 100) } }, 0.05, { 256 });
+        CHECK (p.learnTarget.load() == -1 && p.ccMap[21].load() == p.paramIndex ("brightness"), "MIDI learn: CC21 assigned to Brightness");
+        render (p, { { 0, MM::controllerEvent (1, 21, 0) }, { S (0.01), MM::noteOn (1, 60, (juce::uint8) 100) } }, 0.6, { 256 });
+        CHECK (getPlain (p, "brightness") < 0.01f, "the learned CC moves Brightness (%.2f)", getPlain (p, "brightness"));
+        CHECK (p.uiTravel[sw::PedB].load() == 0.0f, "and no longer works the B pedal");
+        juce::MemoryBlock mb;
+        p.getStateInformation (mb);
+        SteelwaveProcessor q;
+        q.setStateInformation (mb.getData(), (int) mb.getSize());
+        CHECK (q.ccMap[21].load() == q.paramIndex ("brightness"), "assignments are saved with the session");
+        // presets: sound and feel change, the rig doesn't
+        setPlain (p, "key", 7);
+        p.setCurrentProgram (2); // Lanois ambient
+        CHECK (std::fabs (getPlain (p, "swellbelow") - 0.75f) < 0.01f && std::fabs (getPlain (p, "brightness") - 0.4f) < 0.01f
+                   && (int) getPlain (p, "key") == 7 && p.getCurrentProgram() == 2,
+               "preset %s: swell and brightness set, key left alone", p.getProgramName (2).toRawUTF8());
+        p.setCurrentProgram (0);
+        CHECK (std::fabs (getPlain (p, "swellbelow")) < 1e-4f && std::fabs (getPlain (p, "brightness") - 0.5f) < 0.01f, "Calibrated puts them back");
+        render (p, { { 0, MM::programChange (1, 4) } }, 0.05, { 256 });
+        CHECK (p.getCurrentProgram() == 4 && (int) getPlain (p, "timing") == 1, "MIDI program change 5 loads %s", p.getProgramName (4).toRawUTF8());
+        // MPE through the plug-in: a finger's pitch slide on channel 2 slides the chord's bar
+        SteelwaveProcessor m;
+        prepare (m, kFs, 256);
+        setPlain (m, "mpe", 1);
+        render (m, { { 0, MM::noteOn (2, 60, (juce::uint8) 100) }, { S (0.2), MM::pitchWheel (2, 8192 + (int) (8191.0 * 2.0 / 48.0)) } }, 0.6, { 256 });
+        CHECK (std::fabs (m.uiSemis[3].load() - 2.0f) < 0.05f, "MPE: channel 2's pitch slide moves the bar 2 frets (%.2f)", m.uiSemis[3].load());
+    }
+
     std::printf ("Advanced parameters\n");
     {
         // a chord at bar 7 through a part-way volume pedal, with a stab of the wheel into its stop:
@@ -323,7 +358,7 @@ int main()
         SteelwaveProcessor p;
         prepare (p, kFs, 512);
         std::unique_ptr<juce::AudioProcessorEditor> ed (p.createEditor());
-        ed->setSize (900, 520);
+        ed->setSize (900, 600);
         auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
         CHECK (img.getWidth() == 900, "editor opens and paints");
         if (auto* se = dynamic_cast<SteelwaveEditor*> (ed.get())) se->showPage (SteelwaveEditor::AdvancedPage);

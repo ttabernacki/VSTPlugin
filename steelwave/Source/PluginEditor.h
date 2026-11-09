@@ -6,12 +6,16 @@
 
 #include <juce_audio_utils/juce_audio_utils.h>
 
+#include <map>
+
 class SteelwaveEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
     explicit SteelwaveEditor (SteelwaveProcessor&);
     ~SteelwaveEditor() override;
     void paint (juce::Graphics&) override;
+    void paintOverChildren (juce::Graphics&) override; // MIDI learn: which control has which CC
+    void mouseDown (const juce::MouseEvent&) override;
     void resized() override;
     void parentHierarchyChanged() override { useSoftwareRendering(); }
     void visibilityChanged() override { useSoftwareRendering(); }
@@ -25,6 +29,10 @@ private:
             repaint (neckArea);
         else if (page == ControlsPage)
             repaint (pedalStrip);
+        if (learning)
+            repaint (); // CC labels appear as they're learned
+        if (presetBox.getSelectedItemIndex() != proc.getCurrentProgram())
+            presetBox.setSelectedItemIndex (proc.getCurrentProgram(), juce::dontSendNotification);
     }
     void useSoftwareRendering()
     {
@@ -38,6 +46,7 @@ private:
         juce::ComboBox box;
         juce::Label label;
         std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> attachment;
+        juce::String paramId;
         void setup (juce::Component& parent, juce::AudioProcessorValueTreeState& apvts, const juce::String& id, const juce::String& text);
     };
 
@@ -54,9 +63,20 @@ private:
     juce::TooltipWindow tooltips { this, 300 };
 
     // Controls page: how it's played
-    Choice pedalKeys, modWheel, aftertouch;
-    bassui::Knob pedalSpeed, swellBelow, swellTime, autoVib, vibDelay;
-    std::array<juce::Rectangle<int>, 3> ctlAreas;
+    Choice pedalKeys, modWheel, aftertouch, timing, mpe, bendRange;
+    bassui::Knob pedalSpeed, swellBelow, swellTime, autoVib, vibDelay, slideIn, slideFrom, slideTime, glideFeel, barRange;
+    std::array<juce::Rectangle<int>, 5> ctlAreas;
+
+    // header: presets and MIDI learn
+    juce::ComboBox presetBox;
+    juce::TextButton learnButton { "MIDI LEARN" }, clearLearn { "Clear all" };
+    bool learning = false;
+    std::map<juce::Component*, juce::String> controlParam; // every knob and menu -> its parameter ID
+    void registerControl (juce::Component& c, const juce::String& id)
+    {
+        controlParam[&c] = id;
+        c.addMouseListener (this, false);
+    }
     juce::Rectangle<int> pedalStrip;
     void drawPedals (juce::Graphics&, juce::Rectangle<int>) const;
 

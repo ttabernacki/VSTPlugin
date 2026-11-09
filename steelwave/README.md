@@ -81,7 +81,19 @@ How it's played:
 - **Auto swell:** notes softer than a set velocity fade in like a volume-pedal swell; harder notes pick as usual. **Swell time** sets how long it takes to open.
 - **Auto vibrato** and **Vib delay:** vibrato that comes in on its own once a note has been held.
 
-Vibrato depth is the strongest of the mod wheel, aftertouch and auto vibrato. The page also shows the
+- **Slides:** **Slide-in** (notes softer than a set velocity, or every note, slide up into pitch after the pick), **Slide from** (how far below, in semitones) and **Slide time**. **Glide feel**: legato slides take longer for bigger jumps and less for harder playing. **Bar range**: how far the mod wheel's bar slide goes (1-12 frets).
+- **MPE** (channels 2-16; channel 1 stays the master for the wheel, pedals and CCs). Each finger's pitch slide moves the bar (chords) or its own string (single notes), its pressure gives it its own vibrato, and its slide (CC74) fades it. **MPE bend range** sets 12, 24 or 48 semitones (48 is the MPE default).
+- **Timing:** Natural, or Tight for live playing (picks let go sooner and chords strum tighter).
+
+Vibrato depth is the strongest of the mod wheel, aftertouch and auto vibrato.
+
+**Presets** (the menu at the top, or MIDI program change 1-6): Calibrated, Nashville, Lanois ambient, Hawaiian,
+Tight & bright (live), Mellow humbucker. A preset sets the sound and feel but leaves your rig alone: the set,
+key, controller setup and level don't change.
+
+**MIDI learn** (top): turn it on, click any knob or menu, and move a knob, slider or pedal on your
+controller. Each learned control shows its CC. A learned CC drives that control instead of its usual
+job, and the assignments are saved with the session. **Clear all** forgets them. The page also shows the
 pedals and levers live and summarises what each control does. The same pedal strip is on the Play page.
 
 ## Play page knobs

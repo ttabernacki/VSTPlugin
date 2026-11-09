@@ -28,7 +28,7 @@ int main (int argc, char** argv)
             proc.processBlock (buf, midi);
         }
         std::unique_ptr<juce::AudioProcessorEditor> ed (proc.createEditor());
-        ed->setSize (900, 520);
+        ed->setSize (900, 600);
         if (auto* se = dynamic_cast<SteelwaveEditor*> (ed.get()))
             se->showPage (s.page);
         auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);

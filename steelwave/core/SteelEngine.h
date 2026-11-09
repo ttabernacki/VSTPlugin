@@ -12,6 +12,9 @@
 //   pedal keys        MIDI 36..42 (the lowest keys of a 61-key board), when on: A B C LKL LKR RKL RKR,
 //                     held like pedals, with real travel time (harder = faster)
 //   aftertouch        bar vibrato (channel or poly pressure)
+//   MPE (when on)     channel 1 is the master (wheel, pedals, CCs); on channels 2-16 each note's own pitch
+//                     bend slides the bar (chords) or its string (single notes), its pressure shakes it,
+//                     and its slide (CC74) fades it
 
 #include "SteelString.h"
 #include "Voicing.h"
@@ -61,6 +64,14 @@ struct EngineParams
     double swellTime = 0.6;        // s
     double autoVibrato = 0.0;      // vibrato that comes in on its own as a note is held (0..1 of Vib depth)
     double vibDelay = 0.5;         // s before it starts
+    double slideInBelow = 0.0;     // slide-in: notes softer than this slide up into pitch (0 = off, 1 = always)
+    double slideFrom = 1.0;        // semitones below the note the slide starts
+    double slideTime = 0.15;       // s
+    double glideScaling = 1.0;     // legato slides take longer for bigger jumps and less for harder playing (0 = fixed)
+    double barRange = 2.0;         // frets the mod wheel's bar slide covers
+    bool tight = false;            // live: shorter pick drag and strum spread
+    bool mpe = false;              // MPE: per-note pitch, pressure and slide on channels 2-16
+    double mpeBendRange = 48.0;    // semitones of a member channel's full pitch bend
 };
 
 class SteelEngine
@@ -100,8 +111,21 @@ public:
         keyRate_.fill (1.0);
         swell_.fill (1.0);
         swellRate_.fill (0.0);
-        pressure_ = pressureS_ = barSlide_ = 0.0;
+        pressure_ = pressureS_ = barSlide_ = mpeBar_ = 0.0;
         lastPick_ = 0;
+        barSlideAt_ = -1;
+        strSlideAt_.fill (-1);
+        mpeOff_.fill (0.0);
+        strPress_.fill (0.0);
+        strPressS_.fill (0.0);
+        strY_.fill (1.0);
+        strYS_.fill (1.0);
+        noteCh_.fill (0);
+        chNote_.fill (-1);
+        chBend_.fill (0.0);
+        chPress_.fill (0.0);
+        chY_.fill (1.0);
+        chordCh_ = 0;
         sustainPedal_ = false;
         vol_ = volTarget_ = 1.0;
         volLp_ = 0;
@@ -139,8 +163,15 @@ public:
     bool chordMode() const { return set_ < kChordSets; }
 
     // --- MIDI ------------------------------------------------------------------------------
-    void noteOn (int note, double vel)
+    void noteOn (int note, double vel, int ch = 1)
     {
+        if (prm_.mpe && ch >= 2 && ch <= 16 && note >= 0 && note < 128)
+        {
+            noteCh_[(size_t) note] = ch;
+            chNote_[(size_t) ch] = note;
+        }
+        else if (note >= 0 && note < 128)
+            noteCh_[(size_t) note] = 0;
         if (note >= kKeyswitchLo && note <= kKeyswitchHi)
         {
             setSet (note - kKeyswitchLo);
@@ -159,7 +190,7 @@ public:
         else
             singleOn (note, vel);
     }
-    void noteOff (int note)
+    void noteOff (int note, int /*ch*/ = 1)
     {
         if (prm_.pedalKeys && note >= kPedalKeyLo && note < kPedalKeyLo + kControls)
         {
@@ -173,9 +204,15 @@ public:
         else
             singleOff (note);
     }
-    void pitchWheel (double w) // -1..1
+    void pitchWheel (double w, int ch = 1) // -1..1
     {
         w = std::clamp (w, -1.0, 1.0);
+        if (prm_.mpe && ch >= 2 && ch <= 16) // a finger's own pitch slide
+        {
+            chBend_[(size_t) ch] = w;
+            applyMpe (ch);
+            return;
+        }
         const double dt = std::max ((double) (clock_ - wheelClock_) / fs_, 0.001);
         const double speed = std::fabs (w - wheel_) / dt; // travel per second
         const double old = wheel_;
@@ -198,8 +235,17 @@ public:
             }
         }
     }
-    void controller (int cc, double v) // v 0..1
+    void controller (int cc, double v, int ch = 1) // v 0..1
     {
+        if (prm_.mpe && ch >= 2 && ch <= 16)
+        {
+            if (cc == 74) // a finger's slide (Y): fades its note
+            {
+                chY_[(size_t) ch] = v;
+                applyMpe (ch);
+            }
+            return; // other member-channel CCs aren't per-note controls
+        }
         if (cc == 1)
         {
             mod_ = v;
@@ -207,9 +253,9 @@ public:
                 updatePedals (0.01);
             else if (prm_.modWheel == EngineParams::ModBarSlide)
             {
-                barSlide_ = kBarSlideMax * v;
+                barSlide_ = std::clamp (prm_.barRange, 0.0, 12.0) * v;
                 for (auto& st : str_)
-                    st.setBar (bar_ + barSlide_, 0.03);
+                    st.setBar (barTarget(), 0.03);
             }
         }
         else if (cc == 64)
@@ -239,7 +285,17 @@ public:
             stopAll();
     }
     void allNotesOff() { stopAll(); }
-    void aftertouch (double v) { pressure_ = std::clamp (v, 0.0, 1.0); }
+    void aftertouch (double v, int ch = 1)
+    {
+        v = std::clamp (v, 0.0, 1.0);
+        if (prm_.mpe && ch >= 2 && ch <= 16) // a finger's own pressure
+        {
+            chPress_[(size_t) ch] = v;
+            applyMpe (ch);
+            return;
+        }
+        pressure_ = v;
+    }
 
     // --- audio -----------------------------------------------------------------------------
     void process (float* out, int n)
@@ -252,6 +308,19 @@ public:
             // pedal keys travelling
             if ((clock_ & 31) == 0)
                 movePedalKeys (32.0 / fs_);
+            // slide-ins: once the pick has gone, the bar (or a string) slides up into the note
+            if (barSlideAt_ >= 0 && clock_ >= barSlideAt_)
+            {
+                barSlideAt_ = -1;
+                for (auto& st : str_)
+                    st.setBar (barTarget(), slideInSec_);
+            }
+            for (int k = 0; k < kStrings; ++k)
+                if (strSlideAt_[(size_t) k] >= 0 && clock_ >= strSlideAt_[(size_t) k])
+                {
+                    strSlideAt_[(size_t) k] = -1;
+                    str_[(size_t) k].setPedal (offsetFor (k), slideInSec_);
+                }
             // scheduled picks (strums)
             for (int k = 0; k < nPicks_;)
                 if (picks_[(size_t) k].at <= clock_)
@@ -271,7 +340,8 @@ public:
             const double held = (double) (clock_ - lastPick_) / fs_ - prm_.vibDelay;
             const double autoV = prm_.autoVibrato * (held <= 0.0 ? 0.0 : held >= 0.6 ? 1.0 : 0.5 - 0.5 * std::cos (kPi * held / 0.6));
             const double depth = std::max ({ prm_.modWheel == EngineParams::ModVibrato ? mod_ : 0.0, pressureS_, anyHeld() ? autoV : 0.0 });
-            const double vib = depth * prm_.vibDepth * std::sin (2 * kPi * vibPh_);
+            const double lfo = prm_.vibDepth * std::sin (2 * kPi * vibPh_);
+            const double vib = depth * lfo;
             double bsum = 0;
             for (auto& s : str_)
                 bsum += s.bridge();
@@ -279,8 +349,11 @@ public:
             for (int k = 0; k < kStrings; ++k)
             {
                 auto& s = str_[(size_t) k];
-                s.setVibrato (vib);
-                const double y = s.process (kappa * (bsum - s.bridge()));
+                // MPE: each finger's pressure shakes its own string(s), its slide fades them
+                strPressS_[(size_t) k] += pressureCoef_ * (strPress_[(size_t) k] - strPressS_[(size_t) k]);
+                s.setVibrato (strPressS_[(size_t) k] > depth ? strPressS_[(size_t) k] * lfo : vib);
+                strYS_[(size_t) k] += pressureCoef_ * (strY_[(size_t) k] - strYS_[(size_t) k]);
+                const double y = s.process (kappa * (bsum - s.bridge())) * strYS_[(size_t) k];
                 // auto swell: a soft note fades in, like a volume pedal under that string
                 double& sg = swell_[(size_t) k];
                 if (sg < 1.0)
@@ -319,7 +392,7 @@ public:
     static constexpr double kCabinetDrop = 0.026; // semitones per string's worth of added tension (A+B ~ -2 cents)
     static constexpr double kStopBounce = 0.03;   // semitones of overshoot from a fast hit
     static constexpr double kStopAt = 0.995;
-    static constexpr double kBarSlideMax = 2.0; // mod wheel as a bar slide: up to 2 frets
+
 
 private:
     struct StringState
@@ -356,6 +429,11 @@ private:
         sp.thumbHardness = prm_.thumbHardness;
         sp.dragTime = prm_.dragTime;
         sp.pickVariation = prm_.pickVariation;
+        if (prm_.tight) // live: the pick lets go sooner and catches a ringing string more briefly
+        {
+            sp.dragTime *= 0.3;
+            sp.catchMs = 1.5;
+        }
         for (auto& s : str_)
             s.setParams (sp);
         pickup_.set (prm_.pickup, prm_.coilShiftOct, prm_.coilQ);
@@ -370,7 +448,7 @@ private:
     {
         const auto& st = sst_[(size_t) s];
         double o = tensionGlide (st.rest, wheel_ >= 0 ? st.up : st.down, std::fabs (wheel_));
-        o += cc_[(size_t) s];
+        o += cc_[(size_t) s] + mpeOff_[(size_t) s];
         return std::clamp (o, -4.0, 6.0);
     }
     // Cabinet drop: strings pulled sharp add tension to the cabinet, which gives a little, so every
@@ -419,16 +497,18 @@ private:
     double humanize() { return rng_.next(); } // -1..1
 
     // the bar is lifted and put down somewhere else: anything still ringing is blocked first
-    void moveBarTo (int bar, bool legato)
+    void moveBarTo (int bar, bool legato, double glideSec = -1.0)
     {
+        if (glideSec < 0)
+            glideSec = prm_.glide;
         if (bar == bar_ && ! legato)
             return;
         for (int s = 0; s < kStrings; ++s)
         {
             if (legato)
-                str_[(size_t) s].setBar (bar + barSlide_, prm_.glide);
+                str_[(size_t) s].setBar (bar + barSlide_ + mpeBar_, glideSec);
             else
-                str_[(size_t) s].setBar (bar + barSlide_, kLandSec * 0.8, false);
+                str_[(size_t) s].setBar (bar + barSlide_ + mpeBar_, kLandSec * 0.8, false);
         }
         bar_ = bar;
     }
@@ -489,6 +569,46 @@ private:
         str_[(size_t) s].pluck (vel);
     }
     bool anyHeld() const { return ! held_.empty() || sustainPedal_; }
+    double barTarget() const { return bar_ + barSlide_ + mpeBar_; }
+    bool slideIn (double vel) const { return prm_.slideInBelow > 0.0 && (prm_.slideInBelow >= 1.0 || vel < prm_.slideInBelow); }
+    // legato slides: a bigger jump takes a little longer, harder playing is quicker
+    double glideFor (int frets, double vel) const
+    {
+        const double feel = (0.55 + 0.45 * std::sqrt (frets / 5.0)) * (1.25 - 0.5 * std::clamp (vel, 0.0, 1.0));
+        const double g = std::clamp (prm_.glideScaling, 0.0, 1.0);
+        return prm_.glide * ((1.0 - g) + g * feel);
+    }
+    // MPE slide (CC74): at or above the middle the note is full; below, it fades
+    static double yGain (double y) { return std::clamp (y / 0.5, 0.0, 1.0); }
+    // a member channel moved: apply it to its note's chord or string
+    void applyMpe (int ch)
+    {
+        const int note = chNote_[(size_t) ch];
+        if (note < 0)
+            return;
+        const bool held = std::find (held_.begin(), held_.end(), note) != held_.end();
+        if (chordMode())
+        {
+            if (! held || held_.back() != note)
+                return;
+            mpeBar_ = chBend_[(size_t) ch] * prm_.mpeBendRange;
+            for (auto& st : str_)
+                st.setBar (barTarget(), 0.006);
+            pressure_ = chPress_[(size_t) ch];
+            for (int s = 0; s < kStrings; ++s)
+                if (sst_[(size_t) s].inChord)
+                    strY_[(size_t) s] = yGain (chY_[(size_t) ch]);
+            return;
+        }
+        for (int s = 0; s < kStrings; ++s)
+            if (sst_[(size_t) s].owner == note)
+            {
+                mpeOff_[(size_t) s] = chBend_[(size_t) ch] * prm_.mpeBendRange;
+                strPress_[(size_t) s] = chPress_[(size_t) ch];
+                strY_[(size_t) s] = yGain (chY_[(size_t) ch]);
+                str_[(size_t) s].setPedal (offsetFor (s), 0.006);
+            }
+    }
 
     void stopAll()
     {
@@ -522,7 +642,7 @@ private:
         held_.erase (std::remove (held_.begin(), held_.end(), note), held_.end());
         const bool legato = ! held_.empty();
         held_.push_back (note);
-        playChord (note % 12, vel, legato, true);
+        playChord (note % 12, vel, legato, true, note);
     }
     void chordOff (int note)
     {
@@ -531,7 +651,7 @@ private:
         if (! held_.empty())
         {
             if (wasTop) // back to the chord still held: slide there, nothing new picked
-                playChord (held_.back() % 12, 0.0, true, false);
+                playChord (held_.back() % 12, 0.0, true, false, held_.back());
             return;
         }
         // last key up: a palm block over all the strings (sympathetic ringing included)
@@ -539,11 +659,15 @@ private:
             for (int s = 0; s < kStrings; ++s)
                 block (s);
     }
-    void playChord (int slot, double vel, bool legato, bool pickNew)
+    void playChord (int slot, double vel, bool legato, bool pickNew, int note = -1)
     {
         const auto& v = chordSets()[(size_t) set_][(size_t) slot];
         const int bar = fitBar (v.bar + keyShift (prm_.keyPc));
         const bool barMoves = bar != bar_;
+        const double glide = glideFor (std::abs (bar - bar_), pickNew ? vel : 0.6);
+        // MPE: the chord follows its note's finger (bend = bar slide, pressure, slide = fade)
+        chordCh_ = note >= 0 ? noteCh_[(size_t) note] : chordCh_;
+        mpeBar_ = chordCh_ > 0 ? chBend_[(size_t) chordCh_] * prm_.mpeBendRange : 0.0;
         bool inNew[kStrings] = {}, wasIn[kStrings] = {};
         for (int s = 0; s < kStrings; ++s)
             wasIn[s] = sst_[(size_t) s].inChord;
@@ -570,9 +694,27 @@ private:
             st.inChord = true;
             st.owner = -1;
         }
-        retune (legato ? prm_.glide : 0.004); // the chord's strings, and everyone's cabinet drop
-        moveBarTo (bar, legato);
+        for (int s = 0; s < kStrings; ++s)
+        {
+            mpeOff_[(size_t) s] = 0.0;
+            strPress_[(size_t) s] = 0.0;
+            strY_[(size_t) s] = chordCh_ > 0 && inNew[s] ? yGain (chY_[(size_t) chordCh_]) : 1.0;
+        }
+        if (chordCh_ > 0)
+            pressure_ = chPress_[(size_t) chordCh_];
+        retune (legato ? glide : 0.004); // the chord's strings, and everyone's cabinet drop
+        moveBarTo (bar, legato, glide);
         chordSlot_ = slot;
+        // slide-in: a soft chord starts below and slides up into place once it's picked
+        if (pickNew && ! legato && slideIn (vel))
+        {
+            const double from = std::clamp (prm_.slideFrom, 0.25, 5.0);
+            const double start = bar - from >= 0 ? barTarget() - from : barTarget() + from; // at the nut: slide down into it
+            for (auto& st : str_)
+                st.setBar (start, kLandSec * 0.8, false);
+            barSlideAt_ = clock_ + (int64_t) ((kLandSec + 0.004) * fs_);
+            slideInSec_ = std::clamp (prm_.slideTime, 0.02, 2.0);
+        }
         // a lifted bar takes a few ms to land: pick after that, or the attack would scoop
         if (! pickNew)
             return;
@@ -581,8 +723,8 @@ private:
         const int no = std::min ((int) v.strings.size(), kStrings);
         std::copy (v.strings.begin(), v.strings.begin() + no, order);
         std::sort (order, order + no, [] (int a, int b) { return kE9Open[(size_t) a] < kE9Open[(size_t) b]; });
-        const double spread = prm_.strumMs * 1e-3 * chordSetDefs()[(size_t) set_].strumScale;
-        double t = barMoves && ! legato ? kLandSec : 0.0;
+        const double spread = prm_.strumMs * 1e-3 * chordSetDefs()[(size_t) set_].strumScale * (prm_.tight ? 0.4 : 1.0);
+        double t = (barMoves || barSlideAt_ >= 0) && ! legato ? kLandSec : 0.0;
         for (int k = 0; k < no; ++k)
         {
             const int s = order[k];
@@ -623,13 +765,25 @@ private:
         st.rest = n.offset;
         st.up = n.bends ? n.offset + n.bendUp : n.offset;
         st.down = n.bends ? n.offset + n.bendDown : n.offset;
+        // MPE: this string follows its note's finger
+        const int ch = noteCh_[(size_t) note];
+        mpeOff_[(size_t) n.string] = ch > 0 ? chBend_[(size_t) ch] * prm_.mpeBendRange : 0.0;
+        strPress_[(size_t) n.string] = ch > 0 ? chPress_[(size_t) ch] : 0.0;
+        strY_[(size_t) n.string] = ch > 0 ? yGain (chY_[(size_t) ch]) : 1.0;
         if (sameString) // a legato line on one string: slide there instead of picking again
         {
-            str_[(size_t) n.string].setPedal (offsetFor (n.string), prm_.glide * 0.6);
+            str_[(size_t) n.string].setPedal (offsetFor (n.string), glideFor (0, vel) * 0.6);
             retune (0.01, n.string);
             return;
         }
-        str_[(size_t) n.string].setPedal (offsetFor (n.string), 0.003);
+        // slide-in: a soft note starts below and slides up into pitch once it's picked
+        const bool slide = slideIn (vel);
+        str_[(size_t) n.string].setPedal (offsetFor (n.string) - (slide ? std::clamp (prm_.slideFrom, 0.25, 3.0) : 0.0), 0.003);
+        if (slide)
+        {
+            strSlideAt_[(size_t) n.string] = clock_ + (int64_t) ((delay + 0.004) * fs_);
+            slideInSec_ = std::clamp (prm_.slideTime, 0.02, 2.0);
+        }
         retune (0.01, n.string);
         cancelPicks (n.string);
         if (delay > 0)
@@ -656,7 +810,14 @@ private:
     std::array<double, kStrings> cc_ {};
     std::array<double, kControls> ccTravel_ {}, keyTravel_ {}, keyTarget_ {}, keyRate_ {};
     std::array<double, kStrings> swell_ {}, swellRate_ {};
-    double pressure_ = 0, pressureS_ = 0, pressureCoef_ = 0.001, barSlide_ = 0;
+    double pressure_ = 0, pressureS_ = 0, pressureCoef_ = 0.001, barSlide_ = 0, mpeBar_ = 0, slideInSec_ = 0.15;
+    int64_t barSlideAt_ = -1;
+    std::array<int64_t, kStrings> strSlideAt_ {};
+    std::array<double, kStrings> mpeOff_ {}, strPress_ {}, strPressS_ {}, strY_ {}, strYS_ {};
+    std::array<int, 128> noteCh_ {};
+    std::array<int, 17> chNote_ {};
+    std::array<double, 17> chBend_ {}, chPress_ {}, chY_ {};
+    int chordCh_ = 0;
     int64_t lastPick_ = 0;
     std::array<Pick, 64> picks_ {};
     int nPicks_ = 0;

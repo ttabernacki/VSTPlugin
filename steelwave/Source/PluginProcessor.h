@@ -2,6 +2,7 @@
 
 #include "../core/SteelEngine.h"
 #include "AdvancedParams.h"
+#include "Presets.h"
 
 #include <atomic>
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -28,10 +29,13 @@ public:
     bool isMidiEffect() const override { return false; }
     double getTailLengthSeconds() const override { return 10.0; } // strings ring a long time
 
-    int getNumPrograms() override { return 1; }
-    int getCurrentProgram() override { return 0; }
-    void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return "Default"; }
+    int getNumPrograms() override { return (int) swpresets::presets().size(); }
+    int getCurrentProgram() override { return currentProgram.load(); }
+    void setCurrentProgram (int index) override;
+    const juce::String getProgramName (int index) override
+    {
+        return juce::isPositiveAndBelow (index, getNumPrograms()) ? juce::String (swpresets::presets()[(size_t) index].name) : juce::String();
+    }
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock&) override;
@@ -45,6 +49,17 @@ public:
 
     // --- for the editor (written on the audio thread; a stale read is harmless) ---
     std::atomic<int> uiSet { 0 }, uiSlot { -1 }, uiBar { 0 }, uiSounding { 0 };
+
+    // --- MIDI learn: a CC moves a parameter (index into getParameters()); the CC is then not passed on ---
+    std::array<std::atomic<int>, 128> ccMap;
+    std::atomic<int> learnTarget { -1 }; // parameter waiting for a CC (-1: not learning)
+    int paramIndex (const juce::String& id) const;
+    void clearMidiMap()
+    {
+        for (auto& c : ccMap)
+            c = -1;
+    }
+    std::atomic<int> currentProgram { 0 };
     std::atomic<float> uiWheel { 0.0f }, uiVolume { 1.0f };
     std::array<std::atomic<float>, sw::kStrings> uiSemis {};
     std::array<std::atomic<float>, sw::kControls> uiTravel {}; // pedals and levers, 0..1
@@ -52,6 +67,8 @@ public:
 private:
     sw::EngineParams readParams() const;
     void handle (const juce::MidiMessage&);
+    void applyPreset (int index);
+    std::atomic<int> pendingProgram { -1 };
 
     sw::SteelEngine engine;
     bool prepared_ = false;

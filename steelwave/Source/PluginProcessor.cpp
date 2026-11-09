@@ -93,6 +93,26 @@ APVTS::ParameterLayout SteelwaveProcessor::createLayout()
                                                   Attr().withStringFromValueFunction ([] (float v, int) { return String (v, 2) + " s"; })
                                                       .withValueFromStringFunction (num)));
 
+    // slides, timing, MPE
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "slidein", 1 }, "Slide-in", Range (0.0f, 1.0f), 0.0f,
+                                                  Attr().withStringFromValueFunction ([] (float v, int) {
+                                                      return v <= 0.0f ? String ("Off") : v >= 1.0f ? String ("Always") : "vel < " + String (roundToInt (v * 127.0f)); })
+                                                      .withValueFromStringFunction ([] (const String& t) { return t.getFloatValue() / 127.0f; })));
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "slidefrom", 1 }, "Slide from", Range (0.5f, 3.0f), 1.0f,
+                                                  Attr().withStringFromValueFunction ([] (float v, int) { return String (v, 1) + " st"; })
+                                                      .withValueFromStringFunction (num)));
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "slidetime", 1 }, "Slide time", Range (0.03f, 0.6f, 0.0f, 0.6f), 0.15f,
+                                                  Attr().withStringFromValueFunction ([] (float v, int) { return String (roundToInt (v * 1000.0f)) + " ms"; })
+                                                      .withValueFromStringFunction (msIn)));
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "glidefeel", 1 }, "Glide feel", Range (0.0f, 1.0f), 1.0f,
+                                                  Attr().withStringFromValueFunction (pct).withValueFromStringFunction (pctIn)));
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "barrange", 1 }, "Bar range", Range (1.0f, 12.0f, 1.0f), 2.0f,
+                                                  Attr().withStringFromValueFunction ([] (float v, int) { return String (roundToInt (v)) + " frets"; })
+                                                      .withValueFromStringFunction (num)));
+    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "timing", 1 }, "Timing", StringArray { "Natural", "Tight (live)" }, 0));
+    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "mpe", 1 }, "MPE", StringArray { "Off", "On (channels 2-16)" }, 0));
+    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "bendrange", 1 }, "MPE bend range", StringArray { "12 st", "24 st", "48 st" }, 2));
+
     // the Advanced page: the model's calibration. Each knob's default sits at 12 o'clock.
     for (const auto& a : swadv::params())
     {
@@ -138,6 +158,7 @@ SteelwaveProcessor::SteelwaveProcessor()
     pVibDelay = apvts.getRawParameterValue ("vibdelay");
     for (auto& t : uiTravel)
         t = 0.0f;
+    clearMidiMap();
     for (const auto& a : swadv::params())
         pAdv.push_back (apvts.getRawParameterValue (a.id));
     for (auto& s : uiSemis)
@@ -177,6 +198,15 @@ sw::EngineParams SteelwaveProcessor::readParams() const
     p.swellTime = pSwellTime->load();
     p.autoVibrato = pAutoVib->load();
     p.vibDelay = pVibDelay->load();
+    auto raw = [this] (const char* id) { return apvts.getRawParameterValue (id)->load(); };
+    p.slideInBelow = raw ("slidein");
+    p.slideFrom = raw ("slidefrom");
+    p.slideTime = raw ("slidetime");
+    p.glideScaling = raw ("glidefeel");
+    p.barRange = raw ("barrange");
+    p.tight = (int) raw ("timing") == 1;
+    p.mpe = (int) raw ("mpe") == 1;
+    p.mpeBendRange = 12.0 * std::exp2 (juce::jlimit (0, 2, (int) raw ("bendrange")));
     const auto& adv = swadv::params();
     for (size_t i = 0; i < adv.size(); ++i)
         p.*(adv[i].field) = pAdv[i]->load();
@@ -193,22 +223,79 @@ void SteelwaveProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     prepared_ = true;
 }
 
+int SteelwaveProcessor::paramIndex (const juce::String& id) const
+{
+    const auto& ps = getParameters();
+    for (int i = 0; i < ps.size(); ++i)
+        if (auto* w = dynamic_cast<juce::AudioProcessorParameterWithID*> (ps[i]))
+            if (w->paramID == id)
+                return i;
+    return -1;
+}
+
 void SteelwaveProcessor::handle (const juce::MidiMessage& m)
 {
+    const int ch = m.getChannel();
     if (m.isNoteOn())
-        engine.noteOn (m.getNoteNumber(), m.getFloatVelocity());
+        engine.noteOn (m.getNoteNumber(), m.getFloatVelocity(), ch);
     else if (m.isNoteOff())
-        engine.noteOff (m.getNoteNumber());
+        engine.noteOff (m.getNoteNumber(), ch);
     else if (m.isPitchWheel())
-        engine.pitchWheel ((m.getPitchWheelValue() - 8192) / 8191.0);
+        engine.pitchWheel ((m.getPitchWheelValue() - 8192) / 8191.0, ch);
     else if (m.isChannelPressure())
-        engine.aftertouch (m.getChannelPressureValue() / 127.0);
+        engine.aftertouch (m.getChannelPressureValue() / 127.0, ch);
     else if (m.isAftertouch()) // polyphonic pressure: the bar is one bar, so the latest key's pressure
-        engine.aftertouch (m.getAfterTouchValue() / 127.0);
+        engine.aftertouch (m.getAfterTouchValue() / 127.0, ch);
+    else if (m.isProgramChange())
+        pendingProgram = m.getProgramChangeNumber();
     else if (m.isController())
-        engine.controller (m.getControllerNumber(), m.getControllerValue() / 127.0);
-    else if (m.isAllNotesOff() || m.isAllSoundOff())
-        engine.allNotesOff();
+    {
+        const int cc = m.getControllerNumber();
+        const bool mpeMember = (int) apvts.getRawParameterValue ("mpe")->load() == 1 && ch >= 2;
+        const bool learnable = cc != 0 && cc != 32 && cc < 120 && ! mpeMember;
+        // MIDI learn: the next CC moved is assigned to the waiting control
+        if (learnable && learnTarget.load() >= 0)
+        {
+            const int target = learnTarget.exchange (-1);
+            for (auto& c : ccMap) // a control answers one CC
+                if (c.load() == target)
+                    c = -1;
+            ccMap[(size_t) cc] = target;
+        }
+        if (learnable)
+            if (const int pi = ccMap[(size_t) cc].load(); pi >= 0 && pi < getParameters().size())
+            {
+                getParameters()[pi]->setValueNotifyingHost (m.getControllerValue() / 127.0f);
+                return; // a learned CC drives its control, not its usual job
+            }
+        engine.controller (cc, m.getControllerValue() / 127.0, ch);
+    }
+}
+
+void SteelwaveProcessor::applyPreset (int index)
+{
+    if (! juce::isPositiveAndBelow (index, (int) swpresets::presets().size()))
+        return;
+    const auto& pr = swpresets::presets()[(size_t) index];
+    for (auto* prm : getParameters())
+        if (auto* r = dynamic_cast<juce::RangedAudioParameter*> (prm))
+        {
+            if (swpresets::isRig (r->paramID))
+                continue;
+            float v = r->getDefaultValue();
+            for (const auto& [id, plain] : pr.values)
+                if (r->paramID == id)
+                    v = r->convertTo0to1 (plain);
+            r->beginChangeGesture();
+            r->setValueNotifyingHost (v);
+            r->endChangeGesture();
+        }
+    currentProgram = index;
+}
+
+void SteelwaveProcessor::setCurrentProgram (int index)
+{
+    applyPreset (index);
 }
 
 void SteelwaveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -255,6 +342,10 @@ void SteelwaveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
     for (int c = 1; c < buffer.getNumChannels(); ++c)
         buffer.copyFrom (c, 0, buffer, 0, 0, n);
 
+    // a program change arrived: switch preset (after this block, so the block plays out as it was)
+    if (const int prog = pendingProgram.exchange (-1); prog >= 0)
+        applyPreset (prog);
+
     // a keyswitch changed the set: show it on the Set parameter too
     if (engine.currentSet() != lastSetParam_)
     {
@@ -299,7 +390,18 @@ juce::AudioProcessorEditor* SteelwaveProcessor::createEditor()
 
 void SteelwaveProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
-    if (auto xml = apvts.copyState().createXml())
+    auto state = apvts.copyState();
+    // MIDI learn assignments, by parameter ID (so they survive new parameters being added)
+    juce::ValueTree map ("MIDIMAP");
+    const auto& ps = getParameters();
+    for (int cc = 0; cc < 128; ++cc)
+        if (const int pi = ccMap[(size_t) cc].load(); pi >= 0 && pi < ps.size())
+            if (auto* w = dynamic_cast<juce::AudioProcessorParameterWithID*> (ps[pi]))
+                map.setProperty ("cc" + juce::String (cc), w->paramID, nullptr);
+    state.removeChild (state.getChildWithName ("MIDIMAP"), nullptr);
+    state.appendChild (map, nullptr);
+    state.setProperty ("program", currentProgram.load(), nullptr);
+    if (auto xml = state.createXml())
         copyXmlToBinary (*xml, dest);
 }
 
@@ -307,7 +409,17 @@ void SteelwaveProcessor::setStateInformation (const void* data, int size)
 {
     if (auto xml = getXmlFromBinary (data, size))
         if (xml->hasTagName (apvts.state.getType()))
-            apvts.replaceState (juce::ValueTree::fromXml (*xml));
+        {
+            auto state = juce::ValueTree::fromXml (*xml);
+            clearMidiMap();
+            const auto map = state.getChildWithName ("MIDIMAP");
+            for (int cc = 0; cc < 128; ++cc)
+                if (map.hasProperty ("cc" + juce::String (cc)))
+                    ccMap[(size_t) cc] = paramIndex (map["cc" + juce::String (cc)].toString());
+            currentProgram = (int) state.getProperty ("program", 0);
+            state.removeChild (map, nullptr);
+            apvts.replaceState (state);
+        }
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

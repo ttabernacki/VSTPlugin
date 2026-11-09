@@ -540,6 +540,138 @@ int main()
         }
     }
 
+    std::printf ("Slides, timing, MPE\n");
+    {
+        auto trace = [&] (EngineParams q, std::function<void (Script&)> moves, double until, int str, std::vector<float>* audio = nullptr) {
+            SteelEngine e;
+            e.prepare (kFs);
+            e.setParams (q);
+            Script sc;
+            moves (sc);
+            std::sort (sc.ev.begin(), sc.ev.end(), [] (auto& a, auto& b) { return a.first < b.first; });
+            std::vector<std::pair<double, double>> tr;
+            std::vector<float> buf (32);
+            size_t k = 0;
+            for (double t = 0; t < until; t += 32.0 / kFs)
+            {
+                while (k < sc.ev.size() && sc.ev[k].first <= t) sc.ev[k++].second (e);
+                e.process (buf.data(), 32);
+                tr.push_back ({ t, e.stringSemis (str) });
+                if (audio) audio->insert (audio->end(), buf.begin(), buf.end());
+            }
+            return tr;
+        };
+        auto at = [] (const std::vector<std::pair<double, double>>& tr, double t) {
+            for (auto& [tt, v] : tr) if (tt >= t) return v;
+            return tr.back().second;
+        };
+        auto reach = [] (const std::vector<std::pair<double, double>>& tr, double t0, double from, double to) {
+            for (auto& [t, v] : tr)
+                if (t >= t0 && std::fabs (v - to) <= 0.1 * std::fabs (to - from)) return t - t0;
+            return 99.0;
+        };
+        // slide-in: in G (bar 3) a soft chord starts a semitone low and slides up; a firm one doesn't
+        EngineParams q = p;
+        q.keyPc = 7;
+        q.slideInBelow = 0.5;
+        q.slideFrom = 1.0;
+        q.slideTime = 0.15;
+        auto soft = trace (q, [] (Script& sc) { sc.at (0.05, [] (SteelEngine& e) { e.noteOn (60, 0.3); }); }, 0.6, 3);
+        auto firm = trace (q, [] (Script& sc) { sc.at (0.05, [] (SteelEngine& e) { e.noteOn (60, 0.8); }); }, 0.6, 3);
+        CHECK (std::fabs (at (soft, 0.06) - 2.0) < 0.1 && std::fabs (at (soft, 0.5) - 3.0) < 0.02,
+               "slide-in: a soft chord picks at fret %.2f and slides to fret 3 (%.2f)", at (soft, 0.06), at (soft, 0.5));
+        CHECK (std::fabs (at (firm, 0.07) - 3.0) < 0.05, "a firm chord is picked in place (fret %.2f)", at (firm, 0.07));
+        // single notes slide in on their own string
+        auto single = trace (q, [] (Script& sc) { sc.at (0.05, [] (SteelEngine& e) { e.setSet (kChordSets); e.noteOn (60, 0.3); }); }, 0.6, 3);
+        CHECK (at (single, 0.5) - at (single, 0.065) > 0.8, "single note: slides up %.2f semitones into pitch", at (single, 0.5) - at (single, 0.065));
+
+        // slide time follows the playing: a long jump takes longer than a short one
+        auto jump = [&] (double scaling, int toNote, double vel) {
+            EngineParams r = p;
+            r.glideScaling = scaling;
+            auto tr = trace (r, [toNote, vel] (Script& sc) {
+                sc.at (0.05, [] (SteelEngine& e) { e.noteOn (60, 0.8); });
+                sc.at (0.5, [toNote, vel] (SteelEngine& e) { e.noteOn (toNote, vel); }); // legato
+            }, 1.5, 3);
+            const double from = at (tr, 0.49), to = tr.back().second;
+            return reach (tr, 0.5, from, to);
+        };
+        const double far = jump (1.0, 67, 0.7), near = jump (1.0, 63, 0.7), hard = jump (1.0, 67, 1.0);
+        const double farFixed = jump (0.0, 67, 0.7), nearFixed = jump (0.0, 63, 0.7);
+        CHECK (far > 1.2 * near && std::fabs (farFixed - nearFixed) < 0.02, "Glide feel: 7 frets take %.0f ms, 2 frets %.0f ms (fixed: %.0f / %.0f ms)",
+               1000 * far, 1000 * near, 1000 * farFixed, 1000 * nearFixed);
+        CHECK (hard < 0.85 * far, "harder playing slides quicker (%.0f ms)", 1000 * hard);
+
+        // bar range for the mod wheel's bar slide
+        {
+            EngineParams r = p;
+            r.modWheel = EngineParams::ModBarSlide;
+            r.barRange = 5.0;
+            auto tr = trace (r, [] (Script& sc) { sc.at (0.05, [] (SteelEngine& e) { e.noteOn (60, 0.7); e.controller (1, 1.0); }); }, 0.5, 3);
+            CHECK (std::fabs (tr.back().second - 5.0) < 0.05, "Bar range 5: the mod wheel slides the bar 5 frets (%.2f)", tr.back().second);
+        }
+
+        // tight timing: the note speaks sooner
+        auto onset = [&] (bool tight) {
+            EngineParams r = p;
+            r.tight = tight;
+            std::vector<float> audio;
+            trace (r, [] (Script& sc) { sc.at (0.05, [] (SteelEngine& e) { e.setSet (kChordSets); e.noteOn (60, 0.4); }); }, 0.2, 3, &audio);
+            for (size_t i = (size_t) (0.05 * kFs); i < audio.size(); ++i)
+                if (std::fabs (audio[i]) > 0.002) return 1000.0 * ((double) i / kFs - 0.05);
+            return 99.0;
+        };
+        const double nat = onset (false), tgt = onset (true);
+        CHECK (tgt < 0.6 * nat, "Tight: a soft note speaks after %.1f ms instead of %.1f ms", tgt, nat);
+
+        // MPE: per-finger pitch, pressure and slide
+        EngineParams m = p;
+        m.mpe = true;
+        auto chordBend = trace (m, [] (Script& sc) {
+            sc.at (0.05, [] (SteelEngine& e) { e.noteOn (60, 0.7, 2); });
+            sc.at (0.3, [] (SteelEngine& e) { e.pitchWheel (2.0 / 48.0, 2); }); // 2 semitones on 48
+            sc.at (0.3, [] (SteelEngine& e) { e.pitchWheel (0.5, 3); });        // another channel, no note
+        }, 0.7, 3);
+        CHECK (std::fabs (chordBend.back().second - 2.0) < 0.05, "MPE chord: the finger's pitch slide moves the bar (%.2f frets); other channels don't", chordBend.back().second);
+        SteelEngine e2;
+        e2.prepare (kFs);
+        e2.setParams (m);
+        e2.setSet (kChordSets);
+        std::vector<float> buf (4800);
+        e2.noteOn (60, 0.7, 2); // E4 on string 4
+        e2.noteOn (64, 0.7, 3); // G#4 on string 3
+        e2.process (buf.data(), 4800);
+        e2.pitchWheel (1.0 / 48.0, 3); // a semitone, only on the G#
+        for (int i = 0; i < 5; ++i) e2.process (buf.data(), 4800);
+        CHECK (std::fabs (e2.stringSemis (2) - 1.0) < 0.05 && std::fabs (e2.stringSemis (3)) < 0.02,
+               "MPE single notes: only the bent finger's string moves (%.2f / %.2f)", e2.stringSemis (2), e2.stringSemis (3));
+        e2.aftertouch (1.0, 3);
+        double lo3 = 1e9, hi3 = -1e9, lo4 = 1e9, hi4 = -1e9;
+        for (int i = 0; i < 300; ++i)
+        {
+            e2.process (buf.data(), 64);
+            if (i > 100)
+            {
+                lo3 = std::min (lo3, e2.stringSemis (2)); hi3 = std::max (hi3, e2.stringSemis (2));
+                lo4 = std::min (lo4, e2.stringSemis (3)); hi4 = std::max (hi4, e2.stringSemis (3));
+            }
+        }
+        CHECK (hi3 - lo3 > 0.2 && hi4 - lo4 < 0.01, "MPE pressure: only that finger's note gets vibrato (+-%.0f vs +-%.1f cents)", 50 * (hi3 - lo3), 50 * (hi4 - lo4));
+        {
+            std::vector<float> full, faded;
+            for (double y : { 1.0, 0.0 })
+            {
+                std::vector<float> audio;
+                trace (m, [y] (Script& sc) {
+                    sc.at (0.0, [y] (SteelEngine& e) { e.controller (74, y, 2); });
+                    sc.at (0.05, [] (SteelEngine& e) { e.setSet (kChordSets); e.noteOn (60, 0.7, 2); });
+                }, 0.6, 3, &audio);
+                (y > 0.5 ? full : faded) = audio;
+            }
+            CHECK (rms (faded, 0.3, 0.6) < 0.01 * rms (full, 0.3, 0.6), "MPE slide (CC74) down: the note fades out");
+        }
+    }
+
     std::printf ("Sympathetic strings\n");
     {
         auto run = [&] (double sym) {
