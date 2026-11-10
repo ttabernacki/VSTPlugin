@@ -21,6 +21,7 @@ if(TARGET juce::juce_audio_utils)
         PLUGIN_CODE Stw1
         FORMATS ${SWV_FORMATS}
         PRODUCT_NAME "Steelwave"
+        VERSION 1.0.0
         IS_SYNTH TRUE
         NEEDS_MIDI_INPUT TRUE
         NEEDS_MIDI_OUTPUT FALSE

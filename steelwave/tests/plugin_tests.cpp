@@ -26,8 +26,14 @@ static float getPlain (SteelwaveProcessor& p, const char* id)
     auto* prm = p.apvts.getParameter (id);
     return prm->convertFrom0to1 (prm->getValue());
 }
-static void prepare (SteelwaveProcessor& p, double sr, int bs)
+// The older tests were written for chord set 1 in equal temperament: they get that unless they ask otherwise.
+static void prepare (SteelwaveProcessor& p, double sr, int bs, bool smart = false)
 {
+    if (! smart)
+    {
+        setPlain (p, "set", 0);
+        setPlain (p, "sweeten", 0);
+    }
     p.setRateAndBufferSizeDetails (sr, bs);
     p.prepareToPlay (sr, bs);
 }
@@ -105,8 +111,10 @@ int main()
         for (auto* id : { "pedalkeys", "pedalspeed", "modwheel", "aftertouch", "swellbelow", "swelltime", "autovib", "vibdelay",
                           "slidein", "slidefrom", "slidetime", "glidefeel", "barrange", "timing", "mpe", "bendrange" })
             missing += p.apvts.getParameter (id) == nullptr;
-        const int expected = 16 + 16 + (int) swadv::params().size();
-        CHECK (missing == 0 && p.getParameters().size() == expected, "%d parameters (16 + 16 controls + %d advanced)", expected, (int) swadv::params().size());
+        for (auto* id : { "autobend", "legatoslide", "sweeten" })
+            missing += p.apvts.getParameter (id) == nullptr;
+        const int expected = 16 + 19 + (int) swadv::params().size();
+        CHECK (missing == 0 && p.getParameters().size() == expected, "%d parameters (16 + 19 playing + %d model)", expected, (int) swadv::params().size());
         int offCentre = 0;
         for (const auto& a : swadv::params())
             if (std::fabs (p.apvts.getParameter (a.id)->getValue() - 0.5f) > 1e-3f)
@@ -115,7 +123,8 @@ int main()
                 std::printf ("    %s: default at %.3f of the knob (raw %.3f)\n", a.id, p.apvts.getParameter (a.id)->getValue(), p.apvts.getRawParameterValue (a.id)->load());
             }
         CHECK (offCentre == 0, "every advanced knob's calibrated default sits at 12 o'clock");
-        CHECK ((int) getPlain (p, "key") == 4 && (int) getPlain (p, "set") == 0, "defaults: key of E, chord set 1");
+        CHECK ((int) getPlain (p, "key") == 4 && (int) getPlain (p, "set") == sw::kSmartSet && p.presetName() == "Calibrated",
+               "defaults: key of E, smart notes, the Calibrated preset");
         CHECK (p.acceptsMidi() && ! p.producesMidi(), "takes MIDI");
         juce::AudioProcessor::BusesLayout mono, stereo, withIn;
         mono.outputBuses.add (juce::AudioChannelSet::mono());
@@ -265,6 +274,28 @@ int main()
         }
     }
 
+    std::printf ("Smart notes (the default mode)\n");
+    {
+        SteelwaveProcessor p;
+        prepare (p, kFs, 256, true);
+        std::vector<Ev> ev = { { S (0.05), MM::noteOn (1, 60, (juce::uint8) 100) }, { S (0.05), MM::noteOn (1, 64, (juce::uint8) 100) },
+                               { S (0.05), MM::noteOn (1, 67, (juce::uint8) 100) },
+                               { S (0.8), MM::noteOn (1, 65, (juce::uint8) 100) } }; // F against the held E: bends
+        auto x = render (p, ev, 1.6, { 256 });
+        CHECK (dftDb (x, hz (60), 0.3, 0.4) > -50 && dftDb (x, hz (67), 0.3, 0.4) > -50 && dftDb (x, hz (64) * std::pow (2.0, -0.6 * 13.7 / 1200), 0.3, 0.4) > -50,
+               "a fresh instance plays what you play: C-E-G sounds C, E and G");
+        {
+            SteelwaveProcessor q;
+            prepare (q, kFs, 256, true);
+            render (q, { ev[0], ev[1], ev[2] }, 0.3, { 256 });
+            CHECK (q.uiSmartRoot.load() == 0 && q.uiSmartQual.load() == 0, "and names the chord (C major)");
+        }
+        CHECK (dftDb (x, hz (65), 1.2, 0.3) - dftDb (x, hz (64), 1.2, 0.3) > 15, "F pressed against the held E bends E up to F");
+        float peak = 0;
+        for (float v : x) peak = std::max (peak, std::fabs (v));
+        CHECK (peak > 0.03f && peak < 0.9f, "level: a three-note chord peaks at %.1f dBFS", 20 * std::log10 (peak));
+    }
+
     std::printf ("MIDI learn, presets, MPE\n");
     {
         SteelwaveProcessor p;
@@ -283,14 +314,46 @@ int main()
         CHECK (q.ccMap[21].load() == q.paramIndex ("brightness"), "assignments are saved with the session");
         // presets: sound and feel change, the rig doesn't
         setPlain (p, "key", 7);
-        p.setCurrentProgram (2); // Lanois ambient
-        CHECK (std::fabs (getPlain (p, "swellbelow") - 0.75f) < 0.01f && std::fabs (getPlain (p, "brightness") - 0.4f) < 0.01f
-                   && (int) getPlain (p, "key") == 7 && p.getCurrentProgram() == 2,
-               "preset %s: swell and brightness set, key left alone", p.getProgramName (2).toRawUTF8());
-        p.setCurrentProgram (0);
+        auto program = [] (const char* name) {
+            const auto& ps = swpresets::presets();
+            for (size_t i = 0; i < ps.size(); ++i) if (juce::String (ps[i].name) == name) return (int) i;
+            return -1;
+        };
+        const int dawn = program ("Slow Dawn"), tight = program ("Tight & Bright (live)");
+        CHECK (swpresets::presets().size() == 30 && p.getNumPrograms() == 30, "30 factory presets");
+        {
+            int bad = 0;
+            for (const auto& pr : swpresets::presets())
+                for (const auto& [id, v] : pr.values)
+                {
+                    auto* prm = p.apvts.getParameter (id);
+                    if (prm == nullptr || swpresets::isRig (id)) { ++bad; std::printf ("    %s: unknown or rig parameter %s\n", pr.name, id); continue; }
+                    const auto range = p.apvts.getParameterRange (id);
+                    if (v < range.start - 1e-6f || v > range.end + 1e-6f) { ++bad; std::printf ("    %s: %s = %g out of range\n", pr.name, id, v); }
+                }
+            CHECK (bad == 0, "every preset value names a real sound parameter and is in range");
+        }
+        p.setCurrentProgram (dawn);
+        CHECK (std::fabs (getPlain (p, "swellbelow") - 1.0f) < 0.01f && std::fabs (getPlain (p, "brightness") - 0.4f) < 0.01f
+                   && (int) getPlain (p, "key") == 7 && p.getCurrentProgram() == dawn,
+               "preset %s: swell and brightness set, key left alone", p.getProgramName (dawn).toRawUTF8());
+        // the user's own presets: saved to a file, loaded back, deleted
+        {
+            const juce::String name ("zz steelwave test preset");
+            setPlain (p, "brightness", 0.83f);
+            const bool saved = p.saveUserPreset (name);
+            p.setCurrentProgram (SteelwaveProcessor::calibratedProgram());
+            const bool listed = p.userPresetNames().contains (name);
+            const bool loaded = p.loadUserPreset (name);
+            CHECK (saved && listed && loaded && std::fabs (getPlain (p, "brightness") - 0.83f) < 0.01f && std::fabs (getPlain (p, "swellbelow") - 1.0f) < 0.01f
+                       && p.presetName() == name && (int) getPlain (p, "key") == 7,
+                   "a user preset saves, lists, and loads back (sound restored, key left alone)");
+            CHECK (p.deleteUserPreset (name) && ! p.userPresetNames().contains (name), "and deletes");
+        }
+        p.setCurrentProgram (SteelwaveProcessor::calibratedProgram());
         CHECK (std::fabs (getPlain (p, "swellbelow")) < 1e-4f && std::fabs (getPlain (p, "brightness") - 0.5f) < 0.01f, "Calibrated puts them back");
-        render (p, { { 0, MM::programChange (1, 4) } }, 0.05, { 256 });
-        CHECK (p.getCurrentProgram() == 4 && (int) getPlain (p, "timing") == 1, "MIDI program change 5 loads %s", p.getProgramName (4).toRawUTF8());
+        render (p, { { 0, MM::programChange (1, tight) } }, 0.05, { 256 });
+        CHECK (p.getCurrentProgram() == tight && (int) getPlain (p, "timing") == 1, "MIDI program change %d loads %s", tight + 1, p.getProgramName (tight).toRawUTF8());
         // MPE through the plug-in: a finger's pitch slide on channel 2 slides the chord's bar
         SteelwaveProcessor m;
         prepare (m, kFs, 256);
@@ -364,6 +427,8 @@ int main()
         if (auto* se = dynamic_cast<SteelwaveEditor*> (ed.get())) se->showPage (SteelwaveEditor::AdvancedPage);
         auto img2 = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
         CHECK (img2.getWidth() == 900, "advanced page opens and paints");
+        if (auto* se = dynamic_cast<SteelwaveEditor*> (ed.get())) se->showPage (SteelwaveEditor::SoundPage);
+        CHECK (ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f).getWidth() == 900, "sound page opens and paints");
         if (auto* se = dynamic_cast<SteelwaveEditor*> (ed.get())) se->showPage (SteelwaveEditor::ControlsPage);
         auto img3 = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
         CHECK (img3.getWidth() == 900, "controls page opens and paints");

@@ -12,6 +12,12 @@ juce::String chordName (sw::ChordName c, int keyPc)
     const char* q = c.q == sw::Maj ? "" : c.q == sw::Min ? "m" : "dim";
     return juce::String (kNoteNames[(keyPc + c.root) % 12]) + q;
 }
+
+void styleButton (juce::TextButton& b, juce::Colour on)
+{
+    b.setColour (juce::TextButton::buttonColourId, kPanel2);
+    b.setColour (juce::TextButton::buttonOnColourId, on);
+}
 } // namespace
 
 void SteelwaveEditor::Choice::setup (juce::Component& parent, juce::AudioProcessorValueTreeState& apvts, const juce::String& id,
@@ -31,77 +37,95 @@ void SteelwaveEditor::Choice::setup (juce::Component& parent, juce::AudioProcess
 SteelwaveEditor::SteelwaveEditor (SteelwaveProcessor& p) : juce::AudioProcessorEditor (&p), proc (p)
 {
     setLookAndFeel (&laf);
-    set.setup (*this, proc.apvts, "set", "SET  (keyswitch C1-B1)");
-    key.setup (*this, proc.apvts, "key", "KEY");
-    pickup.setup (*this, proc.apvts, "pickup", "PICKUP");
-    volcc.setup (*this, proc.apvts, "volcc", "VOLUME PEDAL");
-    voltype.setup (*this, proc.apvts, "voltype", "PEDAL TYPE");
-    glide.setup (*this, proc.apvts, "glide", "GLIDE");
-    strum.setup (*this, proc.apvts, "strum", "STRUM");
-    pick.setup (*this, proc.apvts, "hardness", "PICK");
-    bright.setup (*this, proc.apvts, "brightness", "BRIGHTNESS");
-    sustain.setup (*this, proc.apvts, "sustain", "SUSTAIN");
-    noise.setup (*this, proc.apvts, "barnoise", "BAR NOISE");
-    behind.setup (*this, proc.apvts, "behindbar", "BEHIND BAR");
-    vibRate.setup (*this, proc.apvts, "vibrate", "VIB RATE");
-    vibDepth.setup (*this, proc.apvts, "vibdepth", "VIB DEPTH");
-    sym.setup (*this, proc.apvts, "sympathetic", "SYMPATHETIC");
-    level.setup (*this, proc.apvts, "level", "LEVEL");
+    auto& s = proc.apvts;
 
-    pedalKeys.setup (*this, proc.apvts, "pedalkeys", "PEDAL KEYS");
-    modWheel.setup (*this, proc.apvts, "modwheel", "MOD WHEEL");
-    aftertouch.setup (*this, proc.apvts, "aftertouch", "AFTERTOUCH");
-    pedalSpeed.setup (*this, proc.apvts, "pedalspeed", "PEDAL SPEED");
-    swellBelow.setup (*this, proc.apvts, "swellbelow", "AUTO SWELL");
-    swellTime.setup (*this, proc.apvts, "swelltime", "SWELL TIME");
-    autoVib.setup (*this, proc.apvts, "autovib", "AUTO VIBRATO");
-    vibDelay.setup (*this, proc.apvts, "vibdelay", "VIB DELAY");
+    // --- Play page ---
+    set.setup (*this, s, "set", "MODE  (keyswitch B0: smart notes, C1-B1: sets)");
+    key.setup (*this, s, "key", "KEY");
+    tone.setup (*this, s, "brightness", "TONE");
+    pick.setup (*this, s, "hardness", "PICK");
+    sustain.setup (*this, s, "sustain", "SUSTAIN");
+    vibDepth.setup (*this, s, "vibdepth", "VIBRATO");
+    glide.setup (*this, s, "glide", "GLIDE");
+    swellMain.setup (*this, s, "swellbelow", "SWELL");
+    sweeten.setup (*this, s, "sweeten", "SWEETEN");
+    level.setup (*this, s, "level", "LEVEL");
+    set.box.setTooltip ("Smart notes: play ordinary notes and chords and the steel finds them. Chord and single-note sets: one key per chord or scale note.");
+    key.box.setTooltip ("The key you're in: the pitch wheel bends along its scale, and the sets are laid out in it.");
+    tone.slider.setTooltip ("How long the high partials ring: dull, old strings to bright, new ones.");
+    pick.slider.setTooltip ("Soft thumb and flesh to hard metal fingerpicks.");
+    sustain.slider.setTooltip ("How long notes ring.");
+    vibDepth.slider.setTooltip ("Depth of the bar vibrato (aftertouch, mod wheel or auto vibrato bring it in).");
+    glide.slider.setTooltip ("How long the bar takes to slide between notes played legato.");
+    swellMain.slider.setTooltip ("Notes played softer than this fade in like a volume-pedal swell. Off at 0; all the way up, every note swells.");
+    sweeten.slider.setTooltip ("Tunes thirds and fifths pure against the chord's root, the way steel players tune. 0 is equal temperament.");
+    level.slider.setTooltip ("Output level.");
+
+    // --- Settings > Sound ---
+    pickup.setup (*this, s, "pickup", "PICKUP");
+    volcc.setup (*this, s, "volcc", "VOLUME PEDAL");
+    voltype.setup (*this, s, "voltype", "PEDAL TYPE");
+    strum.setup (*this, s, "strum", "STRUM");
+    noise.setup (*this, s, "barnoise", "BAR NOISE");
+    behind.setup (*this, s, "behindbar", "BEHIND BAR");
+    vibRate.setup (*this, s, "vibrate", "VIB RATE");
+    sym.setup (*this, s, "sympathetic", "SYMPATHETIC");
+    strum.slider.setTooltip ("Chord sets: the pick spread across a chord, low string first.");
+    noise.slider.setTooltip ("Contact noise of the bar sliding over the strings.");
+    behind.slider.setTooltip ("How freely the strings ring behind the bar (0: muted by the hand).");
+    vibRate.slider.setTooltip ("Speed of the bar vibrato.");
+    sym.slider.setTooltip ("Unpicked strings ringing along through the bridge.");
+    voltype.box.setTooltip ("A passive volume pedal loses treble part-way down, like the real thing. Active: no tone change.");
+
+    // --- Settings > Playing ---
+    pedalKeys.setup (*this, s, "pedalkeys", "PEDAL KEYS");
+    modWheel.setup (*this, s, "modwheel", "MOD WHEEL");
+    aftertouch.setup (*this, s, "aftertouch", "AFTERTOUCH");
+    pedalSpeed.setup (*this, s, "pedalspeed", "PEDAL SPEED");
+    swellBelow.setup (*this, s, "swellbelow", "AUTO SWELL");
+    swellTime.setup (*this, s, "swelltime", "SWELL TIME");
+    autoVib.setup (*this, s, "autovib", "AUTO VIBRATO");
+    vibDelay.setup (*this, s, "vibdelay", "VIB DELAY");
+    slideIn.setup (*this, s, "slidein", "SLIDE-IN");
+    slideFrom.setup (*this, s, "slidefrom", "SLIDE FROM");
+    slideTime.setup (*this, s, "slidetime", "SLIDE TIME");
+    glideFeel.setup (*this, s, "glidefeel", "GLIDE FEEL");
+    barRange.setup (*this, s, "barrange", "BAR RANGE");
+    timing.setup (*this, s, "timing", "TIMING");
+    mpe.setup (*this, s, "mpe", "MPE");
+    bendRange.setup (*this, s, "bendrange", "MPE BEND RANGE");
+    autoBend.setup (*this, s, "autobend", "AUTO BEND");
+    legatoSlide.setup (*this, s, "legatoslide", "LEGATO SLIDE");
     pedalKeys.box.setTooltip ("The lowest 7 keys of a 61-key board (MIDI 36-42) play A, B, C, LKL, LKR, RKL, RKR: hold them like pedals.");
-    pedalSpeed.slider.setTooltip ("How fast the pedal keys travel. Hit a pedal key harder for a faster pedal (about 80-250 ms at 1x).");
-    modWheel.box.setTooltip ("What the mod wheel does: vibrato, the A+B pedals (a non-springing strip holds a pedal bend), or a bar slide of up to 2 frets.");
+    pedalSpeed.slider.setTooltip ("How fast the pedal keys and auto bends travel. Hit harder for a faster pedal (about 80-250 ms at 1x).");
+    modWheel.box.setTooltip ("What the mod wheel does: vibrato, the A+B pedals (a non-springing strip holds a pedal bend), a bar slide, or nothing.");
     aftertouch.box.setTooltip ("Pressing into the keys shakes the bar (vibrato depth).");
     swellBelow.slider.setTooltip ("Notes played softer than this fade in like a volume-pedal swell; harder notes pick as usual. Off at 0.");
     swellTime.slider.setTooltip ("How long an auto swell takes to open.");
-    autoVib.slider.setTooltip ("Vibrato that comes in on its own once a note has been held (re Vib depth).");
+    autoVib.slider.setTooltip ("Vibrato that comes in on its own once a note has been held.");
     vibDelay.slider.setTooltip ("How long a note is held before auto vibrato starts.");
-    slideIn.setup (*this, proc.apvts, "slidein", "SLIDE-IN");
-    slideFrom.setup (*this, proc.apvts, "slidefrom", "SLIDE FROM");
-    slideTime.setup (*this, proc.apvts, "slidetime", "SLIDE TIME");
-    glideFeel.setup (*this, proc.apvts, "glidefeel", "GLIDE FEEL");
-    barRange.setup (*this, proc.apvts, "barrange", "BAR RANGE");
-    timing.setup (*this, proc.apvts, "timing", "TIMING");
-    mpe.setup (*this, proc.apvts, "mpe", "MPE");
-    bendRange.setup (*this, proc.apvts, "bendrange", "MPE BEND RANGE");
     slideIn.slider.setTooltip ("Notes softer than this slide up into pitch after they're picked (all the way up: every note). Off at 0.");
     slideFrom.slider.setTooltip ("How far below the note a slide-in starts, in semitones.");
     slideTime.slider.setTooltip ("How long a slide-in takes.");
     glideFeel.slider.setTooltip ("Legato slides take longer for bigger jumps and less for harder playing (0: always the Glide time).");
     barRange.slider.setTooltip ("How far the mod wheel slides the bar when Mod wheel is set to Bar slide.");
     timing.box.setTooltip ("Tight: the picks let go sooner and chords strum tighter, for playing live. Natural: as modelled.");
-    mpe.box.setTooltip ("MPE controllers: on channels 2-16 each finger's pitch slide moves the bar (chords) or its own string, its pressure shakes it, and its slide (CC74) fades it.");
+    mpe.box.setTooltip ("MPE controllers: on channels 2-16 each finger's pitch slide, pressure and slide (CC74) act on its own note.");
     bendRange.box.setTooltip ("Pitch bend range of the MPE member channels: match your controller (48 is the MPE default).");
-    modWheel.box.setTooltip ("What the mod wheel does: vibrato, the A+B pedals (a non-springing strip holds a pedal bend), a bar slide (range on the Controls page), or nothing.");
+    autoBend.box.setTooltip ("Smart notes: a note played a half or whole step from one you're holding bends that string to it, like a pedal. Let it go and it bends back.");
+    legatoSlide.box.setTooltip ("Smart notes: a single line played legato slides along its string instead of picking each note.");
 
+    // --- Settings > Model ---
     for (const auto& a : swadv::params())
     {
-        auto k = std::make_unique<bassui::Knob>();
-        k->setup (*this, proc.apvts, a.id, a.label);
+        auto k = std::make_unique<Knob>();
+        k->setup (*this, s, a.id, a.label);
         k->slider.setTooltip (juce::String (a.name) + ": " + a.help);
         k->slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 66, 15);
         advKnobs.push_back (std::move (k));
     }
-    for (auto* b : { &playTab, &ctlTab, &advTab })
-    {
-        b->setClickingTogglesState (false);
-        b->setColour (juce::TextButton::buttonColourId, kPanel2);
-        b->setColour (juce::TextButton::buttonOnColourId, kAccent.darker (0.6f));
-        addAndMakeVisible (*b);
-    }
-    playTab.onClick = [this] { showPage (PlayPage); };
-    ctlTab.onClick = [this] { showPage (ControlsPage); };
-    advTab.onClick = [this] { showPage (AdvancedPage); };
-    resetAdv.setColour (juce::TextButton::buttonColourId, kPanel2);
-    resetAdv.setTooltip ("Put every Advanced knob back to the calibrated value (12 o'clock).");
+    styleButton (resetAdv, kPanel2);
+    resetAdv.setTooltip ("Put every Model knob back to the calibrated value (12 o'clock).");
     resetAdv.onClick = [this] {
         for (const auto& a : swadv::params())
             if (auto* prm = proc.apvts.getParameter (a.id))
@@ -113,19 +137,31 @@ SteelwaveEditor::SteelwaveEditor (SteelwaveProcessor& p) : juce::AudioProcessorE
     };
     addChildComponent (resetAdv);
 
-    // header: presets, MIDI learn
-    for (int i = 0; i < proc.getNumPrograms(); ++i)
-        presetBox.addItem (proc.getProgramName (i), i + 1);
-    presetBox.setSelectedItemIndex (proc.getCurrentProgram(), juce::dontSendNotification);
-    presetBox.setTooltip ("Factory presets (also by MIDI program change). They set the sound and feel, not your rig: set, key, controller setup and level stay as they are.");
-    presetBox.onChange = [this] {
-        if (presetBox.getSelectedItemIndex() >= 0)
-            proc.setCurrentProgram (presetBox.getSelectedItemIndex());
-    };
-    addAndMakeVisible (presetBox);
+    // --- header ---
+    for (auto* b : { &playTab, &settingsTab, &soundTab, &ctlTab, &advTab })
+    {
+        styleButton (*b, kAccent.darker (0.6f));
+        addAndMakeVisible (*b);
+    }
+    playTab.onClick = [this] { showPage (PlayPage); };
+    settingsTab.onClick = [this] { showPage (page == PlayPage ? SoundPage : page); };
+    soundTab.onClick = [this] { showPage (SoundPage); };
+    ctlTab.onClick = [this] { showPage (ControlsPage); };
+    advTab.onClick = [this] { showPage (AdvancedPage); };
+
+    for (auto* b : { &prevPreset, &nextPreset, &presetButton })
+    {
+        styleButton (*b, kPanel2);
+        addAndMakeVisible (*b);
+    }
+    presetButton.setButtonText (proc.presetName());
+    presetButton.setTooltip ("Presets: factory sounds by category, and your own. They set the sound and feel, not your rig (mode, key, controller setup and level stay).");
+    presetButton.onClick = [this] { presetMenu(); };
+    prevPreset.onClick = [this] { stepPreset (-1); };
+    nextPreset.onClick = [this] { stepPreset (+1); };
+
     learnButton.setClickingTogglesState (true);
-    learnButton.setColour (juce::TextButton::buttonColourId, kPanel2);
-    learnButton.setColour (juce::TextButton::buttonOnColourId, kWarm.darker (0.3f));
+    styleButton (learnButton, kWarm.darker (0.3f));
     learnButton.setTooltip ("MIDI learn: click a knob or menu, then move a knob, slider or pedal on your controller. Click MIDI LEARN again when done.");
     learnButton.onClick = [this] {
         learning = learnButton.getToggleState();
@@ -135,18 +171,20 @@ SteelwaveEditor::SteelwaveEditor (SteelwaveProcessor& p) : juce::AudioProcessorE
         repaint();
     };
     addAndMakeVisible (learnButton);
-    clearLearn.setColour (juce::TextButton::buttonColourId, kPanel2);
+    styleButton (clearLearn, kPanel2);
     clearLearn.setTooltip ("Forget every MIDI learn assignment.");
     clearLearn.onClick = [this] { proc.clearMidiMap(); repaint(); };
     addChildComponent (clearLearn);
-    for (auto* c : std::initializer_list<Choice*> { &set, &key, &pickup, &volcc, &voltype, &pedalKeys, &modWheel, &aftertouch, &timing, &mpe, &bendRange })
+
+    for (auto* c : std::initializer_list<Choice*> { &set, &key, &pickup, &volcc, &voltype, &pedalKeys, &modWheel, &aftertouch, &timing, &mpe,
+                                                    &bendRange, &autoBend, &legatoSlide })
         registerControl (c->box, c->paramId);
-    const std::pair<bassui::Knob*, const char*> knobs[] = {
-        { &glide, "glide" }, { &strum, "strum" }, { &pick, "hardness" }, { &bright, "brightness" }, { &sustain, "sustain" },
-        { &noise, "barnoise" }, { &behind, "behindbar" }, { &vibRate, "vibrate" }, { &vibDepth, "vibdepth" }, { &sym, "sympathetic" },
-        { &level, "level" }, { &pedalSpeed, "pedalspeed" }, { &swellBelow, "swellbelow" }, { &swellTime, "swelltime" },
-        { &autoVib, "autovib" }, { &vibDelay, "vibdelay" }, { &slideIn, "slidein" }, { &slideFrom, "slidefrom" },
-        { &slideTime, "slidetime" }, { &glideFeel, "glidefeel" }, { &barRange, "barrange" } };
+    const std::pair<Knob*, const char*> knobs[] = {
+        { &tone, "brightness" }, { &pick, "hardness" }, { &sustain, "sustain" }, { &vibDepth, "vibdepth" }, { &glide, "glide" },
+        { &swellMain, "swellbelow" }, { &sweeten, "sweeten" }, { &level, "level" }, { &strum, "strum" }, { &noise, "barnoise" },
+        { &behind, "behindbar" }, { &vibRate, "vibrate" }, { &sym, "sympathetic" }, { &pedalSpeed, "pedalspeed" },
+        { &swellBelow, "swellbelow" }, { &swellTime, "swelltime" }, { &autoVib, "autovib" }, { &vibDelay, "vibdelay" },
+        { &slideIn, "slidein" }, { &slideFrom, "slidefrom" }, { &slideTime, "slidetime" }, { &glideFeel, "glidefeel" }, { &barRange, "barrange" } };
     for (auto& [k, id] : knobs)
         registerControl (k->slider, id);
     for (size_t i = 0; i < advKnobs.size(); ++i)
@@ -166,40 +204,254 @@ SteelwaveEditor::~SteelwaveEditor()
     setLookAndFeel (nullptr);
 }
 
+void SteelwaveEditor::timerCallback()
+{
+    if (page == PlayPage)
+        repaint (neckArea);
+    else if (page == ControlsPage)
+        repaint (pedalStrip);
+    if (learning)
+        repaint(); // CC labels appear as they're learned
+    const auto name = proc.presetName();
+    if (presetButton.getButtonText() != name)
+        presetButton.setButtonText (name);
+}
+
+// ---- presets -----------------------------------------------------------------------------------
+juce::StringArray SteelwaveEditor::allPresets() const
+{
+    juce::StringArray a;
+    for (const auto& p : swpresets::presets())
+        a.add (p.name);
+    a.addArray (proc.userPresetNames());
+    return a;
+}
+
+void SteelwaveEditor::stepPreset (int dir)
+{
+    const auto all = allPresets();
+    const int nFactory = (int) swpresets::presets().size(), n = all.size();
+    if (n == 0)
+        return;
+    int i = proc.userPreset.isNotEmpty() ? all.indexOf (proc.userPreset, false, nFactory) : proc.currentProgram.load();
+    i = ((juce::jmax (i, 0) + dir) % n + n) % n;
+    if (i < nFactory)
+        proc.setCurrentProgram (i);
+    else
+        proc.loadUserPreset (all[i]);
+}
+
+void SteelwaveEditor::savePresetDialog()
+{
+    auto* w = new juce::AlertWindow ("Save preset", "Saves the sound and feel as one of your own presets.", juce::MessageBoxIconType::NoIcon, this);
+    w->addTextEditor ("name", proc.userPreset.isNotEmpty() ? proc.userPreset : juce::String ("My steel"), "Name");
+    w->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    juce::Component::SafePointer<SteelwaveEditor> safe (this);
+    w->enterModalState (true, juce::ModalCallbackFunction::create ([safe, w] (int result) {
+        if (result == 1 && safe != nullptr)
+            safe->proc.saveUserPreset (w->getTextEditorContents ("name"));
+    }), true);
+}
+
+void SteelwaveEditor::presetMenu()
+{
+    juce::PopupMenu m;
+    const auto& fac = swpresets::presets();
+    juce::StringArray cats;
+    for (const auto& p : fac)
+        cats.addIfNotAlreadyThere (p.category);
+    const int current = proc.userPreset.isEmpty() ? proc.currentProgram.load() : -1;
+    for (const auto& cat : cats)
+    {
+        juce::PopupMenu sub;
+        for (size_t i = 0; i < fac.size(); ++i)
+            if (cat == fac[i].category)
+                sub.addItem (1 + (int) i, fac[i].name, true, (int) i == current);
+        m.addSubMenu (cat, sub);
+    }
+    const auto user = proc.userPresetNames();
+    juce::PopupMenu mine;
+    for (int i = 0; i < user.size(); ++i)
+        mine.addItem (1000 + i, user[i], true, user[i] == proc.userPreset);
+    m.addSubMenu ("My presets", mine, user.size() > 0);
+    m.addSeparator();
+    m.addItem (5000, "Save as...");
+    m.addItem (5001, "Delete \"" + proc.userPreset + "\"", proc.userPreset.isNotEmpty());
+    juce::Component::SafePointer<SteelwaveEditor> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&presetButton), [safe, user] (int r) {
+        if (safe == nullptr || r == 0)
+            return;
+        if (r == 5000)
+            safe->savePresetDialog();
+        else if (r == 5001)
+            safe->proc.deleteUserPreset (safe->proc.userPreset);
+        else if (r >= 1000)
+            safe->proc.loadUserPreset (user[r - 1000]);
+        else
+            safe->proc.setCurrentProgram (r - 1);
+    });
+}
+
+// ---- pages ---------------------------------------------------------------------------------------
 void SteelwaveEditor::showPage (int p)
 {
     page = p;
-    const bool play = p == PlayPage, ctl = p == ControlsPage, adv = p == AdvancedPage;
+    const bool play = p == PlayPage, sound = p == SoundPage, ctl = p == ControlsPage, adv = p == AdvancedPage;
     playTab.setToggleState (play, juce::dontSendNotification);
+    settingsTab.setToggleState (! play, juce::dontSendNotification);
+    soundTab.setToggleState (sound, juce::dontSendNotification);
     ctlTab.setToggleState (ctl, juce::dontSendNotification);
     advTab.setToggleState (adv, juce::dontSendNotification);
-    for (auto* c : std::initializer_list<Choice*> { &set, &key, &pickup, &volcc, &voltype })
-    {
-        c->box.setVisible (play);
-        c->label.setVisible (play);
-    }
-    for (auto* k : { &glide, &strum, &pick, &bright, &sustain, &noise, &behind, &vibRate, &vibDepth, &sym, &level })
-    {
-        k->slider.setVisible (play);
-        k->label.setVisible (play);
-    }
-    for (auto* c : std::initializer_list<Choice*> { &pedalKeys, &modWheel, &aftertouch, &timing, &mpe, &bendRange })
-    {
-        c->box.setVisible (ctl);
-        c->label.setVisible (ctl);
-    }
+    for (auto* b : { &soundTab, &ctlTab, &advTab })
+        b->setVisible (! play);
+    for (auto* c : { &set, &key })
+        c->show (play);
+    for (auto* k : { &tone, &pick, &sustain, &vibDepth, &glide, &swellMain, &sweeten, &level })
+        show (*k, play);
+    for (auto* c : { &pickup, &volcc, &voltype })
+        c->show (sound);
+    for (auto* k : { &strum, &noise, &behind, &vibRate, &sym })
+        show (*k, sound);
+    for (auto* c : { &pedalKeys, &modWheel, &aftertouch, &timing, &mpe, &bendRange, &autoBend, &legatoSlide })
+        c->show (ctl);
     for (auto* k : { &pedalSpeed, &swellBelow, &swellTime, &autoVib, &vibDelay, &slideIn, &slideFrom, &slideTime, &glideFeel, &barRange })
-    {
-        k->slider.setVisible (ctl);
-        k->label.setVisible (ctl);
-    }
+        show (*k, ctl);
     for (auto& k : advKnobs)
-    {
-        k->slider.setVisible (adv);
-        k->label.setVisible (adv);
-    }
+        show (*k, adv);
     resetAdv.setVisible (adv);
     repaint();
+}
+
+void SteelwaveEditor::resized()
+{
+    auto r = getLocalBounds().reduced (14);
+    auto header = r.removeFromTop (34);
+    settingsTab.setBounds (header.removeFromRight (92).reduced (0, 4));
+    header.removeFromRight (6);
+    playTab.setBounds (header.removeFromRight (64).reduced (0, 4));
+    header.removeFromLeft (118); // title
+    prevPreset.setBounds (header.removeFromLeft (26).reduced (0, 4));
+    header.removeFromLeft (4);
+    presetButton.setBounds (header.removeFromLeft (220).reduced (0, 4));
+    header.removeFromLeft (4);
+    nextPreset.setBounds (header.removeFromLeft (26).reduced (0, 4));
+    header.removeFromLeft (12);
+    learnButton.setBounds (header.removeFromLeft (100).reduced (0, 4));
+    header.removeFromLeft (6);
+    clearLearn.setBounds (header.removeFromLeft (70).reduced (0, 4));
+    r.removeFromTop (6);
+
+    auto placeChoice = [] (Choice& c, juce::Rectangle<int> cell) {
+        c.label.setBounds (cell.removeFromTop (14));
+        c.box.setBounds (cell.reduced (0, 1));
+    };
+    auto placeKnob = [] (Knob& k, juce::Rectangle<int> cell, int labelH = 16) {
+        k.label.setBounds (cell.removeFromTop (labelH));
+        k.slider.setBounds (cell);
+    };
+
+    // --- Play: mode and key, eight knobs, the neck ---
+    {
+        auto a = r;
+        auto row = a.removeFromTop (42);
+        placeChoice (set, row.removeFromLeft (row.getWidth() * 2 / 3).withTrimmedRight (10));
+        placeChoice (key, row);
+        a.removeFromTop (10);
+        auto knobs = a.removeFromTop (128);
+        const int kw = knobs.getWidth() / 8;
+        for (auto* k : { &tone, &pick, &sustain, &vibDepth, &glide, &swellMain, &sweeten, &level })
+            placeKnob (*k, knobs.removeFromLeft (kw).reduced (6, 0));
+        a.removeFromTop (8);
+        neckArea = a;
+    }
+
+    // --- Settings: sub-tabs, then the page ---
+    auto tabs = r.removeFromTop (30);
+    soundTab.setBounds (tabs.removeFromLeft (90).reduced (0, 3));
+    tabs.removeFromLeft (6);
+    ctlTab.setBounds (tabs.removeFromLeft (90).reduced (0, 3));
+    tabs.removeFromLeft (6);
+    advTab.setBounds (tabs.removeFromLeft (90).reduced (0, 3));
+    resetAdv.setBounds (tabs.removeFromRight (150).reduced (0, 3));
+    r.removeFromTop (6);
+
+    { // Sound
+        auto a = r;
+        auto row = a.removeFromTop (130).reduced (0, 3);
+        soundAreas[0] = row;
+        row.removeFromLeft (110);
+        const int kw = row.getWidth() / 5;
+        for (auto* k : { &strum, &noise, &behind, &vibRate, &sym })
+            placeKnob (*k, row.removeFromLeft (kw).reduced (8, 6));
+        row = a.removeFromTop (84).reduced (0, 3);
+        soundAreas[1] = row;
+        row.removeFromLeft (110);
+        const int cw = row.getWidth() / 3;
+        for (auto* c : { &pickup, &volcc, &voltype })
+            placeChoice (*c, row.removeFromLeft (cw).reduced (8, 0).withSizeKeepingCentre (cw - 16, 44));
+    }
+    { // Playing
+        auto a = r;
+        const int rowH = 92;
+        for (int i = 0; i < 4; ++i)
+        {
+            auto row = a.removeFromTop (rowH).reduced (0, 3);
+            ctlAreas[(size_t) i] = row;
+            row.removeFromLeft (110);
+            const int cw = row.getWidth() / 5;
+            auto knobCell = [&] (Knob& k) { placeKnob (k, row.removeFromLeft (cw).reduced (4, 4)); };
+            auto choiceCell = [&] (Choice& c) { placeChoice (c, row.removeFromLeft (cw).reduced (6, 0).withSizeKeepingCentre (cw - 12, 44)); };
+            if (i == 0)
+            {
+                choiceCell (autoBend);
+                choiceCell (legatoSlide);
+                choiceCell (pedalKeys);
+                knobCell (pedalSpeed);
+                choiceCell (modWheel);
+            }
+            else if (i == 1)
+            {
+                knobCell (swellBelow);
+                knobCell (swellTime);
+                knobCell (autoVib);
+                knobCell (vibDelay);
+                choiceCell (aftertouch);
+            }
+            else if (i == 2)
+            {
+                knobCell (slideIn);
+                knobCell (slideFrom);
+                knobCell (slideTime);
+                knobCell (glideFeel);
+                knobCell (barRange);
+            }
+            else
+            {
+                choiceCell (mpe);
+                choiceCell (bendRange);
+                choiceCell (timing);
+            }
+        }
+        a.removeFromTop (3);
+        ctlAreas[4] = a;
+        pedalStrip = a.reduced (14, 0).removeFromTop (30).translated (0, 26);
+    }
+    { // Model: four groups, one row each
+        auto a = r;
+        const int rowH = a.getHeight() / swadv::kGroups;
+        for (int g = 0; g < swadv::kGroups; ++g)
+        {
+            auto row = a.removeFromTop (rowH).reduced (0, 3);
+            groupAreas[(size_t) g] = row;
+            row.removeFromLeft (96);
+            const int kw = row.getWidth() / 7;
+            const auto& ps = swadv::params();
+            for (size_t i = 0; i < ps.size(); ++i)
+                if (ps[i].group == g)
+                    placeKnob (*advKnobs[i], row.removeFromLeft (kw).reduced (2, 2), 14);
+        }
+    }
 }
 
 // the pedals and levers, lit by how far down they are
@@ -221,152 +473,45 @@ void SteelwaveEditor::drawPedals (juce::Graphics& g, juce::Rectangle<int> area) 
     }
 }
 
-void SteelwaveEditor::resized()
-{
-    auto r = getLocalBounds().reduced (14);
-    auto header = r.removeFromTop (34);
-    advTab.setBounds (header.removeFromRight (96).reduced (0, 4));
-    header.removeFromRight (6);
-    ctlTab.setBounds (header.removeFromRight (90).reduced (0, 4));
-    header.removeFromRight (6);
-    playTab.setBounds (header.removeFromRight (64).reduced (0, 4));
-    header.removeFromLeft (118); // title
-    presetBox.setBounds (header.removeFromLeft (190).reduced (0, 4));
-    header.removeFromLeft (10);
-    learnButton.setBounds (header.removeFromLeft (100).reduced (0, 4));
-    header.removeFromLeft (6);
-    clearLearn.setBounds (header.removeFromLeft (70).reduced (0, 4));
-    r.removeFromTop (6);
-
-    // --- Controls page: pedals & wheels, swell & vibrato, then a map of what does what
-    {
-        auto a = r;
-        const int rowH = 98;
-        for (int i = 0; i < 4; ++i)
-        {
-            auto row = a.removeFromTop (rowH).reduced (0, 3);
-            ctlAreas[(size_t) i] = row;
-            row.removeFromLeft (110);
-            const int cw = row.getWidth() / 5;
-            auto knobCell = [&] (bassui::Knob& k) {
-                auto cell = row.removeFromLeft (cw).reduced (4, 4);
-                k.label.setBounds (cell.removeFromTop (16));
-                k.slider.setBounds (cell);
-            };
-            auto choiceCell = [&] (Choice& c) {
-                auto cell = row.removeFromLeft (cw).reduced (6, 0).withSizeKeepingCentre (cw - 12, 44);
-                c.label.setBounds (cell.removeFromTop (14));
-                c.box.setBounds (cell.reduced (0, 1));
-            };
-            if (i == 0)
-            {
-                choiceCell (pedalKeys);
-                knobCell (pedalSpeed);
-                choiceCell (modWheel);
-                choiceCell (aftertouch);
-            }
-            else if (i == 1)
-            {
-                knobCell (swellBelow);
-                knobCell (swellTime);
-                knobCell (autoVib);
-                knobCell (vibDelay);
-            }
-            else if (i == 2)
-            {
-                knobCell (slideIn);
-                knobCell (slideFrom);
-                knobCell (slideTime);
-                knobCell (glideFeel);
-                knobCell (barRange);
-            }
-            else
-            {
-                choiceCell (mpe);
-                choiceCell (bendRange);
-                choiceCell (timing);
-            }
-        }
-        a.removeFromTop (3);
-        ctlAreas[4] = a;
-        pedalStrip = a.reduced (14, 0).removeFromTop (34).translated (0, 26);
-    }
-
-
-    // --- Advanced page: four groups, one row each
-    {
-        auto a = r;
-        auto top = a.removeFromTop (26);
-        resetAdv.setBounds (top.removeFromRight (150).reduced (0, 2));
-        a.removeFromTop (6);
-        const int rowH = a.getHeight() / swadv::kGroups;
-        const int maxPerRow = 7;
-        for (int g = 0; g < swadv::kGroups; ++g)
-        {
-            auto row = a.removeFromTop (rowH).reduced (0, 3);
-            groupAreas[(size_t) g] = row;
-            row.removeFromLeft (96); // group title
-            const int kw = row.getWidth() / maxPerRow;
-            const auto& ps = swadv::params();
-            for (size_t i = 0; i < ps.size(); ++i)
-                if (ps[i].group == g)
-                {
-                    auto cell = row.removeFromLeft (kw).reduced (2, 2);
-                    advKnobs[i]->label.setBounds (cell.removeFromTop (14));
-                    advKnobs[i]->slider.setBounds (cell);
-                }
-        }
-    }
-
-    auto row = r.removeFromTop (42);
-    auto place = [] (Choice& c, juce::Rectangle<int> cell) {
-        c.label.setBounds (cell.removeFromTop (14));
-        c.box.setBounds (cell.reduced (0, 1));
-    };
-    place (set, row.removeFromLeft (row.getWidth() * 3 / 10).withTrimmedRight (10));
-    const int w = row.getWidth() / 9;
-    place (key, row.removeFromLeft (w).withTrimmedRight (10));
-    place (pickup, row.removeFromLeft (w * 2).withTrimmedRight (10));
-    place (volcc, row.removeFromLeft (w * 3).withTrimmedRight (10));
-    place (voltype, row);
-    r.removeFromTop (10);
-    auto knobs = r.removeFromTop (112);
-    const int kw = knobs.getWidth() / 11;
-    for (auto* k : { &glide, &strum, &pick, &bright, &sustain, &noise, &behind, &vibRate, &vibDepth, &sym, &level })
-    {
-        auto cell = knobs.removeFromLeft (kw);
-        k->label.setBounds (cell.removeFromTop (16));
-        k->slider.setBounds (cell);
-    }
-    r.removeFromTop (8);
-    neckArea = r;
-}
-
 void SteelwaveEditor::paint (juce::Graphics& g)
 {
     g.fillAll (kBg);
     g.setColour (kAccent);
     g.setFont (juce::FontOptions (15.0f, juce::Font::bold));
-    g.drawText ("STEELWAVE", 14, 14, 200, 26, juce::Justification::centredLeft);
+    g.drawText ("STEELWAVE", 14, 14, 110, 26, juce::Justification::centredLeft);
 
+    auto panel = [&] (juce::Rectangle<int> a, const juce::String& title, bool side) {
+        g.setColour (kPanel);
+        g.fillRoundedRectangle (a.toFloat(), 8.0f);
+        g.setColour (kAccent);
+        g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+        if (side)
+            g.drawFittedText (title, a.withWidth (106).reduced (12, 0), juce::Justification::centredLeft, 2);
+        else
+            g.drawText (title, a.reduced (14, 8).removeFromTop (16), juce::Justification::centredLeft);
+    };
+    const int setIdx = proc.uiSet.load();
+    const int keyPc = (int) proc.apvts.getRawParameterValue ("key")->load();
+
+    if (page == SoundPage)
+    {
+        panel (soundAreas[0], "STRINGS & BAR", true);
+        panel (soundAreas[1], "PICKUP & PEDAL", true);
+        g.setColour (kDim);
+        g.setFont (juce::FontOptions (11.5f));
+        g.drawFittedText ("The output is a dry, DI-style signal: put your own amp and effects after it. Tone, Pick, Sustain and Vibrato are on the Play page; "
+                          "the physical model's calibration is under Model.",
+                          soundAreas[1].translated (0, soundAreas[1].getHeight() + 10).reduced (14, 0).withHeight (40), juce::Justification::topLeft, 3);
+        return;
+    }
     if (page == ControlsPage)
     {
-        const char* titles[] = { "PEDALS & WHEELS", "SWELL & VIBRATO", "SLIDES", "MPE & TIMING", "WHAT DOES WHAT" };
+        const char* titles[] = { "SMART NOTES & PEDALS", "SWELL & VIBRATO", "SLIDES", "MPE & TIMING", "WHAT DOES WHAT" };
         for (int i = 0; i < 5; ++i)
-        {
-            const auto ca = ctlAreas[(size_t) i];
-            g.setColour (kPanel);
-            g.fillRoundedRectangle (ca.toFloat(), 8.0f);
-            g.setColour (kAccent);
-            g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
-            if (i < 4)
-                g.drawFittedText (titles[i], ca.withWidth (106).reduced (12, 0), juce::Justification::centredLeft, 2);
-            else
-                g.drawText (titles[i], ca.reduced (14, 8).removeFromTop (16), juce::Justification::centredLeft);
-        }
+            panel (ctlAreas[(size_t) i], titles[i], i < 4);
         drawPedals (g, pedalStrip);
         auto t = ctlAreas[4].reduced (14, 6);
-        t.removeFromTop (16 + 10 + 34 + 6);
+        t.removeFromTop (16 + 10 + 30 + 6);
         const bool keys = (int) proc.apvts.getRawParameterValue ("pedalkeys")->load() == 1;
         const int mw = (int) proc.apvts.getRawParameterValue ("modwheel")->load();
         const juce::String mwText[] = { "vibrato", "the A+B pedals",
@@ -374,42 +519,29 @@ void SteelwaveEditor::paint (juce::Graphics& g)
                                         "nothing" };
         const bool at = (int) proc.apvts.getRawParameterValue ("aftertouch")->load() == 0;
         juce::String txt;
-        txt << (keys ? "Pedal keys: the lowest 7 keys of a 61-key board (MIDI 36-42) are A  B  C  LKL  LKR  RKL  RKR. Hold them like pedals; hit harder for a faster pedal.\n"
+        txt << "Smart notes: play normally. A note a step from one you hold bends that string to it; let it go and it bends back. A single legato line slides.\n"
+            << (keys ? "Pedal keys: MIDI 36-42 are A  B  C  LKL  LKR  RKL  RKR. Hold them like pedals; hit harder for a faster pedal.\n"
                      : "Pedal keys are off: MIDI 36-42 play notes. CC20-26 still work the pedals and levers.\n")
-            << "Pitch wheel: bends the chord (up: a 4th up, down: a 3rd up).   Mod wheel: " << mwText[juce::jlimit (0, 3, mw)] << ".\n"
-            << "Aftertouch: " << (at ? "vibrato (press into the keys)" : "off") << ".   Expression pedal: the volume pedal (Play page).   Sustain: let strings ring.\n"
-            << "Keyswitches MIDI 24-35: chord sets 1-8, single-note sets 1-4.   MIDI LEARN (top): click a control, move a knob on your keyboard.";
+            << "Pitch wheel: bends along the key's scale (a chord: up I to IV, down I to iii).   Mod wheel: " << mwText[juce::jlimit (0, 3, mw)] << ".\n"
+            << "Aftertouch: " << (at ? "vibrato" : "off") << ".   Expression pedal: the volume pedal.   Sustain: let strings ring.   Keyswitches: B0 smart notes, C1-B1 sets.";
         g.setColour (kText);
         g.setFont (juce::FontOptions (11.5f));
         g.drawFittedText (txt, t, juce::Justification::topLeft, 6);
         return;
     }
-
     if (page == AdvancedPage)
     {
-        g.setColour (kDim);
-        g.setFont (juce::FontOptions (11.0f));
-        g.drawText ("The physical model's calibration. 12 o'clock = the tuned value. Hover a knob for what it does.",
-                    14, resetAdv.getY(), resetAdv.getX() - 24, resetAdv.getHeight(), juce::Justification::centredLeft);
         for (int gi = 0; gi < swadv::kGroups; ++gi)
-        {
-            const auto ga = groupAreas[(size_t) gi];
-            g.setColour (kPanel);
-            g.fillRoundedRectangle (ga.toFloat(), 8.0f);
-            g.setColour (kAccent);
-            g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
-            g.drawFittedText (swadv::groupName (gi), ga.withWidth (92).reduced (12, 0), juce::Justification::centredLeft, 2);
-        }
+            panel (groupAreas[(size_t) gi], swadv::groupName (gi), true);
         return;
     }
 
-    // ---- the neck: 10 strings, the bar, what is ringing ------------------------------------
+    // ---- Play: the neck (10 strings, the bar, what is ringing) ---------------------------------
     g.setColour (kPanel);
     g.fillRoundedRectangle (neckArea.toFloat(), 8.0f);
     auto a = neckArea.reduced (14, 10);
-    const int setIdx = proc.uiSet.load(), slot = proc.uiSlot.load(), bar = proc.uiBar.load();
-    const int keyPc = (int) proc.apvts.getRawParameterValue ("key")->load();
-    const bool chords = setIdx < sw::kChordSets;
+    const int slot = proc.uiSlot.load(), bar = proc.uiBar.load();
+    const bool smart = setIdx == sw::kSmartSet, chords = setIdx < sw::kChordSets;
 
     auto info = a.removeFromRight (std::min (300, a.getWidth() / 3));
     a.removeFromRight (12);
@@ -445,10 +577,10 @@ void SteelwaveEditor::paint (juce::Graphics& g)
         if (on)
         {
             g.setColour (kText);
-            g.drawText (juce::String (kNoteNames[((midi % 12) + 12) % 12]), (int) x1 + 8, (int) (y - 7), 30, 14, juce::Justification::centredLeft);
+            g.drawText (juce::String (kNoteNames[((midi % 12) + 12) % 12]) + juce::String (midi / 12 - 1), (int) x1 + 8, (int) (y - 7), 34, 14,
+                        juce::Justification::centredLeft);
         }
     }
-    // the bar
     const float bx = fretX ((float) bar);
     g.setColour (kWarm.withAlpha (0.85f));
     g.fillRoundedRectangle (bx - 4.0f, (float) a.getY() - 2.0f, 8.0f, (float) a.getHeight() - 8.0f, 4.0f);
@@ -456,11 +588,19 @@ void SteelwaveEditor::paint (juce::Graphics& g)
     // ---- what is playing ---------------------------------------------------------------------
     g.setColour (kDim);
     g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
-    g.drawText (chords ? "CHORD" : "SINGLE NOTES", info.removeFromTop (14), juce::Justification::centredLeft);
+    g.drawText (smart ? "SMART NOTES" : chords ? "CHORD" : "SINGLE NOTES", info.removeFromTop (14), juce::Justification::centredLeft);
     g.setColour (kText);
     g.setFont (juce::FontOptions (24.0f, juce::Font::bold));
     juce::String title = "-", sub, how;
-    if (chords && slot >= 0)
+    if (smart)
+    {
+        const int root = proc.uiSmartRoot.load(), q = proc.uiSmartQual.load();
+        if (root >= 0)
+            title = juce::String (kNoteNames[root]) + (q == 0 ? "" : q == 1 ? "m" : "dim");
+        sub = "bar " + juce::String (bar) + "  |  key of " + kNoteNames[keyPc];
+        how = "a step from a held note: that string bends\na legato line slides  |  wheel: up I to IV, down I to iii";
+    }
+    else if (chords && slot >= 0)
     {
         const auto& sl = sw::chordSlots()[(size_t) slot];
         const auto& v = sw::chordSets()[(size_t) setIdx][(size_t) slot];
@@ -482,8 +622,7 @@ void SteelwaveEditor::paint (juce::Graphics& g)
     info.removeFromTop (6);
     g.setColour (kText);
     g.drawFittedText (how, info.removeFromTop (34), juce::Justification::topLeft, 3);
-    info.removeFromTop (6);
-    // wheel and volume pedal
+    info.removeFromTop (8);
     auto meter = [&] (const juce::String& name, float v, bool bipolar) {
         auto rr = info.removeFromTop (20);
         g.setColour (kDim);
@@ -504,10 +643,6 @@ void SteelwaveEditor::paint (juce::Graphics& g)
     info.removeFromTop (4);
     meter ("wheel", proc.uiWheel.load(), true);
     meter ("volume", proc.uiVolume.load(), false);
-    g.setColour (kDim);
-    g.setFont (juce::FontOptions (10.0f));
-    g.drawFittedText ("mod wheel: vibrato  |  CC64: let ring  |  CC20-26: A B C pedals, LKL LKR RKL RKR", info,
-                      juce::Justification::bottomLeft, 3);
 }
 
 // MIDI learn: click a control to pick it, then move a control on the keyboard

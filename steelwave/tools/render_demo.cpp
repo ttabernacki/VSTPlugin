@@ -9,6 +9,10 @@
 //   06_chords_wheel.wav  Classic set in E: I, wheel up to IV and down to iii, legato slides to V and IV
 //   07_single_line.wav   single-note set: a melody with scale bends, and a held note under a bending one
 //   08_pad_swells.wav    Pad set behind the volume pedal, mod-wheel vibrato, sympathetic strings
+// Smart notes (ordinary notes and chords; the engine finds the strings, bar and pulls):
+//   09_smart_americana.wav  chords in C with pedal-style bends made by pressing neighbouring keys
+//   10_smart_ambient.wav    wide swelling chords, sweetened tuning, vibrato coming in on its own
+//   11_smart_line.wav       a single legato line sliding along the string
 #include "../core/SteelEngine.h"
 
 #include <cstdint>
@@ -216,6 +220,79 @@ static void engineDemos (const std::string& dir)
         m.ramp (6.0, 7.0, 1, 0, 0.5);
         m.off (t, prog[3]);
         writeWav16 (dir + "08_pad_swells.wav", m.render (7, t + 0.5, p), 48000.0);
+    }
+
+    // ---- smart notes: ordinary notes and chords, the steel finds them -----------------------
+    { // 09: Americana. C, with E and G bent up to F and A and back (I-IV-I by pressing keys), G, F, C
+        Midi m;
+        EngineParams p;
+        p.keyPc = 0;
+        p.sweeten = 0.6;
+        p.autoVibrato = 0.4;
+        p.vibDelay = 0.6;
+        auto chord = [&] (double t, std::initializer_list<int> notes, double len, double vel = 0.7) {
+            double d = 0;
+            for (int n : notes) { m.on (t + d, n, vel); m.off (t + len, n); d += 0.012; }
+        };
+        for (int n : { 60, 64, 67 }) m.on (0.3 + 0.01 * (n - 60) / 4.0, n, 0.75);
+        m.on (1.5, 65, 0.6); m.on (1.5, 69, 0.6);     // press F and A against the held E and G: both strings bend
+        m.off (2.7, 65); m.off (2.7, 69);             // let them go: back to C
+        m.on (3.6, 65, 0.9);                          // just the E to F, quickly
+        m.off (4.0, 65);
+        for (int n : { 60, 64, 67 }) m.off (5.0, n);
+        chord (5.2, { 55, 59, 62 }, 1.6);             // G
+        m.on (6.0, 64, 0.6); m.off (6.75, 64);        // D bent to E and back
+        chord (7.0, { 53, 57, 60 }, 1.7);             // F
+        chord (8.9, { 48, 55, 60, 64 }, 3.2, 0.8);    // C, wide
+        m.on (10.2, 62, 0.5); m.off (11.0, 62);       // C to D on top... and back
+        writeWav16 (dir + "09_smart_americana.wav", m.render (kSmartSet, 12.8, p), 48000.0);
+    }
+    { // 10: ambient. Every note swells in; wide chords; sweetened; vibrato comes in on its own
+        Midi m;
+        EngineParams p;
+        p.keyPc = 0;
+        p.sweeten = 1.0;
+        p.swellBelow = 1.0;
+        p.swellTime = 1.3;
+        p.sustain = 1.8;
+        p.sympathetic = 0.9;
+        p.brightness = 0.45;
+        p.hardness = 0.5;
+        p.autoVibrato = 0.5;
+        p.vibDelay = 1.2;
+        const std::vector<std::vector<int>> prog = { { 48, 55, 64, 71 }, { 45, 52, 60, 67 }, { 41, 53, 57, 64 }, { 43, 55, 62, 71 } };
+        double t = 0.3;
+        for (const auto& c : prog)
+        {
+            double d = 0;
+            for (int n : c) { m.on (t + d, n, 0.6); m.off (t + 3.6, n); d += 0.03; }
+            t += 3.9;
+        }
+        m.on (t - 2.6, 72, 0.5);                       // a note on top, bent up a step and back
+        m.on (t - 1.8, 74, 0.5); m.off (t - 0.9, 74);
+        m.off (t - 0.3, 72);
+        writeWav16 (dir + "10_smart_ambient.wav", m.render (kSmartSet, t + 1.5, p), 48000.0);
+    }
+    { // 11: a single line played legato: slides along the string, with a bend and release at the end
+        Midi m;
+        EngineParams p;
+        p.keyPc = 0;
+        p.autoVibrato = 0.6;
+        p.vibDelay = 0.35;
+        p.glide = 0.22;
+        const int line[] = { 64, 67, 69, 67, 72, 71, 67, 64 };
+        const double len[] = { 0.7, 0.5, 0.9, 0.5, 1.1, 0.5, 0.7, 1.4 };
+        double t = 0.3;
+        for (int i = 0; i < 8; ++i)
+        {
+            m.on (t, line[i], 0.7);
+            if (i > 0) m.off (t + 0.06, line[i - 1]); // overlapped: legato
+            t += len[i];
+        }
+        m.on (t - 0.9, 65, 0.6);                       // E bent to F...
+        m.off (t - 0.3, 65);                           // ...and back
+        m.off (t + 0.3, 64);
+        writeWav16 (dir + "11_smart_line.wav", m.render (kSmartSet, t + 1.2, p), 48000.0);
     }
 }
 

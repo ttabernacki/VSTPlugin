@@ -11,9 +11,10 @@ const int kVolumeCcs[] = { 11, 7, 4, 2, -1 };
 juce::StringArray SteelwaveProcessor::setNames()
 {
     juce::StringArray s;
-    for (int i = 0; i < sw::kSets; ++i)
+    for (int i = 0; i < sw::kSmartSet; ++i)
         s.add ((i < sw::kChordSets ? "Chords " + juce::String (i + 1) : "Single " + juce::String (i - sw::kChordSets + 1)) + ": "
                + sw::setName (i));
+    s.add ("Smart notes");
     return s;
 }
 
@@ -33,7 +34,7 @@ APVTS::ParameterLayout SteelwaveProcessor::createLayout()
     auto num = [] (const String& t) { return t.getFloatValue(); };
     auto msIn = [] (const String& t) { return t.getFloatValue() / 1000.0f; };
 
-    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "set", 1 }, "Set", setNames(), 0));
+    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "set", 1 }, "Mode", setNames(), sw::kSmartSet));
     l.add (std::make_unique<AudioParameterChoice> (ParameterID { "key", 1 }, "Key", keyNames(), 4));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "glide", 1 }, "Glide", Range (0.03f, 1.2f, 0.0f, 0.5f), 0.25f,
                                                   Attr().withStringFromValueFunction ([] (float v, int) { return String (roundToInt (v * 1000.0f)) + " ms"; })
@@ -113,6 +114,12 @@ APVTS::ParameterLayout SteelwaveProcessor::createLayout()
     l.add (std::make_unique<AudioParameterChoice> (ParameterID { "mpe", 1 }, "MPE", StringArray { "Off", "On (channels 2-16)" }, 0));
     l.add (std::make_unique<AudioParameterChoice> (ParameterID { "bendrange", 1 }, "MPE bend range", StringArray { "12 st", "24 st", "48 st" }, 2));
 
+    // smart notes and tuning
+    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "autobend", 1 }, "Auto bend", StringArray { "Off", "On" }, 1));
+    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "legatoslide", 1 }, "Legato slide", StringArray { "Off", "On" }, 1));
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "sweeten", 1 }, "Sweeten", Range (0.0f, 1.0f), 0.6f,
+                                                  Attr().withStringFromValueFunction (pct).withValueFromStringFunction (pctIn)));
+
     // the Advanced page: the model's calibration. Each knob's default sits at 12 o'clock.
     for (const auto& a : swadv::params())
     {
@@ -159,6 +166,7 @@ SteelwaveProcessor::SteelwaveProcessor()
     for (auto& t : uiTravel)
         t = 0.0f;
     clearMidiMap();
+    currentProgram = calibratedProgram();
     for (const auto& a : swadv::params())
         pAdv.push_back (apvts.getRawParameterValue (a.id));
     for (auto& s : uiSemis)
@@ -207,6 +215,9 @@ sw::EngineParams SteelwaveProcessor::readParams() const
     p.tight = (int) raw ("timing") == 1;
     p.mpe = (int) raw ("mpe") == 1;
     p.mpeBendRange = 12.0 * std::exp2 (juce::jlimit (0, 2, (int) raw ("bendrange")));
+    p.autoBend = (int) raw ("autobend") == 1;
+    p.legatoSlide = (int) raw ("legatoslide") == 1;
+    p.sweeten = raw ("sweeten");
     const auto& adv = swadv::params();
     for (size_t i = 0; i < adv.size(); ++i)
         p.*(adv[i].field) = pAdv[i]->load();
@@ -291,6 +302,86 @@ void SteelwaveProcessor::applyPreset (int index)
             r->endChangeGesture();
         }
     currentProgram = index;
+    userPreset.clear();
+}
+
+int SteelwaveProcessor::calibratedProgram()
+{
+    const auto& ps = swpresets::presets();
+    for (size_t i = 0; i < ps.size(); ++i)
+        if (juce::String (ps[i].name) == "Calibrated")
+            return (int) i;
+    return 0;
+}
+
+// --- the user's own presets: one small XML file each, in the user's application data folder ---
+juce::File SteelwaveProcessor::userPresetDir()
+{
+    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory).getChildFile ("Steelwave").getChildFile ("Presets");
+}
+
+juce::StringArray SteelwaveProcessor::userPresetNames() const
+{
+    juce::StringArray names;
+    for (const auto& f : userPresetDir().findChildFiles (juce::File::findFiles, false, "*.swpreset"))
+        names.add (f.getFileNameWithoutExtension());
+    names.sort (true);
+    return names;
+}
+
+bool SteelwaveProcessor::saveUserPreset (const juce::String& name)
+{
+    const auto clean = juce::File::createLegalFileName (name.trim());
+    if (clean.isEmpty() || ! userPresetDir().createDirectory())
+        return false;
+    juce::XmlElement xml ("SteelwavePreset");
+    xml.setAttribute ("name", clean);
+    for (auto* prm : getParameters())
+        if (auto* r = dynamic_cast<juce::RangedAudioParameter*> (prm))
+            if (! swpresets::isRig (r->paramID))
+                xml.setAttribute (r->paramID, (double) r->convertFrom0to1 (r->getValue()));
+    if (! xml.writeTo (userPresetDir().getChildFile (clean + ".swpreset")))
+        return false;
+    userPreset = clean;
+    currentProgram = -1;
+    return true;
+}
+
+bool SteelwaveProcessor::loadUserPreset (const juce::String& name)
+{
+    const auto xml = juce::parseXML (userPresetDir().getChildFile (name + ".swpreset"));
+    if (xml == nullptr || ! xml->hasTagName ("SteelwavePreset"))
+        return false;
+    for (auto* prm : getParameters())
+        if (auto* r = dynamic_cast<juce::RangedAudioParameter*> (prm))
+        {
+            if (swpresets::isRig (r->paramID))
+                continue;
+            // a setting added since the preset was saved keeps its default
+            const float v = xml->hasAttribute (r->paramID) ? r->convertTo0to1 ((float) xml->getDoubleAttribute (r->paramID)) : r->getDefaultValue();
+            r->beginChangeGesture();
+            r->setValueNotifyingHost (juce::jlimit (0.0f, 1.0f, v));
+            r->endChangeGesture();
+        }
+    userPreset = name;
+    currentProgram = -1;
+    return true;
+}
+
+bool SteelwaveProcessor::deleteUserPreset (const juce::String& name)
+{
+    const bool ok = userPresetDir().getChildFile (name + ".swpreset").deleteFile();
+    if (ok && userPreset == name)
+        userPreset.clear();
+    return ok;
+}
+
+juce::String SteelwaveProcessor::presetName() const
+{
+    if (userPreset.isNotEmpty())
+        return userPreset;
+    const int i = currentProgram.load();
+    return juce::isPositiveAndBelow (i, (int) swpresets::presets().size()) ? juce::String (swpresets::presets()[(size_t) i].name) : juce::String ("-");
 }
 
 void SteelwaveProcessor::setCurrentProgram (int index)
@@ -356,6 +447,8 @@ void SteelwaveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
 
     uiSet = engine.currentSet();
     uiSlot = engine.chordSlot();
+    uiSmartRoot = engine.smartRoot();
+    uiSmartQual = engine.smartQuality();
     uiBar = engine.bar();
     uiWheel = (float) engine.wheel();
     uiVolume = (float) engine.volume();
@@ -401,6 +494,7 @@ void SteelwaveProcessor::getStateInformation (juce::MemoryBlock& dest)
     state.removeChild (state.getChildWithName ("MIDIMAP"), nullptr);
     state.appendChild (map, nullptr);
     state.setProperty ("program", currentProgram.load(), nullptr);
+    state.setProperty ("userPreset", userPreset, nullptr);
     if (auto xml = state.createXml())
         copyXmlToBinary (*xml, dest);
 }
@@ -416,7 +510,8 @@ void SteelwaveProcessor::setStateInformation (const void* data, int size)
             for (int cc = 0; cc < 128; ++cc)
                 if (map.hasProperty ("cc" + juce::String (cc)))
                     ccMap[(size_t) cc] = paramIndex (map["cc" + juce::String (cc)].toString());
-            currentProgram = (int) state.getProperty ("program", 0);
+            currentProgram = (int) state.getProperty ("program", calibratedProgram());
+            userPreset = state.getProperty ("userPreset", "").toString();
             state.removeChild (map, nullptr);
             apvts.replaceState (state);
         }

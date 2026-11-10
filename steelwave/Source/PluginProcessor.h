@@ -30,7 +30,7 @@ public:
     double getTailLengthSeconds() const override { return 10.0; } // strings ring a long time
 
     int getNumPrograms() override { return (int) swpresets::presets().size(); }
-    int getCurrentProgram() override { return currentProgram.load(); }
+    int getCurrentProgram() override { return juce::jmax (0, currentProgram.load()); }
     void setCurrentProgram (int index) override;
     const juce::String getProgramName (int index) override
     {
@@ -59,7 +59,18 @@ public:
         for (auto& c : ccMap)
             c = -1;
     }
-    std::atomic<int> currentProgram { 0 };
+    std::atomic<int> currentProgram { 0 }; // factory preset index, or -1 for a user preset / none
+    std::atomic<int> uiSmartRoot { -1 }, uiSmartQual { 0 };
+
+    // --- presets: factory (programs) and the user's own (files) ---
+    static int calibratedProgram();
+    static juce::File userPresetDir();
+    juce::StringArray userPresetNames() const;
+    bool saveUserPreset (const juce::String& name);
+    bool loadUserPreset (const juce::String& name);
+    bool deleteUserPreset (const juce::String& name);
+    juce::String presetName() const; // what the browser shows
+    juce::String userPreset;         // the user preset loaded, if any (message thread)
     std::atomic<float> uiWheel { 0.0f }, uiVolume { 1.0f };
     std::array<std::atomic<float>, sw::kStrings> uiSemis {};
     std::array<std::atomic<float>, sw::kControls> uiTravel {}; // pedals and levers, 0..1

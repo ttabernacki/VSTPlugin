@@ -698,6 +698,194 @@ int main()
         }
     }
 
+    std::printf ("Smart notes\n");
+    {
+        struct Rig
+        {
+            SteelEngine e;
+            std::vector<float> audio;
+            Rig (EngineParams q) { e.prepare (kFs); e.setParams (q); e.setSet (kSmartSet); }
+            void run (double sec) { const size_t n = (size_t) (sec * kFs), at = audio.size(); audio.resize (at + n); e.process (audio.data() + at, (int) n); }
+            // pitches being played (MIDI, fractional): every string under a key, which must also be ringing
+            std::vector<double> pitches()
+            {
+                std::vector<double> p;
+                for (int s = 0; s < kStrings; ++s)
+                    if (e.stringKey (s) >= 0) p.push_back (e.stringLevel (s) > 1e-6 ? kE9Open[(size_t) s] + e.stringSemis (s) : -1.0);
+                std::sort (p.begin(), p.end());
+                return p;
+            }
+            bool sounds (std::initializer_list<double> want, double tol = 0.03)
+            {
+                auto p = pitches();
+                if (p.size() != want.size()) return false;
+                size_t i = 0;
+                for (double w : want) if (std::fabs (p[i++] - w) > tol) return false;
+                return true;
+            }
+        };
+        EngineParams q = p;
+        q.keyPc = 0; // C: the wheel's scale
+        {
+            Rig r (q);
+            r.e.noteOn (60, 0.7);
+            r.run (0.3);
+            CHECK (r.sounds ({ 60 }), "one key, one note: C4 sounds C4");
+            r.e.noteOff (60);
+            r.run (0.4);
+            CHECK (rms (r.audio, 0.6, 0.7) < 0.01 * rms (r.audio, 0.1, 0.3), "letting go blocks it");
+        }
+        {
+            Rig r (q);
+            for (int n : { 60, 64, 67 }) r.e.noteOn (n, 0.7);
+            r.run (0.4);
+            CHECK (r.sounds ({ 60, 64, 67 }), "C-E-G together sounds C major");
+            int open = 0;
+            for (int s = 0; s < kStrings; ++s)
+                open += r.e.stringKey (s) >= 0 && std::fabs (r.e.stringSemis (s) - r.e.bar()) < 0.01;
+            CHECK (open == 3, "on a real grip: bar at fret %d, three strings, no pedals needed", r.e.bar());
+            CHECK (r.e.smartRoot() == 0 && r.e.smartQuality() == 0, "and is recognised as C major");
+            // press F while E is held: the E string bends up to F (no new pick); let F go: back to E
+            const size_t before = r.audio.size();
+            r.e.noteOn (65, 0.7);
+            r.run (0.4);
+            CHECK (r.sounds ({ 60, 65, 67 }), "F pressed against the held E: that string bends to F");
+            double pk = 0, pkBefore = 0;
+            for (size_t i = before; i < before + 4800; ++i) pk = std::max (pk, (double) std::fabs (r.audio[i]));
+            for (size_t i = before - 4800; i < before; ++i) pkBefore = std::max (pkBefore, (double) std::fabs (r.audio[i]));
+            CHECK (pk < 1.3 * pkBefore, "a bend, not a new pick (peak %.2fx)", pk / pkBefore);
+            r.e.noteOff (65);
+            r.run (0.4);
+            CHECK (r.sounds ({ 60, 64, 67 }), "F let go with E still down: it bends back, like a pedal released");
+            r.e.noteOn (65, 0.7);
+            r.run (0.3);
+            r.e.noteOff (64);
+            r.run (0.2);
+            CHECK (r.sounds ({ 60, 65, 67 }), "E let go after the bend: F stays");
+            // the wheel: up = third and fifth up a scale step (C F A... from C F G here: reset first)
+            for (int n : { 60, 65, 67 }) r.e.noteOff (n);
+            r.run (0.3);
+            for (int n : { 60, 64, 67 }) r.e.noteOn (n, 0.7);
+            r.run (0.2);
+            r.e.pitchWheel (1.0);
+            r.run (0.4);
+            CHECK (r.sounds ({ 60, 65, 69 }, 0.06), "wheel up: C-E-G becomes C-F-A (I to IV)");
+            r.e.pitchWheel (-1.0);
+            r.run (0.4);
+            CHECK (r.sounds ({ 59, 64, 67 }, 0.06), "wheel down: the root drops a step, B-E-G (I to iii)");
+        }
+        {
+            Rig r (q);
+            r.e.noteOn (60, 0.7);
+            r.e.noteOn (62, 0.7);
+            r.run (0.3);
+            CHECK (r.sounds ({ 60, 62 }), "C and D pressed together: both sound (a chord, not a bend)");
+        }
+        {
+            Rig r (q);
+            r.e.noteOn (60, 0.7);
+            r.run (0.3);
+            const int bar0 = r.e.bar();
+            r.e.noteOn (67, 0.7);
+            r.run (0.6);
+            CHECK (r.sounds ({ 67 }) && r.e.bar() == bar0 + 7, "a single line played legato: C slides up the string to G (bar +7)");
+            {
+                // a long line keeps its level: slides after the note has rung a while are picked lightly too
+                Rig l (q);
+                l.e.noteOn (60, 0.7);
+                l.run (0.7);
+                const int line[] = { 64, 67, 69, 67, 64, 62 };
+                int prev = 60;
+                for (int n : line) { l.e.noteOn (n, 0.7); l.run (0.05); l.e.noteOff (prev); l.run (0.65); prev = n; }
+                const double first = rms (l.audio, 0.05, 0.6), last = rms (l.audio, 4.3, 4.85);
+                CHECK (last > 0.3 * first, "a seven-note legato line doesn't die away (last note %.1f dB re the first)", db (last / first));
+            }
+            r.e.noteOff (67);
+            r.run (0.6);
+            CHECK (r.sounds ({ 60 }) && r.e.bar() == bar0, "and back when G is let go");
+            EngineParams off = q;
+            off.legatoSlide = false;
+            off.autoBend = false;
+            Rig r2 (off);
+            r2.e.noteOn (60, 0.7);
+            r2.run (0.3);
+            r2.e.noteOn (62, 0.7);
+            r2.run (0.3);
+            CHECK (r2.sounds ({ 60, 62 }), "auto bend and legato slide off: every key picks its own string");
+        }
+        {
+            EngineParams sw = q;
+            sw.sweeten = 1.0;
+            Rig r (sw);
+            for (int n : { 60, 64, 67 }) r.e.noteOn (n, 0.7);
+            r.run (0.4);
+            auto pp = r.pitches();
+            CHECK (pp.size() == 3 && std::fabs (pp[0] - 60.0) < 0.01 && std::fabs (pp[1] - (64 - 0.137)) < 0.01 && std::fabs (pp[2] - 67.02) < 0.01,
+                   "sweetened: the third is %.1f cents and the fifth %+.1f cents from equal temperament", pp.size() == 3 ? 100 * (pp[1] - 64) : 0.0, pp.size() == 3 ? 100 * (pp[2] - 67) : 0.0);
+        }
+        {
+            Rig r (q);
+            for (int n : { 48, 55, 60, 64, 67, 72 }) r.e.noteOn (n, 0.7);
+            r.run (0.4);
+            CHECK (r.sounds ({ 48, 55, 60, 64, 67, 72 }), "a six-note chord across three octaves: every note sounds");
+            Rig lo (q);
+            lo.e.setParams ([&] { auto x = q; x.pedalKeys = false; return x; }());
+            lo.e.noteOn (36, 0.7);
+            lo.run (0.3);
+            CHECK (lo.sounds ({ 48 }), "below the neck's range: C2 folds up an octave to C3");
+            SteelEngine k;
+            k.prepare (kFs);
+            k.noteOn (kSmartKeyswitch, 1.0);
+            CHECK (k.currentSet() == kSmartSet, "keyswitch B0 selects smart notes");
+        }
+        // every note of every triad and seventh chord in every inversion lands exactly
+        {
+            int wrong = 0, total = 0;
+            for (int root = 48; root < 72; ++root)
+                for (auto shape : { std::vector<int> { 0, 4, 7 }, { 0, 3, 7 }, { 0, 4, 7, 10 }, { 0, 3, 7, 10 }, { 0, 4, 7, 11 }, { 4, 7, 12 }, { 7, 12, 16 }, { 0, 7, 16 }, { 0, 5, 7 }, { 0, 2, 7 } })
+                {
+                    Rig r (q);
+                    std::vector<double> want;
+                    for (int iv : shape) { r.e.noteOn (root + iv, 0.7); want.push_back (root + iv); }
+                    r.run (0.15);
+                    auto got = r.pitches();
+                    bool ok = got.size() == want.size();
+                    for (size_t i = 0; ok && i < got.size(); ++i) ok = std::fabs (got[i] - want[i]) < 0.03;
+                    wrong += ! ok;
+                    ++total;
+                }
+            CHECK (wrong == 0, "%d chords (triads, sevenths, inversions, sus) from C3 to B4: every one sounds exactly as played (%d wrong)", total, wrong);
+        }
+        // stress
+        {
+            std::mt19937 g (3);
+            std::uniform_real_distribution<double> u (0, 1);
+            EngineParams sq = q;
+            sq.sweeten = 1.0;
+            sq.sympathetic = 1.0;
+            sq.slideInBelow = 0.3;
+            Rig r (sq);
+            std::vector<float> buf (256);
+            bool ok = true;
+            double peak = 0;
+            for (int blk = 0; blk < (int) (60.0 * kFs / 256); ++blk)
+            {
+                const double x = u (g);
+                const int note = 30 + (int) (u (g) * 70);
+                if (x < 0.10) r.e.noteOn (note, u (g));
+                else if (x < 0.19) r.e.noteOff (note);
+                else if (x < 0.22) r.e.pitchWheel (u (g) * 2 - 1);
+                else if (x < 0.24) r.e.controller (64, u (g));
+                else if (x < 0.25) r.e.controller (1, u (g));
+                else if (x < 0.255) r.e.setSet ((int) (u (g) * kSets));
+                else if (x < 0.26) r.e.setSet (kSmartSet);
+                r.e.process (buf.data(), 256);
+                for (float v : buf) { ok &= std::isfinite (v); peak = std::max (peak, (double) std::fabs (v)); }
+            }
+            CHECK (ok && peak < 4.0, "60 s of random smart-notes playing: finite, peak %.2f", peak);
+        }
+    }
+
     std::printf ("Sympathetic strings\n");
     {
         auto run = [&] (double sym) {

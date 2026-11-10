@@ -1,7 +1,7 @@
 # OrbitPan + Bass Note Leveler + Note Space
 
 This repo holds four plug-ins: **Steelwave** (`steelwave/`, a physically modelled E9 pedal steel instrument with no
-samples: chord and single-note sets on a real pedal/lever neck; see [steelwave/README.md](steelwave/README.md)),
+samples: play ordinary notes and chords and it finds them on a real pedal/lever neck, with pedal-style bends and slides; see [steelwave/README.md](steelwave/README.md)),
 **OrbitPan** (binaural 3D panner, below), **Bass Note Leveler**
 (`bass-leveler/`, automatic per-note level evening with look-ahead; see [bass-leveler/README.md](bass-leveler/README.md))
 and **Note Space** (`notespace/`, splits the bass into the note's partials and everything else, then shapes each

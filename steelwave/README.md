@@ -1,17 +1,56 @@
 # Steelwave
 
-A physically modelled E9 pedal steel instrument (VST3, AU on macOS, and a standalone app). No samples:
+A physically modelled E9 pedal steel instrument for Windows (VST3 and a standalone app). No samples:
 every sound is synthesised. The output is dry, DI-style mono for your own amp and pedals.
 
-You play it like a keyboard steel. Pick a set (chords or single notes) and a key. The white keys play
-the diatonic chords or the scale, and the pitch wheel moves them the way a steel player's pedals do.
-Underneath, everything happens on a real 10-string E9 neck: one bar shared by all strings, A/B/C
-pedals and four knee levers.
+You play ordinary notes and chords, and the instrument finds them on a real 10-string E9 neck: one bar
+shared by all strings, A/B/C pedals and four knee levers. Bends and slides come from how you move
+your fingers. A second mode gives one key per chord or scale note.
 
-## Playing it
+**Install:** run `Steelwave-1.0.0-Windows-Setup.exe` (the `Steelwave-windows-installer` CI artifact). It
+puts the VST3 in `Common Files\VST3` and the standalone app in `Program Files\Steelwave`. The installer
+is not code-signed, so Windows SmartScreen will ask you to confirm.
+
+## Smart notes (the default mode)
+Play as you would a piano. The engine puts each note on the string that needs the least pulling at the
+current bar position, preferring grips the real pedals and levers can hold.
+
+- **Chords:** notes that arrive together choose the bar together. C-E-G lands on strings 8-6-5 at fret
+  8, G7 on fret 3 with the lever that lowers string 2, and so on. Where the real instrument has no
+  pull for a note, the string is pulled anyway (forgiving, not strict).
+- **Pedal-style bends:** hold a note or chord and press a key a half or whole step from one of the held
+  notes. That string bends to the new note with no new pick. Let the new key go while the first is
+  still down and it bends back, like releasing a pedal. Hold C-E-G and press F and A for the classic
+  I to IV move. Notes pressed together (within about 45 ms) are a chord, not a bend.
+- **Legato slides:** a single line played legato slides along its string, moving the bar. Once a note
+  has rung for a while, the slide to the next one is also picked lightly, so a line doesn't die away.
+- **Pitch wheel:** bends along the scale of the Key setting. With a chord held, up takes the third and
+  fifth up a scale step (I to IV) and down takes the root down a step (I to iii). With no chord, every
+  note moves a scale step.
+- **Range:** A2 to B6. Notes outside it fold in by octaves.
+- **Sweeten:** tunes thirds and fifths pure against the chord's root (a major third is 13.7 cents
+  flat), the way steel players tune. 60% by default; 0 is equal temperament.
+
+Auto bend and Legato slide can each be switched off (Settings > Playing).
+
+## Interface
+- **Play page:** Mode, Key, eight knobs (Tone, Pick, Sustain, Vibrato, Glide, Swell, Sweeten, Level) and
+  the neck, which shows the bar, the ringing strings and notes, the chord, the pedals and levers, the
+  wheel and the volume pedal.
+- **Settings:** three sub-pages. *Sound* has strum, bar noise, behind-bar, vibrato rate, sympathetic
+  strings, pickup and volume pedal. *Playing* is described under "Controls page" below. *Model* is the
+  23 calibration knobs under "Advanced page".
+- **Presets** (header): 30 factory presets in four categories (Ambient 12, Americana 10, Classic 4,
+  Utility 4), your own presets (Save as..., My presets, Delete), and < > to step through them. Factory
+  presets also answer MIDI program change. A preset sets the sound and feel but leaves your rig alone:
+  mode, key, controller setup and level. Your presets are files in `%APPDATA%\Steelwave\Presets`.
+- **MIDI learn** (header): click a control, then move a knob, slider or pedal on your controller.
+
+## Controls, all modes
 
 | Input | Does |
 |---|---|
+| **B0** (MIDI 23) | Keyswitch: smart notes |
 | **C1-G1** (MIDI 24-31) | Keyswitch: chord sets 1-8 |
 | **G#1-B1** (32-35) | Keyswitch: single-note sets 1-4 |
 | **MIDI 36-42** | Pedal keys (on by default; the lowest 7 keys of a 61-key board): A, B, C, LKL, LKR, RKL, RKR. Hold them like pedals: they travel like pedals (hit harder for a faster pedal, ~80-250 ms) and land on their stops |
@@ -23,7 +62,7 @@ pedals and four knee levers.
 | **Sustain, CC64** | Strings ring after you let go (otherwise letting go is a palm block) |
 | **CC20-26** | The real E9 pedals and levers on top of anything: A, B, C, LKL, LKR, RKL, RKR |
 
-### Chord sets
+## Chord sets (the second mode)
 The layout is relative to the key, read like C major: white keys are I ii iii IV V vi vii°.
 Black keys:
 - C#: I in another voicing
@@ -71,7 +110,7 @@ up a whole step.
 In the key of E, the Classic I is open E at the nut: wheel up gives A+B, wheel down gives LKR. Other
 keys move the bar (kept between frets 0 and 22).
 
-### Single-note sets
+## Single-note sets
 - **White keys:** the major scale of the key (C3 plays the root near E3). They bend with the wheel to
   the next or previous scale note.
 - **Black keys:** the white key below them, held still and on another string where possible. Hold one
@@ -81,7 +120,7 @@ keys move the bar (kept between frets 0 and 22).
 
 Sets: Scale, Scale high (bar +12), Whole-step bends, Half-step bends.
 
-## Controls page
+## Controls page (Settings > Playing)
 How it's played:
 - **Pedal keys** (on/off) and **Pedal speed**.
 - **Mod wheel** function and **Aftertouch** (vibrato/off).
@@ -94,16 +133,12 @@ How it's played:
 
 Vibrato depth is the strongest of the mod wheel, aftertouch and auto vibrato.
 
-**Presets** (the menu at the top, or MIDI program change 1-6): Calibrated, Nashville, Lanois ambient, Hawaiian,
-Tight & bright (live), Mellow humbucker. A preset sets the sound and feel but leaves your rig alone: the set,
-key, controller setup and level don't change.
-
 **MIDI learn** (top): turn it on, click any knob or menu, and move a knob, slider or pedal on your
 controller. Each learned control shows its CC. A learned CC drives that control instead of its usual
 job, and the assignments are saved with the session. **Clear all** forgets them. The page also shows the
 pedals and levers live and summarises what each control does. The same pedal strip is on the Play page.
 
-## Play page knobs
+## Knobs (Play page and Settings > Sound)
 | Knob | Range | |
 |---|---|---|
 | Glide | 30-1200 ms | Legato bar slide time |
@@ -122,7 +157,7 @@ passive 500k, or active). The panel shows the neck, with
 the bar, the strings ringing and their notes, the current chord, and what the wheel will do (which
 pedals, or "voice-led").
 
-## Advanced page (tuning the model)
+## Advanced page (Settings > Model)
 The **ADVANCED** tab exposes the physical model's calibration: 23 knobs, automatable and saved with the
 session. Every knob's default (the tuned value) sits at 12 o'clock, so you can always hear which way
 you've moved it. **Reset to calibrated** puts them all back. Hover a knob for what it does.
@@ -178,7 +213,7 @@ cmake --build build --target Steelwave_VST3 Steelwave_Standalone steelwave_tests
 ctest --test-dir build -R steelwave
 ./build/steelwave/steelwave_demo <folder>        # 01-05 the string model, 06-08 the whole instrument via MIDI
 ```
-CI builds the VST3 and the standalone app for Windows (link-time optimised on tags and manual runs only), and runs pluginval at
+CI builds the VST3, the standalone app and the installer for Windows (link-time optimised on tags and manual runs only), and runs pluginval at
 strictness 10. Bundles are in the `Steelwave-windows` artifact.
 
 The tests cover:

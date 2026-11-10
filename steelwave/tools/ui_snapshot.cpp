@@ -8,8 +8,8 @@ int main (int argc, char** argv)
         return 2;
     juce::ScopedJuceInitialiser_GUI init;
     struct Shot { const char* name; int set; int note; int wheel; int page; };
-    const Shot shots[] = { { "ui_chord_bent", 0, 60, 12000, 0 }, { "ui_single", 8, 52, 8192, 0 }, { "ui_pad_v", 7, 67, 4000, 0 },
-                           { "ui_controls", 0, 60, 8192, 1 }, { "ui_advanced", 0, 60, 8192, 2 } };
+    const Shot shots[] = { { "ui_play_smart", sw::kSmartSet, 60, 8192, 0 }, { "ui_play_chords", 0, 60, 12000, 0 }, { "ui_sound", sw::kSmartSet, 60, 8192, 1 },
+                           { "ui_playing", sw::kSmartSet, 60, 8192, 2 }, { "ui_model", sw::kSmartSet, 60, 8192, 3 } };
     for (const auto& s : shots)
     {
         SteelwaveProcessor proc;
@@ -22,6 +22,11 @@ int main (int argc, char** argv)
         {
             juce::MidiBuffer midi;
             if (i == 1) midi.addEvent (juce::MidiMessage::noteOn (1, s.note, (juce::uint8) 100), 0);
+            if (i == 1 && s.set == sw::kSmartSet)
+            {
+                midi.addEvent (juce::MidiMessage::noteOn (1, s.note + 4, (juce::uint8) 100), 0);
+                midi.addEvent (juce::MidiMessage::noteOn (1, s.note + 7, (juce::uint8) 100), 0);
+            }
             if (i == 2) midi.addEvent (juce::MidiMessage::noteOn (1, sw::kPedalKeyLo + sw::PedB, (juce::uint8) 110), 0); // B pedal key down
             if (i == 20) midi.addEvent (juce::MidiMessage::pitchWheel (1, s.wheel), 0);
             buf.clear();
