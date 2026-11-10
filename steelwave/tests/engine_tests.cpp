@@ -886,6 +886,92 @@ int main()
         }
     }
 
+    std::printf ("Pitch wheel: melody note\n");
+    {
+        EngineParams q = p;
+        q.wheelMelody = true;
+        auto pitches = [] (SteelEngine& e, bool chordMode) {
+            std::vector<double> v;
+            double top = 1e-9;
+            for (int s = 0; s < kStrings; ++s) top = std::max (top, e.stringLevel (s));
+            for (int s = 0; s < kStrings; ++s)
+                if (chordMode ? e.stringLevel (s) > top * 1e-2 : e.stringKey (s) >= 0) v.push_back (kE9Open[(size_t) s] + e.stringSemis (s));
+            std::sort (v.begin(), v.end());
+            return v;
+        };
+        auto near = [] (const std::vector<double>& got, std::initializer_list<double> want) {
+            if (got.size() != want.size()) return false;
+            size_t i = 0;
+            for (double w : want) if (std::fabs (got[i++] - w) > 0.06) return false;
+            return true;
+        };
+        std::vector<float> buf ((size_t) (0.4 * kFs));
+        // chord set 1 in E: C plays E major, G#3 B3 E4 G#4. The wheel moves only the top G#.
+        SteelEngine e;
+        e.prepare (kFs);
+        e.setParams (q);
+        e.noteOn (60, 0.7);
+        e.process (buf.data(), (int) buf.size());
+        e.pitchWheel (1.0);
+        e.process (buf.data(), (int) buf.size());
+        CHECK (near (pitches (e, true), { 56, 59, 64, 69 }), "chord set: wheel up takes the top note up a scale step (G# to A); the chord holds");
+        e.pitchWheel (-1.0);
+        e.process (buf.data(), (int) buf.size());
+        CHECK (near (pitches (e, true), { 56, 59, 64, 66 }), "wheel down takes it down a scale step (G# to F#)");
+        e.pitchWheel (0.5);
+        e.process (buf.data(), (int) buf.size());
+        auto half = pitches (e, true);
+        CHECK (half.size() == 4 && half[3] > 68.3 && half[3] < 68.7, "half way is half way (%.2f)", half.size() == 4 ? half[3] : 0.0);
+        // every chord of every set in every key: only one string moves, to a note of the key's scale
+        {
+            int bad = 0;
+            for (int si = 0; si < kChordSets; ++si)
+                for (int key = 0; key < 12; ++key)
+                    for (int slot = 0; slot < 12; ++slot)
+                    {
+                        SteelEngine c;
+                        c.prepare (kFs);
+                        EngineParams k = q;
+                        k.keyPc = key;
+                        c.setParams (k);
+                        c.setSet (si);
+                        std::vector<float> b (480);
+                        c.noteOn (60 + slot, 0.7);
+                        c.process (b.data(), 480);
+                        double rest[kStrings];
+                        for (int s = 0; s < kStrings; ++s) rest[s] = c.stringSemis (s);
+                        c.pitchWheel (1.0);
+                        for (int i = 0; i < 20; ++i) c.process (b.data(), 480);
+                        int moved = 0;
+                        bool inScale = true;
+                        for (int s = 0; s < kStrings; ++s)
+                            if (std::fabs (c.stringSemis (s) - rest[s]) > 0.05)
+                            {
+                                ++moved;
+                                const int pc = (((int) std::lround (kE9Open[(size_t) s] + c.stringSemis (s)) - key) % 12 + 12) % 12;
+                                inScale &= pc == 0 || pc == 2 || pc == 4 || pc == 5 || pc == 7 || pc == 9 || pc == 11;
+                            }
+                        bad += moved != 1 || ! inScale;
+                    }
+            CHECK (bad == 0, "all 8 sets x 12 keys x 12 chords: exactly one string moves, onto the key's scale (%d wrong)", bad);
+        }
+        // smart notes in C: C-E-G, the G moves
+        EngineParams qc = q;
+        qc.keyPc = 0;
+        SteelEngine sm;
+        sm.prepare (kFs);
+        sm.setParams (qc);
+        sm.setSet (kSmartSet);
+        for (int n : { 60, 64, 67 }) sm.noteOn (n, 0.7);
+        sm.process (buf.data(), (int) buf.size());
+        sm.pitchWheel (1.0);
+        sm.process (buf.data(), (int) buf.size());
+        CHECK (near (pitches (sm, false), { 60, 64, 69 }), "smart notes: C-E-G, wheel up: G to A, C and E hold");
+        sm.pitchWheel (-1.0);
+        sm.process (buf.data(), (int) buf.size());
+        CHECK (near (pitches (sm, false), { 60, 64, 65 }), "wheel down: G to F");
+    }
+
     std::printf ("Sympathetic strings\n");
     {
         auto run = [&] (double sym) {

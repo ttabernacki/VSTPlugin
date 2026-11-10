@@ -24,9 +24,12 @@ current bar position, preferring grips the real pedals and levers can hold.
   I to IV move. Notes pressed together (within about 45 ms) are a chord, not a bend.
 - **Legato slides:** a single line played legato slides along its string, moving the bar. Once a note
   has rung for a while, the slide to the next one is also picked lightly, so a line doesn't die away.
-- **Pitch wheel:** bends along the scale of the Key setting. With a chord held, up takes the third and
-  fifth up a scale step (I to IV) and down takes the root down a step (I to iii). With no chord, every
-  note moves a scale step.
+- **Pitch wheel**, two modes (Settings > Playing > Pitch wheel), both in smart notes and chord sets:
+  - *Melody note* (default): only the top note of what you hold moves, a scale step up or down in the
+    Key setting, and the rest holds. One voice bending against held ones is the classic steel sound.
+  - *Chord move*: bends along the scale of the Key setting. With a chord held, up takes the third and
+    fifth up a scale step (I to IV) and down takes the root down a step (I to iii). With no chord,
+    every note moves a scale step. In chord sets it moves to the chord a 4th up or a 3rd up.
 - **Range:** A2 to B6. Notes outside it fold in by octaves.
 - **Sweeten:** tunes thirds and fifths pure against the chord's root (a major third is 13.7 cents
   flat), the way steel players tune. 60% by default; 0 is equal temperament.

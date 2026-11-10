@@ -68,7 +68,7 @@ private:
     std::array<juce::Rectangle<int>, 2> soundAreas;
 
     // Settings > Playing
-    Choice pedalKeys, modWheel, aftertouch, timing, mpe, bendRange, autoBend, legatoSlide;
+    Choice pedalKeys, modWheel, aftertouch, timing, mpe, bendRange, autoBend, legatoSlide, wheelMode;
     Knob pedalSpeed, swellBelow, swellTime, autoVib, vibDelay, slideIn, slideFrom, slideTime, glideFeel, barRange;
     std::array<juce::Rectangle<int>, 5> ctlAreas;
     juce::Rectangle<int> pedalStrip;

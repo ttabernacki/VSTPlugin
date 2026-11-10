@@ -96,6 +96,8 @@ SteelwaveEditor::SteelwaveEditor (SteelwaveProcessor& p) : juce::AudioProcessorE
     bendRange.setup (*this, s, "bendrange", "MPE BEND RANGE");
     autoBend.setup (*this, s, "autobend", "AUTO BEND");
     legatoSlide.setup (*this, s, "legatoslide", "LEGATO SLIDE");
+    wheelMode.setup (*this, s, "wheel", "PITCH WHEEL");
+    wheelMode.box.setTooltip ("Melody note: the wheel moves only the top note of what you hold, a scale step up or down, while the rest holds. Chord move: it moves the chord (up I to IV, down I to iii).");
     pedalKeys.box.setTooltip ("The lowest 7 keys of a 61-key board (MIDI 36-42) play A, B, C, LKL, LKR, RKL, RKR: hold them like pedals.");
     pedalSpeed.slider.setTooltip ("How fast the pedal keys and auto bends travel. Hit harder for a faster pedal (about 80-250 ms at 1x).");
     modWheel.box.setTooltip ("What the mod wheel does: vibrato, the A+B pedals (a non-springing strip holds a pedal bend), a bar slide, or nothing.");
@@ -177,7 +179,7 @@ SteelwaveEditor::SteelwaveEditor (SteelwaveProcessor& p) : juce::AudioProcessorE
     addChildComponent (clearLearn);
 
     for (auto* c : std::initializer_list<Choice*> { &set, &key, &pickup, &volcc, &voltype, &pedalKeys, &modWheel, &aftertouch, &timing, &mpe,
-                                                    &bendRange, &autoBend, &legatoSlide })
+                                                    &bendRange, &autoBend, &legatoSlide, &wheelMode })
         registerControl (c->box, c->paramId);
     const std::pair<Knob*, const char*> knobs[] = {
         { &tone, "brightness" }, { &pick, "hardness" }, { &sustain, "sustain" }, { &vibDepth, "vibdepth" }, { &glide, "glide" },
@@ -313,7 +315,7 @@ void SteelwaveEditor::showPage (int p)
         c->show (sound);
     for (auto* k : { &strum, &noise, &behind, &vibRate, &sym })
         show (*k, sound);
-    for (auto* c : { &pedalKeys, &modWheel, &aftertouch, &timing, &mpe, &bendRange, &autoBend, &legatoSlide })
+    for (auto* c : { &pedalKeys, &modWheel, &aftertouch, &timing, &mpe, &bendRange, &autoBend, &legatoSlide, &wheelMode })
         c->show (ctl);
     for (auto* k : { &pedalSpeed, &swellBelow, &swellTime, &autoVib, &vibDelay, &slideIn, &slideFrom, &slideTime, &glideFeel, &barRange })
         show (*k, ctl);
@@ -428,9 +430,10 @@ void SteelwaveEditor::resized()
             }
             else
             {
+                choiceCell (wheelMode);
+                choiceCell (timing);
                 choiceCell (mpe);
                 choiceCell (bendRange);
-                choiceCell (timing);
             }
         }
         a.removeFromTop (3);
@@ -506,7 +509,7 @@ void SteelwaveEditor::paint (juce::Graphics& g)
     }
     if (page == ControlsPage)
     {
-        const char* titles[] = { "SMART NOTES & PEDALS", "SWELL & VIBRATO", "SLIDES", "MPE & TIMING", "WHAT DOES WHAT" };
+        const char* titles[] = { "SMART NOTES & PEDALS", "SWELL & VIBRATO", "SLIDES", "WHEEL, TIMING & MPE", "WHAT DOES WHAT" };
         for (int i = 0; i < 5; ++i)
             panel (ctlAreas[(size_t) i], titles[i], i < 4);
         drawPedals (g, pedalStrip);
@@ -518,11 +521,13 @@ void SteelwaveEditor::paint (juce::Graphics& g)
                                         "a bar slide (up to " + juce::String (juce::roundToInt (proc.apvts.getRawParameterValue ("barrange")->load())) + " frets)",
                                         "nothing" };
         const bool at = (int) proc.apvts.getRawParameterValue ("aftertouch")->load() == 0;
+        const bool melody = (int) proc.apvts.getRawParameterValue ("wheel")->load() == 0;
         juce::String txt;
         txt << "Smart notes: play normally. A note a step from one you hold bends that string to it; let it go and it bends back. A single legato line slides.\n"
             << (keys ? "Pedal keys: MIDI 36-42 are A  B  C  LKL  LKR  RKL  RKR. Hold them like pedals; hit harder for a faster pedal.\n"
                      : "Pedal keys are off: MIDI 36-42 play notes. CC20-26 still work the pedals and levers.\n")
-            << "Pitch wheel: bends along the key's scale (a chord: up I to IV, down I to iii).   Mod wheel: " << mwText[juce::jlimit (0, 3, mw)] << ".\n"
+            << (melody ? "Pitch wheel: the top note moves a scale step up or down; the rest holds.   Mod wheel: "
+                       : "Pitch wheel: moves the chord along the key's scale (up I to IV, down I to iii).   Mod wheel: ") << mwText[juce::jlimit (0, 3, mw)] << ".\n"
             << "Aftertouch: " << (at ? "vibrato" : "off") << ".   Expression pedal: the volume pedal.   Sustain: let strings ring.   Keyswitches: B0 smart notes, C1-B1 sets.";
         g.setColour (kText);
         g.setFont (juce::FontOptions (11.5f));
@@ -542,6 +547,7 @@ void SteelwaveEditor::paint (juce::Graphics& g)
     auto a = neckArea.reduced (14, 10);
     const int slot = proc.uiSlot.load(), bar = proc.uiBar.load();
     const bool smart = setIdx == sw::kSmartSet, chords = setIdx < sw::kChordSets;
+    const bool melodyWheel = (int) proc.apvts.getRawParameterValue ("wheel")->load() == 0;
 
     auto info = a.removeFromRight (std::min (300, a.getWidth() / 3));
     a.removeFromRight (12);
@@ -598,7 +604,7 @@ void SteelwaveEditor::paint (juce::Graphics& g)
         if (root >= 0)
             title = juce::String (kNoteNames[root]) + (q == 0 ? "" : q == 1 ? "m" : "dim");
         sub = "bar " + juce::String (bar) + "  |  key of " + kNoteNames[keyPc];
-        how = "a step from a held note: that string bends\na legato line slides  |  wheel: up I to IV, down I to iii";
+        how = juce::String ("a step from a held note: that string bends\na legato line slides  |  wheel: ") + (melodyWheel ? "top note, a scale step" : "up I to IV, down I to iii");
     }
     else if (chords && slot >= 0)
     {
@@ -606,8 +612,9 @@ void SteelwaveEditor::paint (juce::Graphics& g)
         const auto& v = sw::chordSets()[(size_t) setIdx][(size_t) slot];
         title = chordName (sl.rest, keyPc);
         sub = juce::String (kSlotNames[slot]) + "  |  bar " + juce::String (bar) + "  |  " + juce::String (sw::comboName (v.restCombo));
-        how = "wheel up: " + chordName (sl.up, keyPc) + " (" + juce::String (v.upHow) + ")\nwheel down: " + chordName (sl.down, keyPc)
-              + " (" + juce::String (v.downHow) + ")";
+        how = melodyWheel ? juce::String ("wheel: the top note moves a scale step\nup or down; the chord holds")
+                          : "wheel up: " + chordName (sl.up, keyPc) + " (" + juce::String (v.upHow) + ")\nwheel down: " + chordName (sl.down, keyPc)
+                                + " (" + juce::String (v.downHow) + ")";
     }
     else if (! chords)
     {

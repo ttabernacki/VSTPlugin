@@ -81,6 +81,7 @@ struct EngineParams
     bool autoBend = true;          // a note played a step from a held one bends that string to it (like a pedal)
     bool legatoSlide = true;       // a single line played legato slides along its string
     double sweeten = 0.0;          // 0..1: thirds and fifths tuned pure against the chord's root, as steel players tune
+    bool wheelMelody = false;      // pitch wheel: only the top note moves, a scale step up or down; the rest hold
 };
 
 class SteelEngine
@@ -748,6 +749,25 @@ private:
             st.inChord = true;
             st.owner = -1;
         }
+        if (prm_.wheelMelody)
+        {
+            // the wheel moves only the chord's top note, a scale step up or down; the rest hold
+            int top = -1;
+            for (int s : v.strings)
+                if (top < 0 || kE9Open[(size_t) s] + v.rest[(size_t) s] > kE9Open[(size_t) top] + v.rest[(size_t) top])
+                    top = s;
+            for (int s : v.strings)
+            {
+                auto& st = sst_[(size_t) s];
+                st.up = st.down = st.rest;
+                if (s != top)
+                    continue;
+                const int pitch = kE9Open[(size_t) s] + bar + (int) std::lround (v.rest[(size_t) s]);
+                const double u = st.rest + scaleStep (pitch, +1) - pitch, d = st.rest + scaleStep (pitch, -1) - pitch;
+                st.up = u <= 6.0 ? u : st.rest;
+                st.down = d >= -4.0 ? d : st.rest;
+            }
+        }
         for (int s = 0; s < kStrings; ++s)
         {
             mpeOff_[(size_t) s] = 0.0;
@@ -923,9 +943,22 @@ private:
         const Chord c = detectChord (rest, n);
         smRoot_ = n >= 2 ? c.root : -1;
         smQual_ = c.qual;
+        int top = 0;
+        for (int i = 1; i < n; ++i)
+            if (rest[i] > rest[top])
+                top = i;
         for (int i = 0; i < n; ++i)
         {
             up[i] = down[i] = rest[i];
+            if (prm_.wheelMelody) // the melody note moves along the scale; the chord under it holds
+            {
+                if (i == top)
+                {
+                    up[i] = scaleStep (rest[i], +1);
+                    down[i] = scaleStep (rest[i], -1);
+                }
+                continue;
+            }
             if (c.root < 0 || n < 2)
             {
                 up[i] = scaleStep (rest[i], +1);

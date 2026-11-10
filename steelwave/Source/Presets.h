@@ -21,7 +21,7 @@ struct Preset
 // parameters a preset never touches
 inline bool isRig (const juce::String& id)
 {
-    static const char* rig[] = { "set", "key", "volcc", "voltype", "pedalkeys", "modwheel", "aftertouch", "mpe", "bendrange", "level" };
+    static const char* rig[] = { "set", "key", "volcc", "voltype", "pedalkeys", "modwheel", "aftertouch", "mpe", "bendrange", "level", "wheel" };
     for (auto* r : rig)
         if (id == r)
             return true;
