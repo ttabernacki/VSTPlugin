@@ -512,7 +512,7 @@ void SteelwaveEditor::paint (juce::Graphics& g)
     }
     if (page == ControlsPage)
     {
-        const char* titles[] = { "SMART NOTES & PEDALS", "SWELL & VIBRATO", "SLIDES", "CHORDS, WHEEL "WHEEL, TIMING & MPE" MPE", "WHAT DOES WHAT" };
+        const char* titles[] = { "SMART NOTES & PEDALS", "SWELL & VIBRATO", "SLIDES", "CHORDS, WHEEL & MPE", "WHAT DOES WHAT" };
         for (int i = 0; i < 5; ++i)
             panel (ctlAreas[(size_t) i], titles[i], i < 4);
         drawPedals (g, pedalStrip);
