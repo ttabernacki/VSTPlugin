@@ -82,6 +82,8 @@ struct EngineParams
     bool legatoSlide = true;       // a single line played legato slides along its string
     double sweeten = 0.0;          // 0..1: thirds and fifths tuned pure against the chord's root, as steel players tune
     bool wheelMelody = false;      // pitch wheel: only the top note moves, a scale step up or down; the rest hold
+    int chordMove = 2;             // chord sets: 0 = every chord re-picked in its own voicing, 1 = keys played legato
+                                   // bend/slide into the next chord, 2 = and so does a chord played soon after the last
 };
 
 class SteelEngine
@@ -428,10 +430,17 @@ public:
     double stringLevel (int s) const { return str_[(size_t) s].level(); }
     double controlTravel (int k) const { return travel()[(size_t) k]; }
     double stringSemis (int s) const { return str_[(size_t) s].currentSemis(); }
+    bool stringInChord (int s) const { return sst_[(size_t) s].inChord; }
+    double stringRestSemis (int s) const { return bar_ + sst_[(size_t) s].rest; } // where the chord puts it, wheel at rest
+    // what the last chord move did (tests, display)
+    int lastMoveFrets() const { return moveFrets_; }
+    int lastMoveCombo() const { return moveCombo_ >= 0 ? (int) playableCombos()[(size_t) moveCombo_] : -1; }
+    bool lastChordMoved() const { return moveCombo_ >= 0; }
     int stringKey (int s) const { return sst_[(size_t) s].owner; } // smart and single notes: the key playing this string, or -1
 
     static constexpr double kOutputScale = 0.12;
     static constexpr double kLandSec = 0.006;
+    static constexpr double kPushSec = 0.045; // pick, then push into the next chord
     static constexpr double kIdleContact = 0.2;
     static constexpr double kCabinetDrop = 0.026; // semitones per string's worth of added tension (A+B ~ -2 cents)
     static constexpr double kStopBounce = 0.03;   // semitones of overshoot from a fast hit
@@ -699,53 +708,161 @@ private:
         held_.erase (std::remove (held_.begin(), held_.end(), note), held_.end());
         if (! held_.empty())
         {
-            if (wasTop) // back to the chord still held: slide there, nothing new picked
+            if (wasTop) // back to the chord still held: move there, nothing new picked
                 playChord (held_.back() % 12, 0.0, true, false, held_.back());
             return;
         }
+        releasedAt_ = clock_;
         // last key up: a palm block over all the strings (sympathetic ringing included)
         if (! sustainPedal_)
             for (int s = 0; s < kStrings; ++s)
                 block (s);
     }
+
+    // --- chord moves -----------------------------------------------------------------------
+    // How a player gets from the chord sounding now to the next one without lifting the bar: the same
+    // strings, with the pedals and levers changed (a bend: I -> IV is A+B down, I -> vi the A pedal),
+    // the bar slid (parallel shapes), or both (I -> V: A+B and up two frets). Each way is costed by
+    // what the hands and feet do and how far the voices travel; the register is kept near where the
+    // set would voice the chord, so a progression doesn't wander off up the neck.
+    static constexpr int kMoveFrets = 7;          // furthest bar slide a move considers
+    static constexpr double kMoveMaxCost = 4.5;   // dearer than this: pick the set's own voicing instead
+    static constexpr double kMoveWindow = 1.5;    // s: a chord played this soon after the last is a move too
+    struct ChordMove { int bar = 0; int combo = -1; double cost = 1e9; };
+    ChordMove planMove (ChordName tgt, double targetMean, int dir) const
+    {
+        ChordMove best;
+        int strs[kStrings], n = 0, ro[kStrings] {};
+        for (int s = 0; s < kStrings; ++s)
+            if (sst_[(size_t) s].inChord)
+            {
+                strs[n++] = s;
+                ro[s] = (int) std::lround (sst_[(size_t) s].rest);
+            }
+        if (n < 2)
+            return best;
+        double mean0 = 0;
+        for (int k = 0; k < n; ++k)
+            mean0 += kE9Open[(size_t) strs[k]] + bar_ + ro[strs[k]];
+        mean0 /= n;
+        const auto& combos = playableCombos();
+        int c0 = -1; // the pedals and levers down now (fewest that give these strings)
+        for (int c = 0; c < nCombos_; ++c)
+        {
+            bool ok = true;
+            for (int k = 0; k < n && ok; ++k)
+                ok = comboOff_[(size_t) c][(size_t) strs[k]] == ro[strs[k]];
+            if (ok && (c0 < 0 || comboCount_[(size_t) c] < comboCount_[(size_t) c0]))
+                c0 = c;
+        }
+        const uint32_t want = chordPcs (tgt, prm_.keyPc);
+        const int root = (prm_.keyPc + tgt.root) % 12, third = (root + (tgt.q == Maj ? 4 : 3)) % 12;
+        for (int b = std::max (0, bar_ - kMoveFrets); b <= std::min (kTopFret, bar_ + kMoveFrets); ++b)
+            for (int c = 0; c < nCombos_; ++c)
+            {
+                uint32_t got = 0;
+                double motion = 0, mean = 0;
+                for (int k = 0; k < n; ++k)
+                {
+                    const int s = strs[k];
+                    const int p1 = kE9Open[(size_t) s] + b + comboOff_[(size_t) c][(size_t) s];
+                    got |= 1u << (p1 % 12);
+                    motion += std::abs (p1 - (kE9Open[(size_t) s] + bar_ + ro[s]));
+                    mean += p1;
+                }
+                if ((got & ~want) != 0 || ! (got & (1u << root)) || ! (got & (1u << third)))
+                    continue;
+                mean /= n;
+                // the chord goes the way the keys went (a key up the keyboard never moves the chord down)
+                if (dir != 0 && (mean - mean0) * dir < -0.5)
+                    continue;
+                const int frets = std::abs (b - bar_);
+                const int changes = c0 >= 0 ? controlCount (combos[(size_t) c] ^ combos[(size_t) c0]) : comboCount_[(size_t) c] + 1;
+                const double cost = (frets > 0 ? 0.8 + 0.3 * frets : 0.0) + 0.6 * changes + 0.1 * motion
+                                  + 0.1 * comboCount_[(size_t) c] + 0.4 * std::max (0.0, std::fabs (mean - targetMean) - 3.0)
+                                  + 2.0 * std::max (0.0, std::fabs (mean - targetMean) - 10.0)
+                                  + (got == want ? 0.0 : 0.5);
+                if (cost < best.cost)
+                    best = { b, c, cost };
+            }
+        return best;
+    }
+
     void playChord (int slot, double vel, bool legato, bool pickNew, int note = -1)
     {
         const auto& v = chordSets()[(size_t) set_][(size_t) slot];
-        const int bar = chordBar (set_, v, prm_.keyPc, note);
+        const auto& sl = chordSlots()[(size_t) slot];
+        // the chord as the set voices it...
+        int bar = chordBar (set_, v, prm_.keyPc, note);
+        int strs[kStrings], ns = std::min ((int) v.strings.size(), kStrings);
+        std::copy (v.strings.begin(), v.strings.begin() + ns, strs);
+        std::array<double, kStrings> rest = v.rest, up = v.up, down = v.down;
+        // ...or reached from the chord sounding now, by a bend and/or a slide
+        const bool soon = clock_ - releasedAt_ < (int64_t) (kMoveWindow * fs_);
+        bool moved = false, push = false;
+        moveCombo_ = -1;
+        if (prm_.chordMove > 0 && chordSlot_ >= 0 && (legato || (prm_.chordMove >= 2 && pickNew && soon)))
+        {
+            const int dir = note >= 0 && chordNote_ >= 0 ? (note > chordNote_) - (note < chordNote_) : 0;
+            const auto mv = planMove (sl.rest, v.meanPitch + bar - v.bar, dir);
+            if (mv.cost <= kMoveMaxCost)
+            {
+                moved = true;
+                push = ! legato; // picked where the last chord was, then pushed into this one
+                moveCombo_ = mv.combo;
+                moveFrets_ = mv.bar - bar_;
+                bar = mv.bar;
+                ns = 0;
+                moveStrs_.clear();
+                for (int s = 0; s < kStrings; ++s)
+                    if (sst_[(size_t) s].inChord)
+                    {
+                        strs[ns++] = s;
+                        moveStrs_.push_back (s);
+                    }
+                for (int s = 0; s < kStrings; ++s)
+                    rest[(size_t) s] = comboOff_[(size_t) mv.combo][(size_t) s];
+                std::string how; // short: no allocation
+                detail::bestTarget (moveStrs_, bar, rest, sl.up, prm_.keyPc, +1, up, how);
+                detail::bestTarget (moveStrs_, bar, rest, sl.down, prm_.keyPc, -1, down, how);
+            }
+        }
         const bool barMoves = bar != bar_;
         const double glide = glideFor (std::abs (bar - bar_), pickNew ? vel : 0.6);
+        // a move takes the Glide time: a pedal change about as long as a two-fret slide
+        const double moveSec = glideFor (std::max (std::abs (bar - bar_), 2), pickNew ? vel : 0.6);
         // MPE: the chord follows its note's finger (bend = bar slide, pressure, slide = fade)
         chordCh_ = note >= 0 ? noteCh_[(size_t) note] : chordCh_;
         mpeBar_ = chordCh_ > 0 ? chBend_[(size_t) chordCh_] * prm_.mpeBendRange : 0.0;
         bool inNew[kStrings] = {}, wasIn[kStrings] = {};
         for (int s = 0; s < kStrings; ++s)
             wasIn[s] = sst_[(size_t) s].inChord;
-        for (int s : v.strings)
-            inNew[s] = true;
+        for (int k = 0; k < ns; ++k)
+            inNew[strs[k]] = true;
         // strings leaving the chord, or that would be dragged along by a lifted bar, are blocked
         for (int s = 0; s < kStrings; ++s)
         {
             if (inNew[s])
                 continue;
-            if (sst_[(size_t) s].inChord || (barMoves && ! legato))
+            if (sst_[(size_t) s].inChord || (barMoves && ! legato && ! push))
                 block (s);
             sst_[(size_t) s] = {};
         }
         // the bar's contact noise comes mostly from the strings being played
         for (int s = 0; s < kStrings; ++s)
             str_[(size_t) s].setContact (inNew[s] ? 1.0 : kIdleContact);
-        for (int s : v.strings)
+        for (int k = 0; k < ns; ++k)
         {
+            const int s = strs[k];
             auto& st = sst_[(size_t) s];
             // sweetened against each chord's own root (the chord, and what the wheel bends it to)
-            const auto& sl = chordSlots()[(size_t) slot];
             auto sweet = [&] (double off, ChordName c) {
-                const int pc = (kE9Open[(size_t) s] + v.bar + (int) std::lround (off) + 1200) % 12;
-                return prm_.sweeten * sweetCents ((pc - (4 + c.root) % 12 + 12) % 12) * 0.01;
+                const int pc = (kE9Open[(size_t) s] + bar + (int) std::lround (off) + 1200) % 12;
+                return prm_.sweeten * sweetCents ((pc - (prm_.keyPc + c.root) % 12 + 12) % 12) * 0.01;
             };
-            st.rest = v.rest[(size_t) s] + sweet (v.rest[(size_t) s], sl.rest);
-            st.up = v.up[(size_t) s] + sweet (v.up[(size_t) s], sl.up);
-            st.down = v.down[(size_t) s] + sweet (v.down[(size_t) s], sl.down);
+            st.rest = rest[(size_t) s] + sweet (rest[(size_t) s], sl.rest);
+            st.up = up[(size_t) s] + sweet (up[(size_t) s], sl.up);
+            st.down = down[(size_t) s] + sweet (down[(size_t) s], sl.down);
             st.inChord = true;
             st.owner = -1;
         }
@@ -753,16 +870,17 @@ private:
         {
             // the wheel moves only the chord's top note, a scale step up or down; the rest hold
             int top = -1;
-            for (int s : v.strings)
-                if (top < 0 || kE9Open[(size_t) s] + v.rest[(size_t) s] > kE9Open[(size_t) top] + v.rest[(size_t) top])
-                    top = s;
-            for (int s : v.strings)
+            for (int k = 0; k < ns; ++k)
+                if (top < 0 || kE9Open[(size_t) strs[k]] + rest[(size_t) strs[k]] > kE9Open[(size_t) top] + rest[(size_t) top])
+                    top = strs[k];
+            for (int k = 0; k < ns; ++k)
             {
+                const int s = strs[k];
                 auto& st = sst_[(size_t) s];
                 st.up = st.down = st.rest;
                 if (s != top)
                     continue;
-                const int pitch = kE9Open[(size_t) s] + bar + (int) std::lround (v.rest[(size_t) s]);
+                const int pitch = kE9Open[(size_t) s] + bar + (int) std::lround (rest[(size_t) s]);
                 const double u = st.rest + scaleStep (pitch, +1) - pitch, d = st.rest + scaleStep (pitch, -1) - pitch;
                 st.up = u <= 6.0 ? u : st.rest;
                 st.down = d >= -4.0 ? d : st.rest;
@@ -776,11 +894,37 @@ private:
         }
         if (chordCh_ > 0)
             pressure_ = chPress_[(size_t) chordCh_];
-        retune (legato ? glide : 0.004); // the chord's strings, and everyone's cabinet drop
-        moveBarTo (bar, legato, glide);
+        // strum spread, and the picks low string first
+        const double spread = prm_.strumMs * 1e-3 * chordSetDefs()[(size_t) set_].strumScale * (prm_.tight ? 0.4 : 1.0);
+        int order[kStrings];
+        std::copy (strs, strs + ns, order);
+        std::sort (order, order + ns, [] (int a, int b) { return kE9Open[(size_t) a] < kE9Open[(size_t) b]; });
+        if (push)
+        {
+            // picked where the last chord was (the strings are still there), then the pedals go down and
+            // the bar slides once the strum is through
+            bar_ = bar;
+            const int64_t at = clock_ + (int64_t) ((spread * (ns - 1) + kPushSec) * fs_);
+            if (barMoves)
+                barSlideAt_ = at;
+            for (int k = 0; k < ns; ++k)
+                strSlideAt_[(size_t) strs[k]] = at;
+            slideInSec_ = moveSec;
+        }
+        else if (moved)
+        {
+            retune (moveSec);
+            moveBarTo (bar, true, moveSec);
+        }
+        else
+        {
+            retune (legato ? glide : 0.004); // the chord's strings, and everyone's cabinet drop
+            moveBarTo (bar, legato, glide);
+        }
         chordSlot_ = slot;
+        chordNote_ = note;
         // slide-in: a soft chord starts below and slides up into place once it's picked
-        if (pickNew && ! legato && slideIn (vel))
+        if (pickNew && ! legato && ! moved && slideIn (vel))
         {
             const double from = std::clamp (prm_.slideFrom, 0.25, 5.0);
             const double start = bar - from >= 0 ? barTarget() - from : barTarget() + from; // at the nut: slide down into it
@@ -792,14 +936,9 @@ private:
         // a lifted bar takes a few ms to land: pick after that, or the attack would scoop
         if (! pickNew)
             return;
-        // pick: low string first; on a legato slide only the strings that aren't already ringing
-        int order[kStrings];
-        const int no = std::min ((int) v.strings.size(), kStrings);
-        std::copy (v.strings.begin(), v.strings.begin() + no, order);
-        std::sort (order, order + no, [] (int a, int b) { return kE9Open[(size_t) a] < kE9Open[(size_t) b]; });
-        const double spread = prm_.strumMs * 1e-3 * chordSetDefs()[(size_t) set_].strumScale * (prm_.tight ? 0.4 : 1.0);
-        double t = (barMoves || barSlideAt_ >= 0) && ! legato ? kLandSec : 0.0;
-        for (int k = 0; k < no; ++k)
+        // pick: on a legato move only the strings that aren't already ringing
+        double t = (barMoves || barSlideAt_ >= 0) && ! legato && ! push ? kLandSec : 0.0;
+        for (int k = 0; k < ns; ++k)
         {
             const int s = order[k];
             // a slide carries the strings already ringing in the chord, however quiet: never re-picked
@@ -1466,6 +1605,9 @@ private:
     SingleMap single_;
     std::vector<int> held_; // reserved up front: never reallocates on the audio thread
     int set_ = 0, chordSlot_ = -1, bar_ = 0;
+    int64_t releasedAt_ = -1000000000;
+    int moveCombo_ = -1, moveFrets_ = 0, chordNote_ = -1;
+    std::vector<int> moveStrs_ = std::vector<int> (kStrings); // reserved: the audio thread only clears and refills it
     // Passive volume pedal: a pot between the pickup and the cable. Part-way down, the resistance it
     // leaves in the signal path (the two halves of the pot in parallel, R t (1 - t), t = the divider
     // ratio) and the cable's capacitance (~700 pF, 20 ft) make a low-pass: darkest around half way

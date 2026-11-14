@@ -95,7 +95,7 @@ inline const std::vector<Preset>& presets()
         { "Utility", "Tight & Bright (live)", { { "timing", 1.0f }, { "hardness", 0.9f }, { "brightness", 0.75f }, { "strum", 6.0f }, { "glide", 0.15f },
                                                 { "barnoise", 0.3f } } },
         { "Utility", "Equal Tempered", { { "sweeten", 0.0f } } },
-        { "Utility", "Every Key Picks", { { "autobend", 0.0f }, { "legatoslide", 0.0f } } },
+        { "Utility", "Every Key Picks", { { "autobend", 0.0f }, { "legatoslide", 0.0f }, { "chordmove", 0.0f } } },
     };
     return p;
 }

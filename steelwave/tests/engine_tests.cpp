@@ -1,6 +1,7 @@
 // Tests for the Steelwave engine: E9 voicings, chord and single-note sets, MIDI behaviour (no JUCE).
 #include "../core/SteelEngine.h"
 
+#include <memory>
 #include <cstdio>
 #include <functional>
 #include <random>
@@ -211,6 +212,7 @@ int main()
 
     EngineParams p;
     p.strumMs = 0;
+    p.chordMove = 0; // the slide tests below are about the set's own voicings; chord moves have their own
     std::printf ("Chords and the pitch wheel\n");
     {
         Script sc;
@@ -991,6 +993,177 @@ int main()
         const double rel = 10 * std::log10 (diff / ref);
         // through the body: strongest near its resonances, so it depends on the note
         CHECK (rel > -70 && rel < -10, "coupling adds a quiet halo of other strings (%.1f dB re the note)", rel);
+    }
+
+    std::printf ("Chord moves\n");
+    {
+        // drive an engine: run to time t (s)
+        struct Rig
+        {
+            SteelEngine e;
+            double now = 0;
+            std::vector<float> buf = std::vector<float> (64);
+            explicit Rig (EngineParams q) { e.prepare (kFs); e.setParams (q); e.setSet (0); }
+            void to (double t) { while (now < t) { e.process (buf.data(), 64); now += 64.0 / kFs; } }
+        };
+        EngineParams q = p;
+        q.chordMove = 2;
+        q.glideScaling = 0.0;
+        const uint32_t A = 1u << PedA, B = 1u << PedB, C = 1u << PedC;
+        // in E: I held, then another chord legato
+        auto legato = [&] (int toNote) {
+            auto r = std::make_unique<Rig> (q);
+            r->e.noteOn (60, 0.8);
+            r->to (0.5);
+            r->e.noteOn (toNote, 0.8);
+            r->to (1.5);
+            return r;
+        };
+        {
+            auto r = legato (65); // IV
+            CHECK (r->e.lastChordMoved() && r->e.bar() == 0 && (uint32_t) r->e.lastMoveCombo() == (A | B)
+                       && std::fabs (r->e.stringSemis (2) - 1.0) < 0.05 && std::fabs (r->e.stringSemis (4) - 2.0) < 0.05,
+                   "I -> IV: a bend, A+B down at the same fret (bar %d, %s)", r->e.bar(), comboName ((uint32_t) std::max (0, r->e.lastMoveCombo())).c_str());
+        }
+        {
+            auto r = legato (69); // vi
+            CHECK (r->e.bar() == 0 && (uint32_t) r->e.lastMoveCombo() == A, "I -> vi: the A pedal (bar %d, %s)", r->e.bar(),
+                   comboName ((uint32_t) std::max (0, r->e.lastMoveCombo())).c_str());
+        }
+        {
+            auto r = legato (62); // ii
+            CHECK (r->e.bar() == 0 && (uint32_t) r->e.lastMoveCombo() == (B | C), "I -> ii: B+C (bar %d, %s)", r->e.bar(),
+                   comboName ((uint32_t) std::max (0, r->e.lastMoveCombo())).c_str());
+        }
+        {
+            auto r = legato (63); // II: the same shape two frets up
+            CHECK (r->e.bar() == 2 && r->e.lastMoveCombo() == 0, "I -> II: a slide, open shape up two frets (bar %d, %s)", r->e.bar(),
+                   comboName ((uint32_t) std::max (0, r->e.lastMoveCombo())).c_str());
+        }
+        {
+            // the move doesn't re-pick: the strings were ringing
+            auto r = std::make_unique<Rig> (q);
+            r->e.noteOn (60, 0.8);
+            r->to (0.5);
+            const double lv = r->e.stringLevel (4);
+            r->e.noteOn (65, 0.8);
+            r->to (0.52);
+            CHECK (r->e.stringLevel (4) < lv * 1.2, "a legato move carries the ringing strings, nothing re-picked");
+        }
+        // the Glide knob sets the time
+        auto moveTime = [&] (double glide) {
+            EngineParams g = q;
+            g.glide = glide;
+            Rig r (g);
+            r.e.noteOn (60, 0.8);
+            r.to (0.5);
+            r.e.noteOn (65, 0.8);
+            while (r.now < 3.0 && std::fabs (r.e.stringSemis (4) - 2.0) > 0.2)
+                r.to (r.now + 0.001);
+            return r.now - 0.5;
+        };
+        const double quick = moveTime (0.1), slow = moveTime (0.8);
+        CHECK (slow > 4.0 * quick && slow > 0.4, "Glide sets the move time: %.0f ms at 0.1 s, %.0f ms at 0.8 s", 1000 * quick, 1000 * slow);
+        {
+            // a chord played just after the last: picked where the last one was, then pushed into place
+            Rig r (q);
+            r.e.noteOn (60, 0.8);
+            r.to (0.5);
+            r.e.noteOff (60);
+            r.to (0.7);
+            r.e.noteOn (65, 0.8);
+            r.to (0.72);
+            const double before = r.e.stringSemis (4), lv = r.e.stringLevel (4);
+            r.to (1.6);
+            CHECK (r.e.lastChordMoved() && std::fabs (before) < 0.1 && lv > 0 && std::fabs (r.e.stringSemis (4) - 2.0) < 0.05,
+                   "detached: picked on the old chord (%.2f), pushed into the new one (%.2f)", before, r.e.stringSemis (4));
+        }
+        {
+            // "Legato keys" doesn't move a detached chord; nor does one long after; "Off" never moves
+            EngineParams l = q;
+            l.chordMove = 1;
+            Rig r (l);
+            r.e.noteOn (60, 0.8);
+            r.to (0.5);
+            r.e.noteOff (60);
+            r.to (0.7);
+            r.e.noteOn (65, 0.8);
+            r.to (1.0);
+            const bool a = ! r.e.lastChordMoved();
+            Rig late (q);
+            late.e.noteOn (60, 0.8);
+            late.to (0.5);
+            late.e.noteOff (60);
+            late.to (2.5);
+            late.e.noteOn (65, 0.8);
+            late.to (2.6);
+            const bool b = ! late.e.lastChordMoved();
+            EngineParams o = q;
+            o.chordMove = 0;
+            Rig off (o);
+            off.e.noteOn (60, 0.8);
+            off.to (0.5);
+            off.e.noteOn (65, 0.8);
+            off.to (0.6);
+            CHECK (a && b && ! off.e.lastChordMoved(), "no move: detached with Legato keys (%d), after a pause (%d), or Off (%d)", a, b,
+                   ! off.e.lastChordMoved());
+        }
+        {
+            // every chord to every chord, every set and key, legato: the move lands on the right chord
+            int wrong = 0, moves = 0, total = 0, far = 0, backwards = 0;
+            auto big = std::make_unique<Rig> (q);
+            for (int set = 0; set < kChordSets; ++set)
+                for (int key = 0; key < 12; ++key)
+                    for (int a = 0; a < 12; ++a)
+                        for (int b = 0; b < 12; ++b)
+                        {
+                            if (a == b)
+                                continue;
+                            EngineParams k = q;
+                            k.keyPc = key;
+                            SteelEngine& e = big->e;
+                            EngineParams k0 = k;
+                            k0.chordMove = 0; // the first chord in the set's own voicing
+                            e.setParams (k0);
+                            e.setSet (set);
+                            e.noteOn (60 + a, 0.8);
+                            e.setParams (k);
+                            e.noteOn (60 + b, 0.8);
+                            e.noteOff (60 + a);
+                            ++total;
+                            moves += e.lastChordMoved();
+                            const auto& sl = chordSlots()[(size_t) b].rest;
+                            const uint32_t want = chordPcs (sl, key);
+                            const int root = (key + sl.root) % 12, third = (root + (sl.q == Maj ? 4 : 3)) % 12;
+                            uint32_t got = 0;
+                            double mean = 0;
+                            int n = 0;
+                            for (int s = 0; s < kStrings; ++s)
+                                if (e.stringInChord (s))
+                                {
+                                    const double pitch = kE9Open[(size_t) s] + e.stringRestSemis (s);
+                                    got |= 1u << (((int) std::lround (pitch) % 12 + 12) % 12);
+                                    mean += pitch;
+                                    ++n;
+                                }
+                            if ((got & ~want) || ! (got & (1u << root)) || ! (got & (1u << third)))
+                                ++wrong;
+                            // and it stays within an octave of where the set voices the chord
+                            const auto& v = chordSets()[(size_t) set][(size_t) b];
+                            const double home = v.meanPitch + chordBar (set, v, key, 60 + b) - v.bar;
+                            far += std::fabs (mean / std::max (n, 1) - home) > 12.0; // an octave: I -> vi stays an A pedal
+                            // and it went the way the keys went
+                            double mean0 = 0;
+                            {
+                                const auto& v0 = chordSets()[(size_t) set][(size_t) a];
+                                mean0 = v0.meanPitch + chordBar (set, v0, key, 60 + a) - v0.bar;
+                            }
+                            backwards += e.lastChordMoved() && (mean / std::max (n, 1) - mean0) * (b > a ? 1 : -1) < -0.5;
+                        }
+            CHECK (wrong == 0 && far == 0 && backwards == 0 && moves > total / 2,
+                   "%d legato changes (all sets and keys): %d moved by bend/slide; %d wrong chords, %d far from home, %d against the keys",
+                   total, moves, wrong, far, backwards);
+        }
     }
 
     std::printf ("Stability\n");

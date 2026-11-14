@@ -118,6 +118,8 @@ APVTS::ParameterLayout SteelwaveProcessor::createLayout()
     l.add (std::make_unique<AudioParameterChoice> (ParameterID { "autobend", 1 }, "Auto bend", StringArray { "Off", "On" }, 1));
     l.add (std::make_unique<AudioParameterChoice> (ParameterID { "legatoslide", 1 }, "Legato slide", StringArray { "Off", "On" }, 1));
     l.add (std::make_unique<AudioParameterChoice> (ParameterID { "wheel", 1 }, "Pitch wheel", StringArray { "Melody note", "Chord move" }, 0));
+    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "chordmove", 1 }, "Chord changes",
+                                                    StringArray { "Re-pick", "Move when legato", "Always move" }, 2));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "sweeten", 1 }, "Sweeten", Range (0.0f, 1.0f), 0.6f,
                                                   Attr().withStringFromValueFunction (pct).withValueFromStringFunction (pctIn)));
 
@@ -220,6 +222,7 @@ sw::EngineParams SteelwaveProcessor::readParams() const
     p.legatoSlide = (int) raw ("legatoslide") == 1;
     p.sweeten = raw ("sweeten");
     p.wheelMelody = (int) raw ("wheel") == 0;
+    p.chordMove = (int) raw ("chordmove");
     const auto& adv = swadv::params();
     for (size_t i = 0; i < adv.size(); ++i)
         p.*(adv[i].field) = pAdv[i]->load();

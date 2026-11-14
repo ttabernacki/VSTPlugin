@@ -294,6 +294,31 @@ static void engineDemos (const std::string& dir)
         m.off (t + 0.3, 64);
         writeWav16 (dir + "11_smart_line.wav", m.render (kSmartSet, t + 1.2, p), 48000.0);
     }
+    { // 12: chord moves, Classic set in E: I IV I vi ii V I legato (bends and slides), then detached (pick and push)
+        Midi m;
+        EngineParams p;
+        p.keyPc = 4;
+        p.glide = 0.3;
+        p.autoVibrato = 0.4;
+        p.vibDelay = 0.6;
+        const int prog[] = { 60, 65, 60, 69, 62, 67, 60 }; // I IV I vi ii V I
+        double t = 0.3;
+        for (int i = 0; i < 7; ++i)
+        {
+            m.on (t, prog[i], 0.7);
+            if (i > 0) m.off (t + 0.05, prog[i - 1]);
+            t += 1.4;
+        }
+        m.off (t, prog[6]);
+        t += 0.6;
+        for (int i = 0; i < 7; ++i) // the same, each key let go before the next
+        {
+            m.on (t, prog[i], 0.7);
+            m.off (t + 1.1, prog[i]);
+            t += 1.4;
+        }
+        writeWav16 (dir + "12_chord_moves.wav", m.render (0, t + 1.0, p), 48000.0);
+    }
 }
 
 int main (int argc, char** argv)

@@ -78,8 +78,20 @@ The pitch wheel bends to another diatonic chord:
 - **Up:** the chord a 4th up (I→IV, ii→V, V→I ...).
 - **Down:** the chord a 3rd up, by lowering the root (I→iii, IV→vi ...).
 
-Playing a new chord while still holding the last one slides the bar there (legato, **Glide** sets the
-time) without picking the strings again. Releasing back to a chord still held slides back.
+**Chord changes** (Settings > Playing) move from one chord to the next the way a player who keeps the
+bar down would: the same strings, with whichever is the most natural move — a bend on the pedals and
+levers, a bar slide, or both. In E, I→IV is A+B down at the same fret, I→vi the A pedal, I→ii B+C,
+I→II the open shape slid up two frets, I→V A+B and up two frets. Each candidate is costed by what the
+feet and hand do and how far the voices travel; the chord always goes the way the keys went (a key
+higher on the keyboard never moves the chord down) and stays within an octave of where the set would
+voice it. Where no move is natural (a big jump), the chord is picked fresh in its own voicing.
+- **Always move** (default): legato chords move without re-picking; a chord played within 1.5 s of the
+  last is picked where the last one was, then pushed into place (pick, then pedal).
+- **Move when legato:** only overlapping keys move; detached chords are picked fresh.
+- **Re-pick:** every chord in its own voicing (legato chords slide the bar, as before).
+
+**Glide** (Play page) sets how long a move takes (a pedal change takes about as long as a two-fret
+slide; **Glide feel** lengthens bigger slides). Releasing back to a chord still held moves back.
 
 | Set | Strings | Notes |
 |---|---|---|
@@ -132,6 +144,7 @@ How it's played:
 
 - **Slides:** **Slide-in** (notes softer than a set velocity, or every note, slide up into pitch after the pick), **Slide from** (how far below, in semitones) and **Slide time**. **Glide feel**: legato slides take longer for bigger jumps and less for harder playing. **Bar range**: how far the mod wheel's bar slide goes (1-12 frets).
 - **MPE** (channels 2-16; channel 1 stays the master for the wheel, pedals and CCs). Each finger's pitch slide moves the bar (chords) or its own string (single notes), its pressure gives it its own vibrato, and its slide (CC74) fades it. **MPE bend range** sets 12, 24 or 48 semitones (48 is the MPE default).
+- **Chord changes:** Always move, Move when legato or Re-pick (see Chord sets).
 - **Timing:** Natural, or Tight for live playing (picks let go sooner and chords strum tighter).
 
 Vibrato depth is the strongest of the mod wheel, aftertouch and auto vibrato.
@@ -144,7 +157,7 @@ pedals and levers live and summarises what each control does. The same pedal str
 ## Knobs (Play page and Settings > Sound)
 | Knob | Range | |
 |---|---|---|
-| Glide | 30-1200 ms | Legato bar slide time |
+| Glide | 30-1200 ms | Chord moves and legato slides: how long the bend or slide takes |
 | Strum | 0-60 ms | Pick spread across a chord, low string first |
 | Picking hand | Thumb pick (plastic, softer, ~2 cm further from the bridge, pushing the string down and across) on strings 6-10; metal finger picks (pulling up and across) on 1-5. Each pick catches the string and drags it 0.8-2.5 ms before slipping off (longer for soft strokes and the thumb), with a faint scrape while it drags, more on wound strings. The release is a velocity pulse lasting the wave's round trip to the pick point, smoothed over the contact time (harder = brighter), plus a metal tick. No two picks are quite alike: position varies by +-6 mm, and stroke angle and contact time vary too. Re-picking a ringing string first catches it briefly |
 | Brightness | 0-100 % | How long the high partials ring (old → new strings) |

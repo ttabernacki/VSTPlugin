@@ -56,7 +56,7 @@ SteelwaveEditor::SteelwaveEditor (SteelwaveProcessor& p) : juce::AudioProcessorE
     pick.slider.setTooltip ("Soft thumb and flesh to hard metal fingerpicks.");
     sustain.slider.setTooltip ("How long notes ring.");
     vibDepth.slider.setTooltip ("Depth of the bar vibrato (aftertouch, mod wheel or auto vibrato bring it in).");
-    glide.slider.setTooltip ("How long the bar takes to slide between notes played legato.");
+    glide.slider.setTooltip ("How long a move takes: the bend or slide from one chord to the next, and legato slides between notes.");
     swellMain.slider.setTooltip ("Notes played softer than this fade in like a volume-pedal swell. Off at 0; all the way up, every note swells.");
     sweeten.slider.setTooltip ("Tunes thirds and fifths pure against the chord's root, the way steel players tune. 0 is equal temperament.");
     level.slider.setTooltip ("Output level.");
@@ -97,6 +97,8 @@ SteelwaveEditor::SteelwaveEditor (SteelwaveProcessor& p) : juce::AudioProcessorE
     autoBend.setup (*this, s, "autobend", "AUTO BEND");
     legatoSlide.setup (*this, s, "legatoslide", "LEGATO SLIDE");
     wheelMode.setup (*this, s, "wheel", "PITCH WHEEL");
+    chordMove.setup (*this, s, "chordmove", "CHORD CHANGES");
+    chordMove.box.setTooltip ("How chord sets get from one chord to the next. Always move: like a player who keeps the bar down, it bends (pedals and levers) and/or slides into the next chord, whichever is the most natural move (I to IV is A+B, I to vi the A pedal, I to II a two-fret slide); a chord played soon after the last is picked where the last one was, then pushed into place. Move when legato: only when the keys overlap. Re-pick: every chord picked fresh in its own voicing. The Glide knob sets how long a move takes.");
     wheelMode.box.setTooltip ("Melody note: the wheel moves only the top note of what you hold, a scale step up or down, while the rest holds. Chord move: it moves the chord (up I to IV, down I to iii).");
     pedalKeys.box.setTooltip ("The lowest 7 keys of a 61-key board (MIDI 36-42) play A, B, C, LKL, LKR, RKL, RKR: hold them like pedals.");
     pedalSpeed.slider.setTooltip ("How fast the pedal keys and auto bends travel. Hit harder for a faster pedal (about 80-250 ms at 1x).");
@@ -179,7 +181,7 @@ SteelwaveEditor::SteelwaveEditor (SteelwaveProcessor& p) : juce::AudioProcessorE
     addChildComponent (clearLearn);
 
     for (auto* c : std::initializer_list<Choice*> { &set, &key, &pickup, &volcc, &voltype, &pedalKeys, &modWheel, &aftertouch, &timing, &mpe,
-                                                    &bendRange, &autoBend, &legatoSlide, &wheelMode })
+                                                    &bendRange, &autoBend, &legatoSlide, &wheelMode, &chordMove })
         registerControl (c->box, c->paramId);
     const std::pair<Knob*, const char*> knobs[] = {
         { &tone, "brightness" }, { &pick, "hardness" }, { &sustain, "sustain" }, { &vibDepth, "vibdepth" }, { &glide, "glide" },
@@ -315,7 +317,7 @@ void SteelwaveEditor::showPage (int p)
         c->show (sound);
     for (auto* k : { &strum, &noise, &behind, &vibRate, &sym })
         show (*k, sound);
-    for (auto* c : { &pedalKeys, &modWheel, &aftertouch, &timing, &mpe, &bendRange, &autoBend, &legatoSlide, &wheelMode })
+    for (auto* c : { &pedalKeys, &modWheel, &aftertouch, &timing, &mpe, &bendRange, &autoBend, &legatoSlide, &wheelMode, &chordMove })
         c->show (ctl);
     for (auto* k : { &pedalSpeed, &swellBelow, &swellTime, &autoVib, &vibDelay, &slideIn, &slideFrom, &slideTime, &glideFeel, &barRange })
         show (*k, ctl);
@@ -430,6 +432,7 @@ void SteelwaveEditor::resized()
             }
             else
             {
+                choiceCell (chordMove);
                 choiceCell (wheelMode);
                 choiceCell (timing);
                 choiceCell (mpe);
@@ -509,7 +512,7 @@ void SteelwaveEditor::paint (juce::Graphics& g)
     }
     if (page == ControlsPage)
     {
-        const char* titles[] = { "SMART NOTES & PEDALS", "SWELL & VIBRATO", "SLIDES", "WHEEL, TIMING & MPE", "WHAT DOES WHAT" };
+        const char* titles[] = { "SMART NOTES & PEDALS", "SWELL & VIBRATO", "SLIDES", "CHORDS, WHEEL "WHEEL, TIMING & MPE" MPE", "WHAT DOES WHAT" };
         for (int i = 0; i < 5; ++i)
             panel (ctlAreas[(size_t) i], titles[i], i < 4);
         drawPedals (g, pedalStrip);

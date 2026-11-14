@@ -34,6 +34,7 @@ static void prepare (SteelwaveProcessor& p, double sr, int bs, bool smart = fals
         setPlain (p, "set", 0);
         setPlain (p, "sweeten", 0);
         setPlain (p, "wheel", 1); // chord move
+        setPlain (p, "chordmove", 0); // every chord in its own voicing
     }
     p.setRateAndBufferSizeDetails (sr, bs);
     p.prepareToPlay (sr, bs);
@@ -112,10 +113,10 @@ int main()
         for (auto* id : { "pedalkeys", "pedalspeed", "modwheel", "aftertouch", "swellbelow", "swelltime", "autovib", "vibdelay",
                           "slidein", "slidefrom", "slidetime", "glidefeel", "barrange", "timing", "mpe", "bendrange" })
             missing += p.apvts.getParameter (id) == nullptr;
-        for (auto* id : { "autobend", "legatoslide", "sweeten", "wheel" })
+        for (auto* id : { "autobend", "legatoslide", "sweeten", "wheel", "chordmove" })
             missing += p.apvts.getParameter (id) == nullptr;
-        const int expected = 16 + 20 + (int) swadv::params().size();
-        CHECK (missing == 0 && p.getParameters().size() == expected, "%d parameters (16 + 20 playing + %d model)", expected, (int) swadv::params().size());
+        const int expected = 16 + 21 + (int) swadv::params().size();
+        CHECK (missing == 0 && p.getParameters().size() == expected, "%d parameters (16 + 21 playing + %d model)", expected, (int) swadv::params().size());
         int offCentre = 0;
         for (const auto& a : swadv::params())
             if (std::fabs (p.apvts.getParameter (a.id)->getValue() - 0.5f) > 1e-3f)
