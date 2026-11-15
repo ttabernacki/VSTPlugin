@@ -17,6 +17,7 @@
 //                     and its slide (CC74) fades it
 
 #include "SteelString.h"
+#include "Patterns.h"
 #include "Voicing.h"
 
 namespace sw
@@ -82,6 +83,8 @@ struct EngineParams
     bool legatoSlide = true;       // a single line played legato slides along its string
     double sweeten = 0.0;          // 0..1: thirds and fifths tuned pure against the chord's root, as steel players tune
     bool wheelMelody = false;      // pitch wheel: only the top note moves, a scale step up or down; the rest hold
+    int pattern = PatOff;          // picking pattern over what's held (chord sets and smart notes)
+    int patternRate = 1;           // index into patternBeats(): 1/4, 1/8, 1/8T, 1/16, 1/16T
     int chordMove = 2;             // chord sets: 0 = every chord re-picked in its own voicing, 1 = keys played legato
                                    // bend/slide into the next chord, 2 = and so does a chord played soon after the last
 };
@@ -124,6 +127,7 @@ public:
         for (auto& st : sst_)
             st = {};
         nPicks_ = 0;
+        patRun_ = false;
         chordSlot_ = -1;
         bar_ = 0;
         wheel_ = mod_ = 0;
@@ -198,6 +202,19 @@ public:
     int smartRoot() const { return smRoot_; }
     int smartQuality() const { return smQual_; }
 
+    // --- host transport: tempo, and where the bar lines are while it plays ---------------------
+    void setTransport (double bpm, double ppq, bool playing)
+    {
+        bpm_ = bpm > 20.0 && bpm < 999.0 ? bpm : 120.0;
+        playing_ = playing;
+        if (playing)
+            ppq_ = ppq;
+    }
+    bool patternRunning() const { return patRun_; }
+    int64_t pickCount() const { return pickCount_; }     // every pick so far (tests, display)
+    int lastPickString() const { return lastPickString_; }
+    int patternStepIndex() const { return patStep_; }
+
     // --- MIDI ------------------------------------------------------------------------------
     void noteOn (int note, double vel, int ch = 1)
     {
@@ -227,7 +244,19 @@ public:
             return;
         vel = std::clamp (vel, 0.0, 1.0);
         if (smartMode())
+        {
             smartOn (note, vel);
+            if (prm_.pattern > PatOff) // the notes are picked as played; the pattern carries on from the next step
+            {
+                patVel_ = vel;
+                if (! patRun_)
+                {
+                    patRun_ = true;
+                    patStep_ = 1;
+                    patNext_ = nextPatternStep();
+                }
+            }
+        }
         else if (chordMode())
             chordOn (note, vel);
         else
@@ -350,6 +379,11 @@ public:
         const double level = std::pow (10.0, prm_.levelDb / 20.0) * kOutputScale;
         for (int i = 0; i < n; ++i)
         {
+            // the host's beat position, and the picking pattern's next step
+            if (playing_)
+                ppq_ += bpm_ / (60.0 * fs_);
+            if (patRun_ && clock_ >= patNext_)
+                patternTick();
             // pedal keys travelling
             if ((clock_ & 31) == 0)
                 movePedalKeys (32.0 / fs_);
@@ -611,6 +645,8 @@ private:
     void pick (int s, double vel)
     {
         lastPick_ = clock_;
+        ++pickCount_;
+        lastPickString_ = s;
         if (prm_.swellBelow > 0.0 && vel < prm_.swellBelow)
         {
             swell_[(size_t) s] = 0.0;
@@ -671,6 +707,7 @@ private:
             sst_[(size_t) s] = {};
         }
         nPicks_ = 0;
+        patRun_ = false;
         held_.clear();
         chordSlot_ = -1;
         smOff_.fill (0);
@@ -692,6 +729,50 @@ private:
             for (int s = 0; s < kStrings; ++s)
                 if (sst_[(size_t) s].owner < 0)
                     block (s);
+    }
+
+    // --- picking patterns ------------------------------------------------------------------
+    // the next step: on the host's grid while it plays (never sooner than half a step away), else a
+    // step from now at its tempo
+    int64_t nextPatternStep() const
+    {
+        const double stepB = patternBeats (prm_.patternRate), spb = 60.0 / bpm_ * fs_; // samples per beat
+        if (playing_)
+        {
+            const double target = std::ceil ((ppq_ + 0.5 * stepB) / stepB) * stepB;
+            return clock_ + std::max ((int64_t) 1, (int64_t) ((target - ppq_) * spb));
+        }
+        return clock_ + std::max ((int64_t) 1, (int64_t) (stepB * spb));
+    }
+    void patternTick()
+    {
+        if (prm_.pattern <= PatOff || held_.empty() || ! (chordMode() || smartMode()))
+        {
+            patRun_ = false;
+            return;
+        }
+        // what's held, low to high
+        int strs[kStrings], n = 0;
+        for (int s = 0; s < kStrings; ++s)
+            if (chordMode() ? sst_[(size_t) s].inChord : sst_[(size_t) s].owner >= 0)
+                strs[n++] = s;
+        double pitch[kStrings];
+        for (int k = 0; k < n; ++k)
+            pitch[k] = kE9Open[(size_t) strs[k]] + str_[(size_t) strs[k]].currentSemis();
+        for (int k = 1; k < n; ++k) // insertion sort: ten at most
+            for (int j = k; j > 0 && pitch[j] < pitch[j - 1]; --j)
+            {
+                std::swap (pitch[j], pitch[j - 1]);
+                std::swap (strs[j], strs[j - 1]);
+            }
+        rng_.next();
+        const uint32_t mask = patternStep (prm_.pattern, patStep_, n, rng_.s);
+        const double acc = patternAccent (prm_.pattern, patStep_);
+        for (int k = 0; k < n; ++k)
+            if ((mask >> k) & 1u)
+                schedule (strs[k], 0.003 * std::fabs (humanize()), std::clamp (patVel_ * acc * (1.0 + 0.05 * humanize()), 0.05, 1.0));
+        ++patStep_;
+        patNext_ = nextPatternStep();
     }
 
     // --- chord sets ------------------------------------------------------------------------
@@ -936,6 +1017,19 @@ private:
         // a lifted bar takes a few ms to land: pick after that, or the attack would scoop
         if (! pickNew)
             return;
+        // a picking pattern picks the chord instead of a strum: from its first step on a fresh chord,
+        // carrying on where it is through a legato change
+        if (prm_.pattern > PatOff)
+        {
+            patVel_ = vel;
+            if (! legato || ! patRun_)
+            {
+                patRun_ = true;
+                patStep_ = 0;
+                patNext_ = clock_ + (int64_t) (((barMoves || barSlideAt_ >= 0) && ! push ? kLandSec : 0.0) * fs_);
+            }
+            return;
+        }
         // pick: on a legato move only the strings that aren't already ringing
         double t = (barMoves || barSlideAt_ >= 0) && ! legato && ! push ? kLandSec : 0.0;
         for (int k = 0; k < ns; ++k)
@@ -1606,6 +1700,13 @@ private:
     std::vector<int> held_; // reserved up front: never reallocates on the audio thread
     int set_ = 0, chordSlot_ = -1, bar_ = 0;
     int64_t releasedAt_ = -1000000000;
+    int64_t pickCount_ = 0;
+    int lastPickString_ = -1;
+    // transport and picking pattern
+    double bpm_ = 120.0, ppq_ = 0.0, patVel_ = 0.7;
+    bool playing_ = false, patRun_ = false;
+    int patStep_ = 0;
+    int64_t patNext_ = 0;
     int moveCombo_ = -1, moveFrets_ = 0, chordNote_ = -1;
     std::vector<int> moveStrs_ = std::vector<int> (kStrings); // reserved: the audio thread only clears and refills it
     // Passive volume pedal: a pot between the pickup and the cable. Part-way down, the resistance it

@@ -132,13 +132,14 @@ struct Midi
             ev.push_back ({ t, [=] (SteelEngine& e) { e.controller (c, v); } });
         }
     }
-    std::vector<float> render (int set, double seconds, EngineParams p = {})
+    std::vector<float> render (int set, double seconds, EngineParams p = {}, double bpm = 120.0)
     {
         const double fs = 48000.0;
         SteelEngine e;
         e.prepare (fs);
         e.setParams (p);
         e.setSet (set);
+        e.setTransport (bpm, 0.0, false);
         std::stable_sort (ev.begin(), ev.end(), [] (const E& a, const E& b) { return a.t < b.t; });
         std::vector<float> out ((size_t) (seconds * fs));
         size_t pos = 0, k = 0;
@@ -318,6 +319,39 @@ static void engineDemos (const std::string& dir)
             t += 1.4;
         }
         writeWav16 (dir + "12_chord_moves.wav", m.render (0, t + 1.0, p), 48000.0);
+    }
+    { // 13: picking patterns at 100 BPM: a forward roll in sixteenths over I IV I V (legato moves), then a slow drift
+        Midi m;
+        EngineParams p;
+        p.keyPc = 4;
+        p.glide = 0.22;
+        p.pattern = PatForward;
+        p.patternRate = 3; // 1/16
+        p.autoVibrato = 0.3;
+        p.vibDelay = 0.8;
+        const int prog[] = { 60, 65, 60, 67 };
+        double t = 0.2;
+        for (int i = 0; i < 4; ++i)
+        {
+            m.on (t, prog[i], 0.75);
+            if (i > 0) m.off (t + 0.05, prog[i - 1]);
+            t += 2.4; // two bars of 4/4 at 100 BPM
+        }
+        m.off (t, prog[3]);
+        writeWav16 (dir + "13_pattern_roll.wav", m.render (0, t + 1.5, p, 100.0), 48000.0);
+        Midi d;
+        EngineParams q = p;
+        q.pattern = PatDrift;
+        q.patternRate = 1; // 1/8
+        q.swellBelow = 1.0;
+        q.swellTime = 0.5;
+        q.sustain = 1.9;
+        q.sympathetic = 0.9;
+        d.on (0.2, 60, 0.6);
+        d.on (5.0, 69, 0.6);
+        d.off (5.05, 60);
+        d.off (10.0, 69);
+        writeWav16 (dir + "14_pattern_drift.wav", d.render (0, 12.0, q, 100.0), 48000.0);
     }
 }
 

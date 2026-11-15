@@ -2,6 +2,7 @@
 #include "../Source/PluginEditor.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <random>
 
 static int failures = 0;
@@ -31,7 +32,7 @@ static void prepare (SteelwaveProcessor& p, double sr, int bs, bool smart = fals
 {
     if (! smart)
     {
-        setPlain (p, "set", 0);
+        p.setEngineSet (0);
         setPlain (p, "sweeten", 0);
         setPlain (p, "wheel", 1); // chord move
         setPlain (p, "chordmove", 0); // every chord in its own voicing
@@ -99,11 +100,21 @@ int main()
 {
     juce::ScopedJuceInitialiser_GUI init;
     using MM = juce::MidiMessage;
+    // a scratch settings folder (controller setup, favourites, user presets), the setup already offered
+    const auto settings = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("steelwave_test_settings");
+    settings.deleteRecursively();
+    settings.createDirectory();
+#ifdef _WIN32
+    _putenv_s ("STEELWAVE_SETTINGS_DIR", settings.getFullPathName().toRawUTF8());
+#else
+    setenv ("STEELWAVE_SETTINGS_DIR", settings.getFullPathName().toRawUTF8(), 1);
+#endif
+    settings.getChildFile ("Controller.xml").replaceWithText ("<SteelwaveController asked=\"1\"/>");
 
     std::printf ("Parameters, layouts, state\n");
     {
         SteelwaveProcessor p;
-        const char* ids[] = { "set", "key", "glide", "strum", "hardness", "brightness", "sustain", "barnoise", "vibrate", "vibdepth",
+        const char* ids[] = { "mode", "voicing", "scale", "key", "glide", "strum", "hardness", "brightness", "sustain", "barnoise", "vibrate", "vibdepth",
                               "sympathetic", "pickup", "volcc", "level", "behindbar", "voltype" };
         int missing = 0;
         for (auto* id : ids)
@@ -113,10 +124,10 @@ int main()
         for (auto* id : { "pedalkeys", "pedalspeed", "modwheel", "aftertouch", "swellbelow", "swelltime", "autovib", "vibdelay",
                           "slidein", "slidefrom", "slidetime", "glidefeel", "barrange", "timing", "mpe", "bendrange" })
             missing += p.apvts.getParameter (id) == nullptr;
-        for (auto* id : { "autobend", "legatoslide", "sweeten", "wheel", "chordmove" })
+        for (auto* id : { "autobend", "legatoslide", "sweeten", "wheel", "chordmove", "pattern", "patrate", "tempsync", "velcurve" })
             missing += p.apvts.getParameter (id) == nullptr;
-        const int expected = 16 + 21 + (int) swadv::params().size();
-        CHECK (missing == 0 && p.getParameters().size() == expected, "%d parameters (16 + 21 playing + %d model)", expected, (int) swadv::params().size());
+        const int expected = 18 + 25 + (int) swadv::params().size();
+        CHECK (missing == 0 && p.getParameters().size() == expected, "%d parameters (18 + 25 playing + %d model)", expected, (int) swadv::params().size());
         int offCentre = 0;
         for (const auto& a : swadv::params())
             if (std::fabs (p.apvts.getParameter (a.id)->getValue() - 0.5f) > 1e-3f)
@@ -125,7 +136,7 @@ int main()
                 std::printf ("    %s: default at %.3f of the knob (raw %.3f)\n", a.id, p.apvts.getParameter (a.id)->getValue(), p.apvts.getRawParameterValue (a.id)->load());
             }
         CHECK (offCentre == 0, "every advanced knob's calibrated default sits at 12 o'clock");
-        CHECK ((int) getPlain (p, "key") == 4 && (int) getPlain (p, "set") == sw::kSmartSet && p.presetName() == "Calibrated",
+        CHECK ((int) getPlain (p, "key") == 4 && p.engineSet() == sw::kSmartSet && p.presetName() == "Calibrated",
                "defaults: key of E, smart notes, the Calibrated preset");
         CHECK (p.acceptsMidi() && ! p.producesMidi(), "takes MIDI");
         juce::AudioProcessor::BusesLayout mono, stereo, withIn;
@@ -137,13 +148,30 @@ int main()
                "mono or stereo out, no input");
         setPlain (p, "key", 7);
         setPlain (p, "glide", 0.6f);
-        setPlain (p, "set", 9);
+        p.setEngineSet (9);
         juce::MemoryBlock mb;
         p.getStateInformation (mb);
         SteelwaveProcessor q;
         q.setStateInformation (mb.getData(), (int) mb.getSize());
-        CHECK ((int) getPlain (q, "key") == 7 && std::fabs (getPlain (q, "glide") - 0.6f) < 1e-3 && (int) getPlain (q, "set") == 9,
+        CHECK ((int) getPlain (q, "key") == 7 && std::fabs (getPlain (q, "glide") - 0.6f) < 1e-3 && q.engineSet() == 9 && (int) getPlain (q, "mode") == 2,
                "state round trip");
+        // a session saved before Mode / Voicing / Scale: the old Set parameter is carried over
+        for (int oldSet : { 3, 10, 12 })
+        {
+            auto st = p.apvts.copyState();
+            for (auto id : { "mode", "voicing", "scale" })
+                st.removeChild (st.getChildWithProperty ("id", id), nullptr);
+            juce::ValueTree old ("PARAM");
+            old.setProperty ("id", "set", nullptr);
+            old.setProperty ("value", oldSet, nullptr);
+            st.appendChild (old, nullptr);
+            juce::MemoryBlock ob;
+            if (auto xml = st.createXml())
+                juce::AudioProcessor::copyXmlToBinary (*xml, ob);
+            SteelwaveProcessor r;
+            r.setStateInformation (ob.getData(), (int) ob.getSize());
+            CHECK (r.engineSet() == oldSet, "old session with Set %d opens in the same mode (%d)", oldSet, r.engineSet());
+        }
     }
 
     std::printf ("Playing\n");
@@ -180,9 +208,9 @@ int main()
                                { S (0.02), MM::noteOff (1, sw::kKeyswitchLo + 8) },
                                { S (0.05), MM::noteOn (1, 48, (juce::uint8) 100) } };                // C3 -> E3
         auto x = render (p, ev, 1.0, { 256 });
-        CHECK ((int) getPlain (p, "set") == 8, "keyswitch G#1 moved the Set parameter to Single 1");
+        CHECK (p.engineSet() == 8 && (int) getPlain (p, "mode") == 2 && (int) getPlain (p, "scale") == 0, "keyswitch G#1 moved Mode to Single notes, Scale");
         CHECK (dftDb (x, hz (52), 0.4, 0.3) - dftDb (x, hz (54), 0.4, 0.3) > 20, "and C3 plays a single E3");
-        setPlain (p, "set", 2);
+        p.setEngineSet (2);
         render (p, {}, 0.05, { 256 });
         CHECK (p.uiSet.load() == 2, "moving the parameter changes the set");
     }
@@ -322,7 +350,7 @@ int main()
             return -1;
         };
         const int dawn = program ("Slow Dawn"), tight = program ("Tight & Bright (live)");
-        CHECK (swpresets::presets().size() == 30 && p.getNumPrograms() == 30, "30 factory presets");
+        CHECK (swpresets::presets().size() == 34 && p.getNumPrograms() == 34, "34 factory presets");
         {
             int bad = 0;
             for (const auto& pr : swpresets::presets())
@@ -375,7 +403,7 @@ int main()
         auto run = [&] (const char* id, float v) {
             SteelwaveProcessor p;
             prepare (p, kFs, 512);
-            setPlain (p, "set", 1); // Full: finger and thumb strings
+            p.setEngineSet (1); // Full: finger and thumb strings
             if (id) setPlain (p, id, v);
             return render (p, ev, 1.0, { 512 });
         };
@@ -408,7 +436,7 @@ int main()
     {
         SteelwaveProcessor p;
         prepare (p, kFs, 512);
-        setPlain (p, "set", 7); // Pad: 6-8 strings
+        p.setEngineSet (7); // Pad: 6-8 strings
         std::vector<Ev> ev;
         for (int i = 0; i < 20; ++i)
             ev.push_back ({ S (0.5 * i), MM::noteOn (1, 60 + (i % 7) * 2 - (i % 7 > 2), (juce::uint8) 90) });
@@ -418,22 +446,97 @@ int main()
         CHECK (sec < 5.0, "10 s of 8-string legato chords rendered in %.2f s (%.1f%% of one core)", sec, 10.0 * sec);
     }
 
+    std::printf ("Controller setup, A/B, favourites, audition, patterns\n");
+    {
+        SteelwaveProcessor p;
+        prepare (p, kFs, 256);
+        setPlain (p, "modwheel", 1); // the mod wheel works the A+B pedals: its value shows as their travel
+        auto c = p.calibration();
+        c.modCc = 74;
+        c.modLo = 0.2f;
+        c.modHi = 0.8f;
+        c.pitchCc = 16;
+        c.exprCc = 85;
+        p.setCalibration (c, false);
+        render (p, { { S (0.01), MM::controllerEvent (1, 74, 64) }, { S (0.02), MM::controllerEvent (1, 16, 127) }, { S (0.02), MM::controllerEvent (1, 85, 0) } },
+                0.4, { 256 });
+        CHECK (std::fabs (p.uiTravel[sw::PedA].load() - 0.507f) < 0.02f, "a mod slider on CC74 reaching 20-80 %% is the mod wheel, spread over its range (%.3f)",
+               p.uiTravel[sw::PedA].load());
+        CHECK (p.uiWheel.load() > 0.99f, "a pitch slider on CC16 is the pitch wheel (%.2f)", p.uiWheel.load());
+        CHECK (p.uiVolume.load() < 0.05f, "an expression pedal on CC85 is the volume pedal (%.2f)", p.uiVolume.load());
+
+        // the setup finds what moved furthest
+        p.startCapture (SteelwaveProcessor::WizMod);
+        std::vector<Ev> ev;
+        for (int i = 0; i <= 10; ++i)
+        {
+            ev.push_back ({ S (0.01 * i), MM::controllerEvent (1, 21, 10 + 11 * i) });
+            ev.push_back ({ S (0.01 * i), MM::controllerEvent (1, 1, 60 + i) });
+        }
+        render (p, ev, 0.2, { 256 });
+        const int src = p.bestSource (SteelwaveProcessor::WizMod);
+        p.finishStep (SteelwaveProcessor::WizMod, src);
+        p.wizardStep = -1;
+        CHECK (src == 21 && p.calibration().modCc == 21 && p.calibration().modHi > 0.9f && p.calibration().asked,
+               "setup: the slider moved furthest (CC21, not CC1) becomes the mod wheel, with its range");
+        SteelwaveProcessor q;
+        CHECK (q.calibration().modCc == 21, "saved for every instance on this computer");
+
+        // A/B
+        setPlain (p, "brightness", 0.2f);
+        p.abSwitch (1);
+        setPlain (p, "brightness", 0.9f);
+        p.abSwitch (0);
+        const float a = getPlain (p, "brightness");
+        p.abSwitch (1);
+        const float b = getPlain (p, "brightness");
+        CHECK (std::fabs (a - 0.2f) < 1e-3f && std::fabs (b - 0.9f) < 1e-3f, "A/B: flips between two sounds (%.2f / %.2f)", a, b);
+
+        // favourites
+        p.toggleFavourite ("Porch Roll");
+        SteelwaveProcessor f;
+        const bool fav = f.isFavourite ("Porch Roll");
+        p.toggleFavourite ("Porch Roll");
+        CHECK (fav && ! p.isFavourite ("Porch Roll"), "favourites are kept, and can be removed");
+
+        // audition: a phrase, with nothing played
+        SteelwaveProcessor au;
+        prepare (au, kFs, 512);
+        au.audition();
+        auto x = render (au, {}, 3.0, { 512 });
+        CHECK (rms (x, 0.1, 0.8) > 0.003 && rms (x, 1.0, 2.5) > 0.003, "audition plays a phrase (I IV V I)");
+
+        // a picking pattern through the plugin (no host transport: its own tempo)
+        SteelwaveProcessor pt;
+        prepare (pt, kFs, 512);
+        setPlain (pt, "pattern", 1);
+        render (pt, { { S (0.01), MM::noteOn (1, 60, (juce::uint8) 100) } }, 1.2, { 512 });
+        CHECK (pt.uiPatternStep.load() >= 4, "a held chord rolls (step %d)", pt.uiPatternStep.load());
+    }
+
     std::printf ("Editor\n");
     {
         SteelwaveProcessor p;
         prepare (p, kFs, 512);
         std::unique_ptr<juce::AudioProcessorEditor> ed (p.createEditor());
-        ed->setSize (900, 600);
+        ed->setSize (SteelwaveEditor::kW, SteelwaveEditor::kH);
         auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
-        CHECK (img.getWidth() == 900, "editor opens and paints");
+        CHECK (img.getWidth() == SteelwaveEditor::kW, "editor opens and paints");
+        ed->setSize (SteelwaveEditor::kW * 6 / 5, SteelwaveEditor::kH * 6 / 5);
+        CHECK (ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f).getWidth() == SteelwaveEditor::kW * 6 / 5, "and scales up");
+        ed->setSize (SteelwaveEditor::kW, SteelwaveEditor::kH);
         if (auto* se = dynamic_cast<SteelwaveEditor*> (ed.get())) se->showPage (SteelwaveEditor::AdvancedPage);
         auto img2 = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
-        CHECK (img2.getWidth() == 900, "advanced page opens and paints");
+        CHECK (img2.getWidth() == SteelwaveEditor::kW, "advanced page opens and paints");
         if (auto* se = dynamic_cast<SteelwaveEditor*> (ed.get())) se->showPage (SteelwaveEditor::SoundPage);
-        CHECK (ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f).getWidth() == 900, "sound page opens and paints");
+        CHECK (ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f).getWidth() == SteelwaveEditor::kW, "sound page opens and paints");
         if (auto* se = dynamic_cast<SteelwaveEditor*> (ed.get())) se->showPage (SteelwaveEditor::ControlsPage);
         auto img3 = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
-        CHECK (img3.getWidth() == 900, "controls page opens and paints");
+        if (auto* se = dynamic_cast<SteelwaveEditor*> (ed.get())) se->showSetup (true);
+        CHECK (ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f).getWidth() == SteelwaveEditor::kW && p.wizardStep.load() == 0,
+               "controller setup opens and listens");
+        if (auto* se = dynamic_cast<SteelwaveEditor*> (ed.get())) se->showSetup (false);
+        CHECK (img3.getWidth() == SteelwaveEditor::kW, "controls page opens and paints");
     }
 
     std::printf ("\n%s (%d failure%s)\n", failures ? "FAILED" : "ALL PASSED", failures, failures == 1 ? "" : "s");

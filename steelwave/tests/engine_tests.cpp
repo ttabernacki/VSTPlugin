@@ -1166,6 +1166,117 @@ int main()
         }
     }
 
+    std::printf ("Picking patterns, tempo, velocity\n");
+    {
+        struct Rig
+        {
+            SteelEngine e;
+            double now = 0;
+            std::vector<float> buf = std::vector<float> (16);
+            std::vector<std::pair<double, int>> picks; // time, string
+            explicit Rig (EngineParams q, int set = 0) { e.prepare (kFs); e.setParams (q); e.setSet (set); }
+            void to (double t)
+            {
+                while (now < t)
+                {
+                    const auto before = e.pickCount();
+                    e.process (buf.data(), 16);
+                    now += 16.0 / kFs;
+                    if (e.pickCount() != before)
+                        picks.push_back ({ now, e.lastPickString() });
+                }
+            }
+        };
+        EngineParams q = p;
+        q.pattern = PatForward;
+        q.patternRate = 1; // 1/8
+        {
+            // free-running at the host's tempo (stopped): a forward roll over the Classic I (strings 6 5 4 3)
+            Rig r (q);
+            r.e.setTransport (120.0, 0.0, false);
+            r.e.noteOn (60, 0.8);
+            r.to (1.6);
+            bool order = r.picks.size() >= 6;
+            const int want[] = { 5, 3, 2, 5, 3, 2 }; // low, middle, high (G# E G# of strings 6 4 3)
+            for (size_t i = 0; order && i < 6; ++i)
+                order = r.picks[i].second == want[i];
+            double gap = r.picks.size() >= 4 ? (r.picks[3].first - r.picks[0].first) / 3.0 : 0.0;
+            CHECK (order && std::fabs (gap - 0.25) < 0.01, "forward roll in eighths at 120 bpm: thumb, index, middle, every %.0f ms (%zu picks)", 1000 * gap, r.picks.size());
+            const size_t n = r.picks.size();
+            r.e.noteOff (60);
+            r.to (2.6);
+            CHECK (! r.e.patternRunning() && r.picks.size() <= n + 1, "it stops when the chord is let go");
+        }
+        {
+            // the host playing: steps land on its grid, not a step after the key
+            Rig r (q);
+            r.e.setTransport (120.0, 0.3, true); // 0.3 beats in
+            r.e.noteOn (60, 0.8);
+            r.to (1.0);
+            // the first step at once, the next at beat 1.0 (0.35 s later), then every 0.25 s
+            const bool ok = r.picks.size() >= 3 && r.picks[0].first < 0.02 && std::fabs (r.picks[1].first - 0.35) < 0.01
+                            && std::fabs (r.picks[2].first - 0.60) < 0.01;
+            CHECK (ok, "host playing: steps on its grid (%.3f, %.3f, %.3f s)", r.picks.size() > 0 ? r.picks[0].first : -1.0,
+                   r.picks.size() > 1 ? r.picks[1].first : -1.0, r.picks.size() > 2 ? r.picks[2].first : -1.0);
+        }
+        {
+            // pinch & roll: low and high together on the beat
+            EngineParams pp = q;
+            pp.pattern = PatPinch;
+            Rig r (pp);
+            r.e.noteOn (60, 0.8);
+            r.to (0.05);
+            CHECK (r.picks.size() >= 1 && r.e.pickCount() == 2, "pinch: two strings at once on the beat (%d)", (int) r.e.pickCount());
+        }
+        {
+            // a legato chord move carries the pattern on, over the moved strings
+            Rig r (q);
+            r.e.noteOn (60, 0.8);
+            r.to (0.6);
+            const int step = r.e.patternStepIndex();
+            r.e.noteOn (65, 0.8);
+            r.e.noteOff (60);
+            r.to (1.2);
+            CHECK (r.e.patternRunning() && r.e.patternStepIndex() > step + 1, "a legato change keeps the pattern going (step %d -> %d)", step, r.e.patternStepIndex());
+        }
+        {
+            // smart notes: a held triad, picked as played, then rolled
+            Rig r (q, kSmartSet);
+            for (int nn : { 60, 64, 67 })
+                r.e.noteOn (nn, 0.8);
+            r.to (1.3);
+            CHECK (r.e.patternRunning() && r.e.pickCount() >= 3 + 4, "smart notes: a held chord rolls (%d picks)", (int) r.e.pickCount());
+        }
+        {
+            // every pattern, every set, random holding: stays finite and stops with the keys
+            bool ok = true;
+            for (int pat = 1; pat < kPatterns; ++pat)
+            {
+                EngineParams pp = q;
+                pp.pattern = pat;
+                pp.patternRate = pat % kPatternRates;
+                Rig r (pp, pat % 2 ? 1 : kSmartSet);
+                r.e.noteOn (62, 0.7);
+                r.e.noteOn (65, 0.7);
+                r.e.noteOn (69, 0.7);
+                r.to (0.8);
+                for (int nn : { 62, 65, 69 })
+                    r.e.noteOff (nn);
+                r.to (1.4);
+                for (float x : r.buf)
+                    ok = ok && std::isfinite (x);
+                ok = ok && ! r.e.patternRunning() && r.picks.size() >= 2;
+            }
+            CHECK (ok, "all %d patterns play and stop", kPatterns - 1);
+        }
+        CHECK (std::fabs (syncSeconds (0.55, 120.0) - 0.5) < 1e-9 && std::fabs (syncSeconds (1.1, 120.0) - 1.0) < 1e-9
+                   && std::fabs (syncRate (5.5, 120.0) - 6.0) < 1e-9,
+               "tempo sync at 120: 0.55 s -> 1/4 (0.5 s), 1.1 s -> 1/2 (1.0 s), 5.5 Hz vibrato -> 6 Hz (1/16 triplets)");
+        CHECK (std::fabs (shapeVelocity (0.5, 0.0) - 0.5) < 1e-9 && shapeVelocity (0.5, 1.0) < 0.25 && shapeVelocity (0.5, -1.0) > 0.7
+                   && std::fabs (shapeVelocity (0.8, 0.0, 0.1, 0.8) - 1.0) < 1e-9 && shapeVelocity (0.1, 0.0, 0.1, 0.8) <= 0.02,
+               "velocity: linear, heavy, light; a pad's real range (0.1-0.8) spread over 0..1");
+    }
+
     std::printf ("Stability\n");
     {
         std::mt19937 g (11);

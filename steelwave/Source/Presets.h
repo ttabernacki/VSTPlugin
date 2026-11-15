@@ -21,7 +21,7 @@ struct Preset
 // parameters a preset never touches
 inline bool isRig (const juce::String& id)
 {
-    static const char* rig[] = { "set", "key", "volcc", "voltype", "pedalkeys", "modwheel", "aftertouch", "mpe", "bendrange", "level", "wheel" };
+    static const char* rig[] = { "mode", "voicing", "scale", "key", "velcurve", "volcc", "voltype", "pedalkeys", "modwheel", "aftertouch", "mpe", "bendrange", "level", "wheel" };
     for (auto* r : rig)
         if (id == r)
             return true;
@@ -95,6 +95,16 @@ inline const std::vector<Preset>& presets()
         { "Utility", "Tight & Bright (live)", { { "timing", 1.0f }, { "hardness", 0.9f }, { "brightness", 0.75f }, { "strum", 6.0f }, { "glide", 0.15f },
                                                 { "barnoise", 0.3f } } },
         { "Utility", "Equal Tempered", { { "sweeten", 0.0f } } },
+        // --- Patterns: a picking hand that plays what you hold, in time ------------------------
+        { "Patterns", "Porch Roll", { { "pattern", 1.0f }, { "patrate", 3.0f }, { "hardness", 0.75f }, { "brightness", 0.55f }, { "sustain", 1.1f },
+                                       { "vibdepth", 0.12f }, { "autovib", 0.3f }, { "glide", 0.25f } } },
+        { "Patterns", "Travis Steel", { { "pattern", 4.0f }, { "patrate", 1.0f }, { "hardness", 0.8f }, { "brightness", 0.5f }, { "sustain", 1.0f },
+                                         { "barnoise", 0.5f }, { "glide", 0.2f } } },
+        { "Patterns", "Slow Arpeggio", { { "pattern", 6.0f }, { "patrate", 1.0f }, { "swellbelow", 0.5f }, { "swelltime", 0.4f }, { "sustain", 1.7f },
+                                          { "brightness", 0.5f }, { "sympathetic", 0.9f }, { "autovib", 0.4f }, { "vibdelay", 0.8f } } },
+        { "Patterns", "Drift Field", { { "pattern", 7.0f }, { "patrate", 1.0f }, { "swellbelow", 1.0f }, { "swelltime", 0.9f }, { "sustain", 2.0f },
+                                        { "brightness", 0.45f }, { "hardness", 0.4f }, { "sympathetic", 1.0f }, { "behindbar", 0.8f }, { "tempsync", 1.0f } } },
+
         { "Utility", "Every Key Picks", { { "autobend", 0.0f }, { "legatoslide", 0.0f }, { "chordmove", 0.0f } } },
     };
     return p;

@@ -2,21 +2,36 @@
 // Usage: steelwave_ui_snapshot out_dir
 #include "../Source/PluginEditor.h"
 
+#include <cstdlib>
+
 int main (int argc, char** argv)
 {
     if (argc < 2)
         return 2;
     juce::ScopedJuceInitialiser_GUI init;
+    // snapshots use a scratch settings folder, with the controller setup already offered (except the setup shot)
+    const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("steelwave_ui_settings");
+    dir.deleteRecursively();
+    dir.createDirectory();
+#ifdef _WIN32
+    _putenv_s ("STEELWAVE_SETTINGS_DIR", dir.getFullPathName().toRawUTF8());
+#else
+    setenv ("STEELWAVE_SETTINGS_DIR", dir.getFullPathName().toRawUTF8(), 1);
+#endif
+    dir.getChildFile ("Controller.xml").replaceWithText ("<SteelwaveController asked=\"1\"/>");
     struct Shot { const char* name; int set; int note; int wheel; int page; };
     const Shot shots[] = { { "ui_play_smart", sw::kSmartSet, 60, 8192, 0 }, { "ui_play_chords", 0, 60, 12000, 0 }, { "ui_sound", sw::kSmartSet, 60, 8192, 1 },
-                           { "ui_playing", sw::kSmartSet, 60, 8192, 2 }, { "ui_model", sw::kSmartSet, 60, 8192, 3 } };
+                           { "ui_playing", sw::kSmartSet, 60, 8192, 2 }, { "ui_model", sw::kSmartSet, 60, 8192, 3 },
+                           { "ui_single", sw::kChordSets, 64, 8192, 0 }, { "ui_setup", sw::kSmartSet, 60, 8192, 4 } };
     for (const auto& s : shots)
     {
         SteelwaveProcessor proc;
         proc.setRateAndBufferSizeDetails (48000.0, 512);
         proc.prepareToPlay (48000.0, 512);
-        auto* set = proc.apvts.getParameter ("set");
-        set->setValueNotifyingHost (set->convertTo0to1 ((float) s.set));
+        proc.setEngineSet (s.set);
+        if (s.page == 0 && s.set == 0)
+            if (auto* pat = proc.apvts.getParameter ("pattern"))
+                pat->setValueNotifyingHost (pat->convertTo0to1 (1.0f));
         juce::AudioBuffer<float> buf (2, 512);
         for (int i = 0; i < 60; ++i)
         {
@@ -33,9 +48,12 @@ int main (int argc, char** argv)
             proc.processBlock (buf, midi);
         }
         std::unique_ptr<juce::AudioProcessorEditor> ed (proc.createEditor());
-        ed->setSize (900, 600);
+        ed->setSize (SteelwaveEditor::kW, SteelwaveEditor::kH);
         if (auto* se = dynamic_cast<SteelwaveEditor*> (ed.get()))
-            se->showPage (s.page);
+        {
+            se->showSetup (s.page == 4);
+            se->showPage (s.page == 4 ? 0 : s.page);
+        }
         auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
         juce::File f (juce::String (argv[1]) + "/" + s.name + ".png");
         f.deleteFile();

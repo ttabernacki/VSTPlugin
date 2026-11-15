@@ -85,6 +85,34 @@ jobs:
             pluginval/pluginval.exe --strictness-level 10 --validate-in-process --timeout-ms 180000 "$p"
           done
 
+      # Code signing (Steelwave): with a certificate in the repository's secrets, the plug-in, the app and
+      # the installer are signed, so Windows SmartScreen trusts them. Without one, everything builds unsigned.
+      #   WINDOWS_CERT_PFX: the .pfx certificate, base64-encoded    WINDOWS_CERT_PASSWORD: its password
+      - name: Code signing certificate
+        id: cert
+        shell: pwsh
+        env:
+          CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+        run: |
+          if ($env:CERT_PFX) {
+            [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\cert.pfx", [Convert]::FromBase64String($env:CERT_PFX))
+            "present=true" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Host "No WINDOWS_CERT_PFX secret: building unsigned"
+            "present=false" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Sign Steelwave plug-in and app
+        if: steps.cert.outputs.present == 'true'
+        shell: pwsh
+        env:
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          & $signtool sign /f "$env:RUNNER_TEMP\cert.pfx" /p $env:CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+            "dist\steelwave\Steelwave.vst3\Contents\x86_64-win\Steelwave.vst3" "dist\steelwave\Steelwave.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - uses: actions/upload-artifact@v4
         with:
           name: OrbitPan-windows
@@ -113,6 +141,19 @@ jobs:
           if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
           & $iscc "/DAppVersion=1.0.0" "/DSrc=$PWD\dist\steelwave" "steelwave\installer\Steelwave.iss"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Sign Steelwave installer
+        if: steps.cert.outputs.present == 'true'
+        shell: pwsh
+        env:
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          Get-ChildItem steelwave\installer\Output\*.exe | ForEach-Object {
+            & $signtool sign /f "$env:RUNNER_TEMP\cert.pfx" /p $env:CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $_.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          Remove-Item "$env:RUNNER_TEMP\cert.pfx"
 
       - uses: actions/upload-artifact@v4
         with:

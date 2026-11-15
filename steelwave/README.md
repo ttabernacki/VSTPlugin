@@ -5,11 +5,17 @@ every sound is synthesised. The output is dry, DI-style mono for your own amp an
 
 You play ordinary notes and chords, and the instrument finds them on a real 10-string E9 neck: one bar
 shared by all strings, A/B/C pedals and four knee levers. Bends and slides come from how you move
-your fingers. A second mode gives one key per chord or scale note.
+your fingers. Two more modes give one key per chord (Chords) or per scale note (Single notes).
 
 **Install:** run `Steelwave-1.0.0-Windows-Setup.exe` (the `Steelwave-windows-installer` CI artifact). It
 puts the VST3 in `Common Files\VST3` and the standalone app in `Program Files\Steelwave`. The installer
-is not code-signed, so Windows SmartScreen will ask you to confirm.
+is code-signed only when the build has a certificate (see "Code signing" below); unsigned, Windows
+SmartScreen will ask you to confirm.
+
+**First launch:** Controller setup opens. It finds your pitch slider, mod slider, expression pedal,
+aftertouch and velocity range one at a time (move each, click Next; Skip what you don't have) and fits
+Steelwave to the range each really reaches. The result is saved for every Steelwave on the computer
+(`%APPDATA%\Steelwave\Controller.xml`). Run it again from Settings > Playing.
 
 ## Smart notes (the default mode)
 Play as you would a piano. The engine puts each note on the string that needs the least pulling at the
@@ -24,12 +30,12 @@ current bar position, preferring grips the real pedals and levers can hold.
   I to IV move. Notes pressed together (within about 45 ms) are a chord, not a bend.
 - **Legato slides:** a single line played legato slides along its string, moving the bar. Once a note
   has rung for a while, the slide to the next one is also picked lightly, so a line doesn't die away.
-- **Pitch wheel**, two modes (Settings > Playing > Pitch wheel), both in smart notes and chord sets:
+- **Pitch wheel**, two modes (Settings > Playing > Pitch wheel), in Smart notes and Chords:
   - *Melody note* (default): only the top note of what you hold moves, a scale step up or down in the
     Key setting, and the rest holds. One voice bending against held ones is the classic steel sound.
   - *Chord move*: bends along the scale of the Key setting. With a chord held, up takes the third and
     fifth up a scale step (I to IV) and down takes the root down a step (I to iii). With no chord,
-    every note moves a scale step. In chord sets it moves to the chord a 4th up or a 3rd up.
+    every note moves a scale step. In Chords it moves to the chord a 4th up or a 3rd up.
 - **Range:** A2 to B6. Notes outside it fold in by octaves.
 - **Sweeten:** tunes thirds and fifths pure against the chord's root (a major third is 13.7 cents
   flat), the way steel players tune. 60% by default; 0 is equal temperament.
@@ -37,16 +43,33 @@ current bar position, preferring grips the real pedals and levers can hold.
 Auto bend and Legato slide can each be switched off (Settings > Playing).
 
 ## Interface
-- **Play page:** Mode, Key, eight knobs (Tone, Pick, Sustain, Vibrato, Glide, Swell, Sweeten, Level) and
-  the neck, which shows the bar, the ringing strings and notes, the chord, the pedals and levers, the
-  wheel and the volume pedal.
+The window can be resized (drag the corner); everything scales.
+- **Play page:**
+  - **Mode** (Smart notes, Chords, Single notes), with **Chord voicing** (Classic, Full, High, Low,
+    Close, Octave up, Wide, Pad) or **Single-note set** beside it, **Key**, and the **Picking pattern**
+    and its **Rate**.
+  - Eight knobs: Tone, Pick, Sustain, Vibrato, Glide, Swell, Sweeten, Level.
+  - The neck: the bar, the ringing strings and their notes, the chord, the last chord change (which
+    pedals, and whether the bar slid), the pattern with a beat light, the pedals and levers, the wheel
+    and the volume pedal.
+  - **Keyboard:** one octave, labelled with what each key plays. In Chords: the chord, its numeral, and
+    the pedals and fret of its voicing, with the chord playing lit. In Smart notes: the key's scale and
+    the chord you hold. In Single notes: each white key's scale note and what it bends to.
+- **Header:** CPU load and the host's tempo (lit while it plays), at the right.
 - **Settings:** three sub-pages. *Sound* has strum, bar noise, behind-bar, vibrato rate, sympathetic
   strings, pickup and volume pedal. *Playing* is described under "Controls page" below. *Model* is the
   23 calibration knobs under "Advanced page".
-- **Presets** (header): 30 factory presets in four categories (Ambient 12, Americana 10, Classic 4,
-  Utility 4), your own presets (Save as..., My presets, Delete), and < > to step through them. Factory
-  presets also answer MIDI program change. A preset sets the sound and feel but leaves your rig alone:
-  mode, key, controller setup and level. Your presets are files in `%APPDATA%\Steelwave\Presets`.
+- **Presets** (header): 34 factory presets in five categories (Ambient 12, Americana 10, Classic 4,
+  Patterns 4, Utility 4), your own presets (Save as..., My presets, Delete), and < > to step through
+  them. Factory presets also answer MIDI program change. A preset sets the sound and feel but leaves
+  your rig alone: mode, voicing, key, controller setup, velocity curve and level. Your presets are
+  files in `%APPDATA%\Steelwave\Presets`.
+  - **Star:** favourite the current preset. Favourites come first in the preset menu.
+  - **A / B:** two sounds to flip between. Tweak one, click the other side, compare. **A>B** copies the
+    current side to the other.
+  - **PLAY IT:** plays a short phrase in the current mode, so you can hear a preset without playing.
+    Chords: I IV V I. Smart notes: the key's chord with a melody note bent up and back. Single notes: up
+    the scale.
 - **MIDI learn** (header): click a control, then move a knob, slider or pedal on your controller.
 
 ## Controls, all modes
@@ -54,8 +77,8 @@ Auto bend and Legato slide can each be switched off (Settings > Playing).
 | Input | Does |
 |---|---|
 | **B0** (MIDI 23) | Keyswitch: smart notes |
-| **C1-G1** (MIDI 24-31) | Keyswitch: chord sets 1-8 |
-| **G#1-B1** (32-35) | Keyswitch: single-note sets 1-4 |
+| **C1-G1** (MIDI 24-31) | Keyswitch: Chords, voicings 1-8 |
+| **G#1-B1** (32-35) | Keyswitch: Single notes, sets 1-4 |
 | **MIDI 36-42** | Pedal keys (on by default; the lowest 7 keys of a 61-key board): A, B, C, LKL, LKR, RKL, RKR. Hold them like pedals: they travel like pedals (hit harder for a faster pedal, ~80-250 ms) and land on their stops |
 | **MIDI 43 and up** | Play (layout below; the octave doesn't matter for chords). With pedal keys off, from MIDI 36 |
 | **Pitch wheel** | Bend (below) |
@@ -65,7 +88,37 @@ Auto bend and Legato slide can each be switched off (Settings > Playing).
 | **Sustain, CC64** | Strings ring after you let go (otherwise letting go is a palm block) |
 | **CC20-26** | The real E9 pedals and levers on top of anything: A, B, C, LKL, LKR, RKL, RKR |
 
-## Chord sets (the second mode)
+## Picking patterns
+A picking pattern plays what you hold, one step at a time, in time with the host. It works in Chords
+and Smart notes. In Chords, the pattern picks the chord instead of a strum. In Smart notes, notes are
+picked as you play them and the pattern carries on from there. A legato chord change keeps the
+pattern going over the moved strings. Letting go of the keys stops it.
+
+| Pattern | Steps (strings held, low to high) |
+|---|---|
+| Forward roll | thumb (lowest), index (middle), middle finger (highest) |
+| Backward roll | highest, middle, lowest |
+| Pinch & roll | lowest + highest together, middle, highest, middle |
+| Alternating thumb | lowest + highest, middle, second lowest, highest (the bass alternates) |
+| Arpeggio up / up-down | each string in turn |
+| Drift (ambient) | a random string, about a third of the off-beat steps left out, picked softer |
+
+- **Rate:** 1/4, 1/8, 1/8 triplet, 1/16, 1/16 triplet, at the host's tempo (120 BPM if it has none).
+- **Timing:** while the host plays, steps land on its beat grid. The first step is picked as you press
+  the key, and the next falls on the grid at least half a step later. Stopped, it runs from the key.
+- **Dynamics:** the beat is picked a little harder than the steps between.
+
+## Tempo sync
+**Tempo sync** (Settings > Playing) snaps the vibrato rate, swell time, glide, slide time and vibrato
+delay to the nearest note length at the host's tempo (1/32 to 4 bars, triplets and dotted included).
+The knobs still choose the length; it just lands on the beat.
+
+## Velocity
+**Velocity curve** (Settings > Playing): Light (a soft touch picks hard) to Heavy (it takes a hard
+hit), Linear in the middle. Controller setup finds the range your keys really reach, and that range
+becomes the whole pick range before the curve is applied.
+
+## Chords (the second mode)
 The layout is relative to the key, read like C major: white keys are I ii iii IV V vi vii°.
 Black keys:
 - C#: I in another voicing
@@ -125,7 +178,7 @@ up a whole step.
 In the key of E, the Classic I is open E at the nut: wheel up gives A+B, wheel down gives LKR. Other
 keys move the bar (kept between frets 0 and 22).
 
-## Single-note sets
+## Single notes
 - **White keys:** the major scale of the key (C3 plays the root near E3). They bend with the wheel to
   the next or previous scale note.
 - **Black keys:** the white key below them, held still and on another string where possible. Hold one
@@ -144,7 +197,8 @@ How it's played:
 
 - **Slides:** **Slide-in** (notes softer than a set velocity, or every note, slide up into pitch after the pick), **Slide from** (how far below, in semitones) and **Slide time**. **Glide feel**: legato slides take longer for bigger jumps and less for harder playing. **Bar range**: how far the mod wheel's bar slide goes (1-12 frets).
 - **MPE** (channels 2-16; channel 1 stays the master for the wheel, pedals and CCs). Each finger's pitch slide moves the bar (chords) or its own string (single notes), its pressure gives it its own vibrato, and its slide (CC74) fades it. **MPE bend range** sets 12, 24 or 48 semitones (48 is the MPE default).
-- **Chord changes:** Always move, Move when legato or Re-pick (see Chord sets).
+- **Chord changes:** Always move, Move when legato or Re-pick (see Chords).
+- **Touch & tempo:** **Velocity curve**, **Tempo sync**, and **Controller setup...**.
 - **Timing:** Natural, or Tight for live playing (picks let go sooner and chords strum tighter).
 
 Vibrato depth is the strongest of the mod wheel, aftertouch and auto vibrato.
@@ -168,7 +222,7 @@ pedals and levers live and summarises what each control does. The same pedal str
 | Sympathetic | 0-100 % | Unpicked strings ringing along through the bridge |
 | Level | -24..+12 dB | |
 
-Also: Set, Key, Pickup (single coil / humbucker), the Volume pedal CC, and Pedal type (passive 250k,
+Also: Mode, Voicing, Key, Pickup (single coil / humbucker), the Volume pedal CC, and Pedal type (passive 250k,
 passive 500k, or active). The panel shows the neck, with
 the bar, the strings ringing and their notes, the current chord, and what the wheel will do (which
 pedals, or "voice-led").
@@ -241,3 +295,14 @@ The tests cover:
 - host-style tests: parameters, state, keyswitches, bit-identical output at any block size, sample
   rates, bypass, the editor and both its pages, and every Advanced knob at both ends of its range
   (finite, under 0 dBFS, and audibly changing the sound) (`SteelwavePluginTests`).
+
+## Code signing
+The Windows build signs the plug-in, the standalone app and the installer when the repository has a
+code-signing certificate in its Actions secrets. Without one, everything builds unsigned.
+- `WINDOWS_CERT_PFX`: the certificate (.pfx), base64-encoded (`base64 -w0 cert.pfx`, or
+  `[Convert]::ToBase64String([IO.File]::ReadAllBytes("cert.pfx"))` in PowerShell).
+- `WINDOWS_CERT_PASSWORD`: its password.
+
+An OV certificate builds SmartScreen reputation over time as people install it. An EV certificate is
+trusted immediately, but usually lives on a hardware token or a cloud signing service, which needs a
+different signing step. Every build also runs pluginval at strictness 10 on the VST3.
