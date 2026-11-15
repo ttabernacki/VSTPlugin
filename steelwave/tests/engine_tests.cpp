@@ -71,7 +71,8 @@ static std::vector<float> render (SteelEngine& e, Script sc, double seconds)
 }
 static std::vector<float> render (EngineParams p, int set, Script sc, double seconds)
 {
-    SteelEngine e;
+    auto eHeap_ = std::make_unique<SteelEngine>();
+    SteelEngine& e = *eHeap_;
     e.prepare (kFs);
     e.setParams (p);
     e.setSet (set);
@@ -251,7 +252,8 @@ int main()
         Script sc;
         sc.at (0.05, [] (SteelEngine& e) { e.noteOn (60, 0.8); });
         sc.at (1.0, [] (SteelEngine& e) { e.noteOn (67, 0.8); }); // V while I is held
-        SteelEngine e;
+        auto eHeap_ = std::make_unique<SteelEngine>();
+        SteelEngine& e = *eHeap_;
         e.prepare (kFs);
         e.setParams (p);
         auto x = render (e, sc, 2.2);
@@ -393,7 +395,8 @@ int main()
         CHECK (shared < pairs / 2, "a black key mostly holds its note on a different string from the bending white key (%d of %d share one)", shared, pairs);
         Script ks;
         ks.at (0.01, [] (SteelEngine& e) { e.noteOn (kKeyswitchLo + 9, 1.0); });
-        SteelEngine e;
+        auto eHeap_ = std::make_unique<SteelEngine>();
+        SteelEngine& e = *eHeap_;
         e.prepare (kFs);
         render (e, ks, 0.1);
         CHECK (e.currentSet() == 9, "keyswitch G#1+1 (A1) selects single set 2");
@@ -413,7 +416,8 @@ int main()
     {
         // hold an E chord (strings 3 4 5 6), move the wheel, read string pitches
         auto hold = [&] (std::function<void (Script&)> moves, double until, std::vector<std::pair<double, double>>* trace = nullptr, int traceString = -1) {
-            SteelEngine e;
+            auto eHeap_ = std::make_unique<SteelEngine>();
+            SteelEngine& e = *eHeap_;
             e.prepare (kFs);
             e.setParams (p);
             Script sc;
@@ -469,7 +473,8 @@ int main()
         // run an engine with timed events, sampling one string's pitch (semitones) as it goes
         auto play = [&] (EngineParams q, std::function<void (Script&)> moves, double until, int traceString,
                          std::vector<std::pair<double, double>>& trace, std::vector<float>* audio = nullptr) {
-            SteelEngine e;
+            auto eHeap_ = std::make_unique<SteelEngine>();
+            SteelEngine& e = *eHeap_;
             e.prepare (kFs);
             e.setParams (q);
             Script sc;
@@ -514,7 +519,8 @@ int main()
         {
             EngineParams q = p;
             q.pedalKeys = false;
-            SteelEngine e;
+            auto eHeap_ = std::make_unique<SteelEngine>();
+            SteelEngine& e = *eHeap_;
             e.prepare (kFs);
             e.setParams (q);
             std::vector<float> b (4800);
@@ -571,7 +577,8 @@ int main()
     std::printf ("Slides, timing, MPE\n");
     {
         auto trace = [&] (EngineParams q, std::function<void (Script&)> moves, double until, int str, std::vector<float>* audio = nullptr) {
-            SteelEngine e;
+            auto eHeap_ = std::make_unique<SteelEngine>();
+            SteelEngine& e = *eHeap_;
             e.prepare (kFs);
             e.setParams (q);
             Script sc;
@@ -729,7 +736,8 @@ int main()
         EngineParams q = p;
         q.keyPc = 0; // C: the wheel's scale
         {
-            Rig r (q);
+            auto rHeap_ = std::make_unique<Rig> (q); // engines on the heap: MSVC gives each local its own stack slot
+            Rig& r = *rHeap_;
             r.e.noteOn (60, 0.7);
             r.run (0.3);
             CHECK (r.sounds ({ 60 }), "one key, one note: C4 sounds C4");
@@ -738,7 +746,8 @@ int main()
             CHECK (rms (r.audio, 0.6, 0.7) < 0.01 * rms (r.audio, 0.1, 0.3), "letting go blocks it");
         }
         {
-            Rig r (q);
+            auto rHeap_ = std::make_unique<Rig> (q); // engines on the heap: MSVC gives each local its own stack slot
+            Rig& r = *rHeap_;
             for (int n : { 60, 64, 67 }) r.e.noteOn (n, 0.7);
             r.run (0.4);
             CHECK (r.sounds ({ 60, 64, 67 }), "C-E-G together sounds C major");
@@ -777,14 +786,16 @@ int main()
             CHECK (r.sounds ({ 59, 64, 67 }, 0.06), "wheel down: the root drops a step, B-E-G (I to iii)");
         }
         {
-            Rig r (q);
+            auto rHeap_ = std::make_unique<Rig> (q); // engines on the heap: MSVC gives each local its own stack slot
+            Rig& r = *rHeap_;
             r.e.noteOn (60, 0.7);
             r.e.noteOn (62, 0.7);
             r.run (0.3);
             CHECK (r.sounds ({ 60, 62 }), "C and D pressed together: both sound (a chord, not a bend)");
         }
         {
-            Rig r (q);
+            auto rHeap_ = std::make_unique<Rig> (q); // engines on the heap: MSVC gives each local its own stack slot
+            Rig& r = *rHeap_;
             r.e.noteOn (60, 0.7);
             r.run (0.3);
             const int bar0 = r.e.bar();
@@ -793,7 +804,8 @@ int main()
             CHECK (r.sounds ({ 67 }) && r.e.bar() == bar0 + 7, "a single line played legato: C slides up the string to G (bar +7)");
             {
                 // a long line keeps its level: slides after the note has rung a while are picked lightly too
-                Rig l (q);
+                auto lHeap_ = std::make_unique<Rig> (q); // engines on the heap: MSVC gives each local its own stack slot
+                Rig& l = *lHeap_;
                 l.e.noteOn (60, 0.7);
                 l.run (0.7);
                 const int line[] = { 64, 67, 69, 67, 64, 62 };
@@ -808,7 +820,8 @@ int main()
             EngineParams off = q;
             off.legatoSlide = false;
             off.autoBend = false;
-            Rig r2 (off);
+            auto r2Heap_ = std::make_unique<Rig> (off); // engines on the heap: MSVC gives each local its own stack slot
+            Rig& r2 = *r2Heap_;
             r2.e.noteOn (60, 0.7);
             r2.run (0.3);
             r2.e.noteOn (62, 0.7);
@@ -818,7 +831,8 @@ int main()
         {
             EngineParams sw = q;
             sw.sweeten = 1.0;
-            Rig r (sw);
+            auto rHeap_ = std::make_unique<Rig> (sw); // engines on the heap: MSVC gives each local its own stack slot
+            Rig& r = *rHeap_;
             for (int n : { 60, 64, 67 }) r.e.noteOn (n, 0.7);
             r.run (0.4);
             auto pp = r.pitches();
@@ -826,16 +840,19 @@ int main()
                    "sweetened: the third is %.1f cents and the fifth %+.1f cents from equal temperament", pp.size() == 3 ? 100 * (pp[1] - 64) : 0.0, pp.size() == 3 ? 100 * (pp[2] - 67) : 0.0);
         }
         {
-            Rig r (q);
+            auto rHeap_ = std::make_unique<Rig> (q); // engines on the heap: MSVC gives each local its own stack slot
+            Rig& r = *rHeap_;
             for (int n : { 48, 55, 60, 64, 67, 72 }) r.e.noteOn (n, 0.7);
             r.run (0.4);
             CHECK (r.sounds ({ 48, 55, 60, 64, 67, 72 }), "a six-note chord across three octaves: every note sounds");
-            Rig lo (q);
+            auto loHeap_ = std::make_unique<Rig> (q); // engines on the heap: MSVC gives each local its own stack slot
+            Rig& lo = *loHeap_;
             lo.e.setParams ([&] { auto x = q; x.pedalKeys = false; return x; }());
             lo.e.noteOn (36, 0.7);
             lo.run (0.3);
             CHECK (lo.sounds ({ 48 }), "below the neck's range: C2 folds up an octave to C3");
-            SteelEngine k;
+            auto kHeap_ = std::make_unique<SteelEngine>();
+            SteelEngine& k = *kHeap_;
             k.prepare (kFs);
             k.noteOn (kSmartKeyswitch, 1.0);
             CHECK (k.currentSet() == kSmartSet, "keyswitch B0 selects smart notes");
@@ -846,7 +863,8 @@ int main()
             for (int root = 48; root < 72; ++root)
                 for (auto shape : { std::vector<int> { 0, 4, 7 }, { 0, 3, 7 }, { 0, 4, 7, 10 }, { 0, 3, 7, 10 }, { 0, 4, 7, 11 }, { 4, 7, 12 }, { 7, 12, 16 }, { 0, 7, 16 }, { 0, 5, 7 }, { 0, 2, 7 } })
                 {
-                    Rig r (q);
+                    auto rHeap_ = std::make_unique<Rig> (q); // engines on the heap: MSVC gives each local its own stack slot
+                    Rig& r = *rHeap_;
                     std::vector<double> want;
                     for (int iv : shape) { r.e.noteOn (root + iv, 0.7); want.push_back (root + iv); }
                     r.run (0.15);
@@ -866,7 +884,8 @@ int main()
             sq.sweeten = 1.0;
             sq.sympathetic = 1.0;
             sq.slideInBelow = 0.3;
-            Rig r (sq);
+            auto rHeap_ = std::make_unique<Rig> (sq); // engines on the heap: MSVC gives each local its own stack slot
+            Rig& r = *rHeap_;
             std::vector<float> buf (256);
             bool ok = true;
             double peak = 0;
@@ -909,7 +928,8 @@ int main()
         };
         std::vector<float> buf ((size_t) (0.4 * kFs));
         // chord set 1 in E: C plays E major, G#3 B3 E4 G#4. The wheel moves only the top G#.
-        SteelEngine e;
+        auto eHeap_ = std::make_unique<SteelEngine>();
+        SteelEngine& e = *eHeap_;
         e.prepare (kFs);
         e.setParams (q);
         e.noteOn (60, 0.7);
@@ -931,7 +951,8 @@ int main()
                 for (int key = 0; key < 12; ++key)
                     for (int slot = 0; slot < 12; ++slot)
                     {
-                        SteelEngine c;
+                        auto cHeap_ = std::make_unique<SteelEngine>();
+                        SteelEngine& c = *cHeap_;
                         c.prepare (kFs);
                         EngineParams k = q;
                         k.keyPc = key;
@@ -960,7 +981,8 @@ int main()
         // smart notes in C: C-E-G, the G moves
         EngineParams qc = q;
         qc.keyPc = 0;
-        SteelEngine sm;
+        auto smHeap_ = std::make_unique<SteelEngine>();
+        SteelEngine& sm = *smHeap_;
         sm.prepare (kFs);
         sm.setParams (qc);
         sm.setSet (kSmartSet);
@@ -1054,7 +1076,8 @@ int main()
         auto moveTime = [&] (double glide) {
             EngineParams g = q;
             g.glide = glide;
-            Rig r (g);
+            auto rHeap_ = std::make_unique<Rig> (g); // engines on the heap: MSVC gives each local its own stack slot
+            Rig& r = *rHeap_;
             r.e.noteOn (60, 0.8);
             r.to (0.5);
             r.e.noteOn (65, 0.8);
@@ -1066,7 +1089,8 @@ int main()
         CHECK (slow > 4.0 * quick && slow > 0.4, "Glide sets the move time: %.0f ms at 0.1 s, %.0f ms at 0.8 s", 1000 * quick, 1000 * slow);
         {
             // a chord played just after the last: picked where the last one was, then pushed into place
-            Rig r (q);
+            auto rHeap_ = std::make_unique<Rig> (q); // engines on the heap: MSVC gives each local its own stack slot
+            Rig& r = *rHeap_;
             r.e.noteOn (60, 0.8);
             r.to (0.5);
             r.e.noteOff (60);
@@ -1082,7 +1106,8 @@ int main()
             // "Legato keys" doesn't move a detached chord; nor does one long after; "Off" never moves
             EngineParams l = q;
             l.chordMove = 1;
-            Rig r (l);
+            auto rHeap_ = std::make_unique<Rig> (l); // engines on the heap: MSVC gives each local its own stack slot
+            Rig& r = *rHeap_;
             r.e.noteOn (60, 0.8);
             r.to (0.5);
             r.e.noteOff (60);
@@ -1090,7 +1115,8 @@ int main()
             r.e.noteOn (65, 0.8);
             r.to (1.0);
             const bool a = ! r.e.lastChordMoved();
-            Rig late (q);
+            auto lateHeap_ = std::make_unique<Rig> (q); // engines on the heap: MSVC gives each local its own stack slot
+            Rig& late = *lateHeap_;
             late.e.noteOn (60, 0.8);
             late.to (0.5);
             late.e.noteOff (60);
@@ -1100,7 +1126,8 @@ int main()
             const bool b = ! late.e.lastChordMoved();
             EngineParams o = q;
             o.chordMove = 0;
-            Rig off (o);
+            auto offHeap_ = std::make_unique<Rig> (o); // engines on the heap: MSVC gives each local its own stack slot
+            Rig& off = *offHeap_;
             off.e.noteOn (60, 0.8);
             off.to (0.5);
             off.e.noteOn (65, 0.8);
@@ -1192,7 +1219,8 @@ int main()
         q.patternRate = 1; // 1/8
         {
             // free-running at the host's tempo (stopped): a forward roll over the Classic I (strings 6 5 4 3)
-            Rig r (q);
+            auto rHeap_ = std::make_unique<Rig> (q); // engines on the heap: MSVC gives each local its own stack slot
+            Rig& r = *rHeap_;
             r.e.setTransport (120.0, 0.0, false);
             r.e.noteOn (60, 0.8);
             r.to (1.6);
@@ -1209,7 +1237,8 @@ int main()
         }
         {
             // the host playing: steps land on its grid, not a step after the key
-            Rig r (q);
+            auto rHeap_ = std::make_unique<Rig> (q); // engines on the heap: MSVC gives each local its own stack slot
+            Rig& r = *rHeap_;
             r.e.setTransport (120.0, 0.3, true); // 0.3 beats in
             r.e.noteOn (60, 0.8);
             r.to (1.0);
@@ -1223,14 +1252,16 @@ int main()
             // pinch & roll: low and high together on the beat
             EngineParams pp = q;
             pp.pattern = PatPinch;
-            Rig r (pp);
+            auto rHeap_ = std::make_unique<Rig> (pp); // engines on the heap: MSVC gives each local its own stack slot
+            Rig& r = *rHeap_;
             r.e.noteOn (60, 0.8);
             r.to (0.05);
             CHECK (r.picks.size() >= 1 && r.e.pickCount() == 2, "pinch: two strings at once on the beat (%d)", (int) r.e.pickCount());
         }
         {
             // a legato chord move carries the pattern on, over the moved strings
-            Rig r (q);
+            auto rHeap_ = std::make_unique<Rig> (q); // engines on the heap: MSVC gives each local its own stack slot
+            Rig& r = *rHeap_;
             r.e.noteOn (60, 0.8);
             r.to (0.6);
             const int step = r.e.patternStepIndex();
@@ -1241,7 +1272,8 @@ int main()
         }
         {
             // smart notes: a held triad, picked as played, then rolled
-            Rig r (q, kSmartSet);
+            auto rHeap_ = std::make_unique<Rig> (q, kSmartSet); // engines on the heap: MSVC gives each local its own stack slot
+            Rig& r = *rHeap_;
             for (int nn : { 60, 64, 67 })
                 r.e.noteOn (nn, 0.8);
             r.to (1.3);
@@ -1255,7 +1287,8 @@ int main()
                 EngineParams pp = q;
                 pp.pattern = pat;
                 pp.patternRate = pat % kPatternRates;
-                Rig r (pp, pat % 2 ? 1 : kSmartSet);
+                auto rHeap_ = std::make_unique<Rig> (pp, pat % 2 ? 1 : kSmartSet); // engines on the heap: MSVC gives each local its own stack slot
+                Rig& r = *rHeap_;
                 r.e.noteOn (62, 0.7);
                 r.e.noteOn (65, 0.7);
                 r.e.noteOn (69, 0.7);
@@ -1284,7 +1317,8 @@ int main()
         EngineParams q;
         q.sympathetic = 1.0;
         q.sustain = 2.0;
-        SteelEngine e;
+        auto eHeap_ = std::make_unique<SteelEngine>();
+        SteelEngine& e = *eHeap_;
         e.prepare (kFs);
         e.setParams (q);
         std::vector<float> buf (512);
