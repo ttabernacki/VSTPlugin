@@ -69,17 +69,53 @@ ahead of the plug-in. The volume pedal is the wind.
 The reeds run at 4x the output rate, through a steep down-sampling filter, so their sharp pulses
 don't fold back as haze. Ten notes on all six stops (52 reeds) use about 25% of one core.
 
+## The plug-in (first playable version)
+VST3 and a standalone app ("Pump Organ"), with a plain auto-generated settings panel for now; the
+real interface comes later. Every setting below is a parameter you can automate.
+- **Instrument** (Chord organ / Parlour organ), **Wind**, **Pumping** (Easy / Reservoir /
+  Expression), the six stops, **Vox Humana**, **Forte**, **Tuning age**, **Air noise**, **Level**.
+- **Wind and the pedal:** the expression pedal (CC11; or CC7/4/2, or off) is the wind, scaled by the
+  Wind knob. Until a pedal is moved, the organ sounds at the Wind knob's setting, so it plays with no
+  pedal at all.
+- **Sustain** (CC64) holds notes.
+
+### MPE
+On by default. Each note plays on its own MIDI channel, so each can be bent, pressed and slid on its
+own.
+- **Per-note pitch bend:** each note's channel bends that note alone, by **MPE note bend range** (48
+  semitones by default, the MPE standard and Ableton Live's default; or 12, 24, 96). The master
+  channel (1, or 16 for an upper zone) bends every note by the **Pitch wheel range** (2 by default).
+- **Pressure** (MPE pressure, channel pressure or poly aftertouch): **per-note vibrato** by default.
+  Each note gets its own vibrato, up to **Vibrato depth** (35 cents by default) at **Vibrato rate**,
+  quickening a little the harder you press. Or **Swell**, where pressing opens that note's own air
+  (louder, brighter), or **Off**.
+- **Slide** (CC74): that note's own air, from all but choked (down) through normal (middle) to a
+  little more (up). Or off.
+- **Bend ranges by RPN:** a controller or host can set them with RPN 0; the MPE Configuration Message
+  (RPN 6) sets the zones and resets the ranges to 48/2, as the spec says.
+- **Ableton Live:** turn on MPE for the plug-in (right-click its title bar: Enable MPE Mode). Live
+  sends exactly this: each note on its own channel, its bend, pressure and slide sent just before the
+  note-on and then as they move, at 48 semitones. That holds whether it comes from an MPE controller,
+  an MPE clip, or Live's MPE editing tools. A note starts wherever its bend already is, with no glide.
+- **MPE off:** for an ordinary keyboard, any pitch bend bends everything by the pitch wheel range,
+  channel pressure presses every note, and poly aftertouch presses one key. With MPE on, an ordinary
+  keyboard on channel 1 still works the same way: channel 1 is the master.
+
 ## Build, test, listen
 ```
 cmake --build build --target pumporgan_tests pumporgan_demo
 ctest --test-dir build -R pumporgan
 build/pumporgan/pumporgan_demo <folder>
 ```
-The tests check tuning across C2-C7, the speech threshold and speech times, loudness and brightness
+`pumporgan_plugin_tests` checks the plug-in: parameters and defaults, sound with no pedal, the pedal as
+wind, per-note bend and pressure through the plug-in's MIDI path, MPE off, state, and the editor.
+The engine tests check tuning across C2-C7, the speech threshold and speech times, loudness and brightness
 rising with wind, Melodia mellower than Diapason, the Celeste beating, the reservoir filling and
 running dry, Expression responding only to strokes, the wind sagging under a big chord, the Celeste's
 beat rate, the worn tuning spread, the pitch wander, and for the chord organ: the fan's spin-up, its
-weaker wind, the slow sag and droop under a big chord, how it labours, warbles and sputters on little
+weaker wind, the slow sag and droop under a big chord, MPE (per-note bend on member channels, master
+bends, RPN ranges and the MPE Configuration Message, a bend sent before the note-on, per-note pressure
+vibrato, poly aftertouch with MPE off, slide choking a note, 15 notes on 15 channels), how it labours, warbles and sputters on little
 wind (and holds steady on full), and its wear. Then stability and CPU.
 
 Demos:

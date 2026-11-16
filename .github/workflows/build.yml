@@ -49,7 +49,7 @@ jobs:
       - name: Build
         shell: bash
         run: |
-          TARGETS="dsp_tests render_demo PluginTests OrbitPan_VST3 leveler_tests BassLevelerPluginTests BassNoteLeveler_VST3 notespace_tests NoteSpacePluginTests NoteSpace_VST3 steelwave_tests steelwave_engine_tests SteelwavePluginTests Steelwave_VST3 Steelwave_Standalone pumporgan_tests"
+          TARGETS="dsp_tests render_demo PluginTests OrbitPan_VST3 leveler_tests BassLevelerPluginTests BassNoteLeveler_VST3 notespace_tests NoteSpacePluginTests NoteSpace_VST3 steelwave_tests steelwave_engine_tests SteelwavePluginTests Steelwave_VST3 Steelwave_Standalone pumporgan_tests PumpOrganPluginTests PumpOrgan_VST3 PumpOrgan_Standalone"
           cmake --build build --config Release --parallel 4 --target $TARGETS
 
       - name: Test (DSP cores and plug-in processors)
@@ -59,12 +59,14 @@ jobs:
       - name: Collect plug-in bundles
         shell: bash
         run: |
-          mkdir -p dist/orbitpan dist/bassleveler dist/notespace dist/steelwave
+          mkdir -p dist/orbitpan dist/bassleveler dist/notespace dist/steelwave dist/pumporgan
           find build -type d -name "OrbitPan.vst3" -prune -exec cp -R {} dist/orbitpan/ \;
           find build -type d -name "Bass Note Leveler.vst3" -prune -exec cp -R {} dist/bassleveler/ \;
           find build -type d -name "Note Space.vst3" -prune -exec cp -R {} dist/notespace/ \;
           find build -type d -name "Steelwave.vst3" -prune -exec cp -R {} dist/steelwave/ \;
           find build -path "*Steelwave_artefacts*Standalone*" -name "Steelwave.exe" -exec cp {} dist/steelwave/ \;
+          find build -type d -name "Pump Organ.vst3" -prune -exec cp -R {} dist/pumporgan/ \;
+          find build -path "*PumpOrgan_artefacts*Standalone*" -name "Pump Organ.exe" -exec cp {} dist/pumporgan/ \;
           ls -R dist | head -40
 
       - name: DLLs must not need the VC++ redistributable
@@ -75,13 +77,14 @@ jobs:
           python tools/check_dll_imports.py "dist/bassleveler/Bass Note Leveler.vst3/Contents/x86_64-win/Bass Note Leveler.vst3"
           python tools/check_dll_imports.py "dist/notespace/Note Space.vst3/Contents/x86_64-win/Note Space.vst3"
           python tools/check_dll_imports.py "dist/steelwave/Steelwave.vst3/Contents/x86_64-win/Steelwave.vst3"
+          python tools/check_dll_imports.py "dist/pumporgan/Pump Organ.vst3/Contents/x86_64-win/Pump Organ.vst3"
 
       - name: pluginval (strictness 10)
         shell: bash
         run: |
           curl -L -o pluginval.zip https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Windows.zip
           7z x -y pluginval.zip -opluginval >/dev/null
-          for p in "dist/orbitpan/OrbitPan.vst3" "dist/bassleveler/Bass Note Leveler.vst3" "dist/notespace/Note Space.vst3" "dist/steelwave/Steelwave.vst3"; do
+          for p in "dist/orbitpan/OrbitPan.vst3" "dist/bassleveler/Bass Note Leveler.vst3" "dist/notespace/Note Space.vst3" "dist/steelwave/Steelwave.vst3" "dist/pumporgan/Pump Organ.vst3"; do
             pluginval/pluginval.exe --strictness-level 10 --validate-in-process --timeout-ms 180000 "$p"
           done
 
@@ -132,6 +135,11 @@ jobs:
         with:
           name: Steelwave-windows
           path: dist/steelwave
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PumpOrgan-windows
+          path: dist/pumporgan
 
       # Setup .exe: installs the VST3 to Common Files\VST3 and the standalone app to Program Files
       - name: Steelwave installer (Inno Setup)

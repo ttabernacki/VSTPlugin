@@ -20,6 +20,8 @@
 // Case:   reed cells (per stop), the wooden case's resonances, the swell lid (Forte), the Vox Humana fan,
 //         a close mic in front of the reed board; air hiss and pallet and bellows noise.
 
+#include "Mpe.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -112,6 +114,17 @@ struct OrganParams
     double airNoise = 1.0;      // hiss, pallets and bellows (0..2)
     double tuningAge = 1.0;     // reeds a little off their marks (0 = perfect)
     double level = 1.0;
+
+    // --- playing: MPE and expression ---
+    bool mpe = true;            // MPE: each note's channel bends, presses and slides that note alone
+    double memberBendRange = 48; // semitones: MPE member channels (Ableton's and the spec's default)
+    double masterBendRange = 2;  // semitones: the master channel / an ordinary pitch wheel
+    enum class Pressure { Vibrato, Swell, Off };
+    Pressure pressure = Pressure::Vibrato; // what pressing into a note does (aftertouch, MPE pressure)
+    double vibDepth = 0.35;     // semitones of vibrato at full pressure
+    double vibRate = 5.4;       // Hz
+    bool slideAir = true;       // MPE slide (CC74): that note's own air, choked (down) to free (up)
+    int pedalCc = 11;           // the volume pedal's CC (the wind); -1 = none
 };
 
 struct Rng
@@ -255,6 +268,9 @@ public:
             }
             keyOff_[(size_t) k] = 0.5 * (tune.next() + tune.next());
             keySticky_[(size_t) k] = 0.5 * (tune.next() + tune.next());
+            keyVibRate_[(size_t) k] = 1.0 + 0.08 * tune.next(); // each note's vibrato a little different
+            // the highest a note can bend: its highest reed (4') kept well under the reeds' sample rate
+            keyMaxSemis_[(size_t) k] = std::min (48.0, 12.0 * std::log2 (0.15 * fsi_ / (2.0 * 440.0 * std::pow (2.0, (kLowKey + k - 69) / 12.0))));
         }
         applyVoicing();
         windLp_.lowpass (fs, 2.0, 0.7);
@@ -294,6 +310,15 @@ public:
         }
         active_.clear();
         held_.fill (false);
+        sustained_.fill (false);
+        sustain_ = false;
+        keyMul_.fill (1.0);
+        keyAir_.fill (1.0);
+        keyBend_.fill (0.0);
+        keyPress_.fill (0.0);
+        poly_.fill (0.0);
+        keyCh_.fill (1);
+        mpe_.reset();
         reservoir_ = 0.0;
         suction_ = chest_ = 0.0;
         motor_ = 0.0; // switched on: the fan spins up
@@ -308,6 +333,13 @@ public:
         // retune for Tuning age, and re-stop held keys
         const bool retune = p.tuningAge != prm_.tuningAge || p.model != prm_.model;
         const auto oldStops = prm_.stops;
+        // bend ranges: set from the settings when they change (an RPN can still set them after)
+        if (p.memberBendRange != prm_.memberBendRange || ! mpeInit_)
+            mpe_.lowerMemberRange = mpe_.upperMemberRange = p.memberBendRange;
+        if (p.masterBendRange != prm_.masterBendRange || ! mpeInit_)
+            mpe_.lowerMasterRange = mpe_.upperMasterRange = mpe_.plainRange = p.masterBendRange;
+        mpe_.enabled = p.mpe;
+        mpeInit_ = true;
         prm_ = p;
         if (retune)
             applyVoicing();
@@ -322,33 +354,96 @@ public:
     const ModelVoice& model() const { return modelVoice (prm_.model); }
 
     // --- playing ---------------------------------------------------------------------------
-    void noteOn (int note, double vel = 0.8)
+    // Raw MIDI (what the plug-in passes on): notes, pitch bend, pressure, the pedal, MPE's RPNs.
+    void midi (const uint8_t* d, int n)
+    {
+        if (n < 1)
+            return;
+        const int st = d[0] & 0xf0, ch = (d[0] & 0x0f) + 1;
+        const int d1 = n > 1 ? d[1] & 0x7f : 0, d2 = n > 2 ? d[2] & 0x7f : 0;
+        switch (st)
+        {
+            case 0x90: if (d2 > 0) noteOn (d1, d2 / 127.0, ch); else noteOff (d1, ch); break;
+            case 0x80: noteOff (d1, ch); break;
+            case 0xe0: mpe_.pitchBend (ch, ((d2 << 7 | d1) - 8192) / 8191.0); break;
+            case 0xd0: mpe_.channelPressure (ch, d1 / 127.0); break;
+            case 0xa0:
+                if (d1 >= kLowKey && d1 <= kHighKey)
+                    poly_[(size_t) (d1 - kLowKey)] = d2 / 127.0;
+                break;
+            case 0xb0: controller (ch, d1, d2); break;
+            default: break;
+        }
+    }
+    void controller (int ch, int cc, int value)
+    {
+        if (mpe_.controller (ch, cc, value))
+            return;
+        if (cc == prm_.pedalCc)
+            pedal (value / 127.0);
+        else if (cc == 64)
+            sustain (value >= 64);
+        else if (cc == 120 || cc == 123)
+            allNotesOff();
+    }
+    // sustain pedal: keys let go keep sounding until it's lifted
+    void sustain (bool on)
+    {
+        sustain_ = on;
+        if (! on)
+            for (int k = 0; k < kKeys; ++k)
+                if (sustained_[(size_t) k])
+                {
+                    sustained_[(size_t) k] = false;
+                    release (k);
+                }
+    }
+    void noteOn (int note, double vel = 0.8, int ch = 1)
     {
         const int k = note - kLowKey;
         if (k < 0 || k >= kKeys)
             return;
+        // the note takes its channel's bend, pressure and slide as they are now (MPE sends them first)
+        keyCh_[(size_t) k] = ch;
+        keyBend_[(size_t) k] = targetSemis (k);
+        keyPress_[(size_t) k] = mpe_.pressure (ch, poly_[(size_t) k]);
+        keyAir_[(size_t) k] = targetAir (k);
+        keyVibPh_[(size_t) k] = 0.0;
+        sustained_[(size_t) k] = false;
         held_[(size_t) k] = true;
         for (int r = 0; r < kStops; ++r)
             if (prm_.stops[(size_t) r])
                 setPallet (k, r, true, vel);
         thump_ += 0.6 * (0.4 + 0.6 * vel); // the pallet and key action
     }
-    void noteOff (int note)
+    void noteOff (int note, int ch = -1)
     {
         const int k = note - kLowKey;
-        if (k < 0 || k >= kKeys)
+        if (k < 0 || k >= kKeys || ! held_[(size_t) k])
+            return;
+        if (ch > 0 && prm_.mpe && keyCh_[(size_t) k] != ch) // another channel's note on this key
             return;
         held_[(size_t) k] = false;
-        for (int r = 0; r < kStops; ++r)
-            setPallet (k, r, false, 0.5);
-        thump_ += 0.25;
+        poly_[(size_t) k] = 0.0;
+        if (sustain_)
+            sustained_[(size_t) k] = true;
+        else
+            release (k);
     }
     void allNotesOff()
     {
-        for (int n = kLowKey; n <= kHighKey; ++n)
-            if (held_[(size_t) (n - kLowKey)])
-                noteOff (n);
+        sustain_ = false;
+        for (int k = 0; k < kKeys; ++k)
+            if (held_[(size_t) k] || sustained_[(size_t) k])
+            {
+                held_[(size_t) k] = sustained_[(size_t) k] = false;
+                release (k);
+            }
     }
+    // a note's pitch now, from its expression (for tests and display): semitones off its key
+    double noteBend (int note) const { return note >= kLowKey && note <= kHighKey ? keyBend_[(size_t) (note - kLowKey)] : 0.0; }
+    double notePressure (int note) const { return note >= kLowKey && note <= kHighKey ? keyPress_[(size_t) (note - kLowKey)] : 0.0; }
+    const mpe::Input& mpeInput() const { return mpe_; }
     // the volume pedal: 0 (heel) .. 1 (toe). How it becomes wind depends on the Wind mode.
     void pedal (double pos) { pedalPos_ = std::clamp (pos, 0.0, 1.0); }
 
@@ -402,12 +497,25 @@ public:
             const double pitch = std::exp2 ((wow - mv.droopCents * (loadDrop + 0.3 * levelDrop * levelDrop)) / 1200.0);
             lastStruggle_ = struggle;
             const double breath = kBreath * prm_.airNoise;
+            // each sounding key's own expression: its bend, its vibrato, its air
+            ++stamp_;
+            for (int idx : active_)
+            {
+                const int k = idx / kStops;
+                if (keyStamp_[(size_t) k] == stamp_)
+                    continue;
+                keyStamp_[(size_t) k] = stamp_;
+                expressKey (k, dt);
+            }
             // os reed steps per output sample, then down-sampled
             for (int h = 0; h < os_; ++h)
             {
                 double sum = 0;
                 for (size_t a = 0; a < active_.size(); ++a)
-                    sum += reeds_[(size_t) active_[a]].step (chest, rng_.next(), breath, pitch, struggle, mv.sputter);
+                {
+                    const int idx = active_[a], k = idx / kStops;
+                    sum += reeds_[(size_t) idx].step (chest * keyAir_[(size_t) k], rng_.next(), breath, pitch * keyMul_[(size_t) k], struggle, mv.sputter);
+                }
                 pushFir (sum);
             }
             double y = firOut();
@@ -549,6 +657,50 @@ private:
             swell_.lowpass (fs_, prm_.forte ? 2.0 * model().dull : model().dull, 0.7);
         }
     }
+    // --- expression ------------------------------------------------------------------------------
+    double targetSemis (int k) const
+    {
+        return std::clamp (mpe_.bendSemis (keyCh_[(size_t) k]), -48.0, keyMaxSemis_[(size_t) k]);
+    }
+    double targetAir (int k) const
+    {
+        double a = 1.0;
+        if (prm_.slideAir && prm_.mpe) // slide: 0 all but chokes the note's air, the middle is normal, the top a little more
+        {
+            const double t = mpe_.timbre (keyCh_[(size_t) k]);
+            a *= t < 0.5 ? 0.12 + 1.76 * t : 1.0 + 0.3 * (t - 0.5);
+        }
+        if (prm_.pressure == OrganParams::Pressure::Swell) // pressing in opens the note's own air
+            a *= 0.7 + 0.6 * keyPress_[(size_t) k];
+        return a;
+    }
+    void expressKey (int k, double dt)
+    {
+        const auto ks = (size_t) k;
+        const int ch = keyCh_[ks];
+        // bend: smoothed over a few ms (MIDI arrives in steps)
+        keyBend_[ks] += (1.0 - std::exp (-dt / 0.004)) * (targetSemis (k) - keyBend_[ks]);
+        // pressure: smoothed (it arrives in steps too)
+        const double press = mpe_.pressure (ch, poly_[ks]);
+        keyPress_[ks] += (1.0 - std::exp (-dt / 0.03)) * (press - keyPress_[ks]);
+        // vibrato from pressure: each note its own, a touch quicker the harder it's pressed
+        double vib = 0;
+        if (prm_.pressure == OrganParams::Pressure::Vibrato && keyPress_[ks] > 1e-4)
+        {
+            keyVibPh_[ks] += prm_.vibRate * keyVibRate_[ks] * (1.0 + 0.12 * keyPress_[ks]) * dt;
+            keyVibPh_[ks] -= std::floor (keyVibPh_[ks]);
+            vib = prm_.vibDepth * keyPress_[ks] * std::sin (2 * kPi * keyVibPh_[ks]);
+        }
+        keyAir_[ks] += (1.0 - std::exp (-dt / 0.01)) * (targetAir (k) - keyAir_[ks]);
+        keyMul_[ks] = std::exp2 ((keyBend_[ks] + vib) / 12.0);
+    }
+    void release (int k)
+    {
+        for (int r = 0; r < kStops; ++r)
+            setPallet (k, r, false, 0.5);
+        thump_ += 0.25;
+    }
+
     void setPallet (int k, int r, bool open, double vel)
     {
         const auto& rv = rankVoices()[(size_t) r];
@@ -635,6 +787,14 @@ private:
     std::vector<int> active_;
     std::array<std::array<double, 5>, kKeys * kStops> rand_ {}; // per reed: tuning, drive, set, level, tone
     std::array<double, kKeys> keyOff_ {}, keySticky_ {};
+    // MPE / expression, per key
+    mpe::Input mpe_;
+    bool mpeInit_ = false, sustain_ = false;
+    std::array<int, kKeys> keyCh_ {};
+    std::array<bool, kKeys> sustained_ {};
+    std::array<double, kKeys> keyBend_ {}, keyPress_ {}, keyAir_ {}, keyMul_ {}, keyVibPh_ {}, keyVibRate_ {}, keyMaxSemis_ {}, poly_ {};
+    std::array<uint32_t, kKeys> keyStamp_ {};
+    uint32_t stamp_ = 0;
     std::array<bool, kKeys> held_ {};
     double suction_ = 0, reservoir_ = 0, pedalPos_ = 0, pedalSmooth_ = 0, pedalVel_ = 0;
     double chest_ = 0, motor_ = 0, motorPh_ = 0, humPh_ = 0, wowPh_ = 0, lastStruggle_ = 0;
