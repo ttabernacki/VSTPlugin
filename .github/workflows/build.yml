@@ -49,7 +49,7 @@ jobs:
       - name: Build
         shell: bash
         run: |
-          TARGETS="dsp_tests render_demo PluginTests OrbitPan_VST3 leveler_tests BassLevelerPluginTests BassNoteLeveler_VST3 notespace_tests NoteSpacePluginTests NoteSpace_VST3 steelwave_tests steelwave_engine_tests SteelwavePluginTests Steelwave_VST3 Steelwave_Standalone"
+          TARGETS="dsp_tests render_demo PluginTests OrbitPan_VST3 leveler_tests BassLevelerPluginTests BassNoteLeveler_VST3 notespace_tests NoteSpacePluginTests NoteSpace_VST3 steelwave_tests steelwave_engine_tests SteelwavePluginTests Steelwave_VST3 Steelwave_Standalone pumporgan_tests"
           cmake --build build --config Release --parallel 4 --target $TARGETS
 
       - name: Test (DSP cores and plug-in processors)

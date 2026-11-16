@@ -99,3 +99,6 @@ add_subdirectory(notespace)
 
 # --- Steelwave (physically modelled pedal steel; string model + tests so far) ----------
 add_subdirectory(steelwave)
+
+# Pump organ (DSP core and demo for now)
+add_subdirectory(pumporgan)
