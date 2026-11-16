@@ -41,12 +41,22 @@ struct Script
         for (int n : notes) { on (t0, n); off (t1, n); }
     }
     void params (double t, OrganParams p) { ev.push_back ({ t, [=] (ReedOrgan& o) { o.setParams (p); } }); }
+    bool switchOn = false; // record from switch-on (the chord organ's fan spinning up); otherwise it's already running
     std::vector<float> render (double seconds, OrganParams p)
     {
         const double fs = 48000.0;
         auto o = std::make_unique<ReedOrgan>();
         o->prepare (fs);
         o->setParams (p);
+        if (! switchOn)
+        {
+            std::vector<float> pre (64);
+            for (int i = 0; i < (int) (2.0 * fs) / 64; ++i)
+            {
+                o->pedal (pedal (0.0));
+                o->process (pre.data(), 64);
+            }
+        }
         std::stable_sort (ev.begin(), ev.end(), [] (const E& a, const E& b) { return a.t < b.t; });
         std::vector<float> out ((size_t) (seconds * fs));
         size_t k = 0;
@@ -222,6 +232,40 @@ int main (int argc, char** argv)
         }
         s.pedal = [] (double) { return 0.6; };
         writeWav16 (dir + "10_worn_then_new.wav", s.render (t + 0.5, worn), 48000.0);
+    }
+    { // 11: switch-on: the chord organ's fan spins up under a held chord, then a little tune
+        Script s;
+        s.switchOn = true;
+        s.chord (0.0, 3.2, { 48, 55, 64 });
+        const std::vector<std::vector<int>> tune = { { 53, 60, 69 }, { 55, 62, 71 }, { 48, 55, 64, 72 } };
+        double t = 3.4;
+        for (const auto& c : tune)
+        {
+            for (int n : c) { s.on (t, n); s.off (t + 1.5, n); }
+            t += 1.6;
+        }
+        s.pedal = [] (double) { return 0.7; };
+        writeWav16 (dir + "11_chord_organ_switch_on.wav", s.render (t + 1.0, stops ({ Diapason, Melodia })), 48000.0);
+    }
+    { // 12: the same phrase on the chord organ, then on the parlour organ
+        Script s;
+        const std::vector<std::vector<int>> chords = { { 48, 55, 64, 72 }, { 41, 53, 57, 65, 69 }, { 43, 55, 62, 67, 71 }, { 48, 55, 60, 64, 72 } };
+        auto co = stops ({ Diapason, Melodia });
+        auto par = co;
+        par.model = Model::Parlour;
+        double t = 0.3;
+        for (int pass = 0; pass < 2; ++pass)
+        {
+            s.params (t - 0.25, pass == 0 ? co : par);
+            for (const auto& c : chords)
+            {
+                for (int n : c) { s.on (t, n); s.off (t + 1.75, n); }
+                t += 1.8;
+            }
+            t += 1.2;
+        }
+        s.pedal = [] (double) { return 0.75; };
+        writeWav16 (dir + "12_chord_organ_then_parlour.wav", s.render (t + 0.5, co), 48000.0);
     }
     return 0;
 }

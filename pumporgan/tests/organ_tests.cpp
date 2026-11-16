@@ -23,6 +23,7 @@ static constexpr double kFs = 48000.0;
 static OrganParams only (int stop, Wind w = Wind::Easy)
 {
     OrganParams p;
+    p.model = Model::Parlour; // the physics tests: the steady parlour wind; the chord organ has its own
     p.wind = w;
     p.stops.fill (false);
     p.stops[(size_t) stop] = true;
@@ -272,6 +273,73 @@ int main()
         r.run (1.5);
         const double loaded = r.o->reedAmplitude (72, Diapason);
         CHECK (loaded < 0.95 * alone, "a big chord sags the wind: the held C5's swing %.2f -> %.2f", alone, loaded);
+    }
+    std::printf ("Chord organ\n");
+    {
+        auto co = [] (std::initializer_list<int> stops) {
+            OrganParams p;
+            p.stops.fill (false);
+            for (int st : stops) p.stops[(size_t) st] = true;
+            p.airNoise = 0.0;
+            p.tuningAge = 0.0;
+            return p;
+        };
+        // switched on, the fan spins up: the first moments are weak
+        {
+            Rig r (co ({ Diapason }));
+            r.o->pedal (0.8);
+            r.o->noteOn (64);
+            r.run (4.0);
+            CHECK (r.rms (0.3, 0.6) < 0.5 * r.rms (3.0, 4.0), "the fan spins up from switch-on (%.1f dB at 0.3 s)", 20 * std::log10 (r.rms (0.3, 0.6) / r.rms (3.0, 4.0)));
+        }
+        // less powerful: at full pedal the reeds swing less than the parlour organ's
+        double coAmp, parAmp;
+        {
+            Rig r (co ({ Diapason }));
+            r.o->pedal (1.0);
+            r.run (3.0);
+            r.o->noteOn (64);
+            r.run (1.5);
+            coAmp = r.o->reedAmplitude (64, Diapason);
+            Rig q (only (Diapason));
+            q.o->pedal (1.0);
+            q.run (0.3);
+            q.o->noteOn (64);
+            q.run (1.5);
+            parAmp = q.o->reedAmplitude (64, Diapason);
+            CHECK (coAmp < 0.75 * parAmp, "less powerful: full wind swings a reed %.2f, against the parlour organ's %.2f", coAmp, parAmp);
+        }
+        // saggy: a big chord drags the wind down; the held note droops flat and quieter, and slowly
+        {
+            Rig r (co ({ Diapason, Melodia }));
+            r.o->pedal (0.85);
+            r.run (3.0);
+            r.o->noteOn (76);
+            r.run (1.5);
+            const double f0 = r.peakNear (r.o->reedFrequency (76, Diapason), 4.0, 0.5), a0 = r.o->reedAmplitude (76, Diapason);
+            const double s0 = r.o->chestSuction();
+            for (int n : { 41, 48, 53, 57, 60, 65, 69 })
+                r.o->noteOn (n);
+            r.run (0.05);
+            const double sQuick = r.o->chestSuction();
+            r.run (2.0);
+            const double f1 = r.peakNear (r.o->reedFrequency (76, Diapason), 6.0, 0.5), a1 = r.o->reedAmplitude (76, Diapason);
+            const double s1 = r.o->chestSuction();
+            CHECK (s1 < 0.7 * s0 && sQuick > s1 + 0.3 * (s0 - s1), "a big chord sags the wind to %.0f%%, settling over a moment, not at once", 100 * s1 / s0);
+            CHECK (cents (f1, f0) < -6.0 && a1 < 0.85 * a0, "the held E5 droops %.1f cents and its swing falls %.0f%%", cents (f1, f0), 100 * (1 - a1 / a0));
+        }
+        // more worn: keys well out
+        {
+            OrganParams p = co ({ Diapason });
+            p.tuningAge = 1.0;
+            Rig r (p);
+            double spread = 0;
+            int lazy = 0;
+            for (int n = 36; n <= 96; ++n)
+                spread = std::max (spread, std::fabs (cents (r.o->reedFrequency (n, Diapason), midiHz (n))));
+            (void) lazy;
+            CHECK (spread > 5.0 && spread < 14.0, "worn: keys up to %.1f cents off (the parlour organ: ~4)", spread);
+        }
     }
     std::printf ("Robustness\n");
     {

@@ -1,7 +1,21 @@
 # Pump organ (sound demo)
 
-A physically modelled American suction reed organ: no samples. This is the sound engine and a demo
-renderer, ahead of the plug-in. You pump it with the volume pedal.
+A physically modelled suction reed organ: no samples. This is the sound engine and a demo renderer,
+ahead of the plug-in. The volume pedal is the wind.
+
+## Two instruments
+- **Chord organ** (default): a small 1950s-60s home organ in a plastic case.
+  - **The fan:** a cheap electric blower pulls the wind. It spins up over a second or so when switched
+    on, never runs quite steady, and hums and whooshes quietly.
+  - **Weak wind:** its most is under half a parlour organ's, so the reeds swing less: softer, darker,
+    slower to speak.
+  - **Saggy:** a big chord is more than the fan can keep up with. The wind sags (to about 70% under an
+    8-note chord), settling over a moment as the fan labours, and everything droops flat and quieter: a
+    held note goes about 10 cents flat when a big chord comes in.
+  - **Worn:** keys up to about 8 cents off. Some reeds are weak and lazy (about 1 in 8) and some buzzy
+    (about 1 in 12).
+  - **The case:** a boxy plastic case, thin in the bass, dull on top.
+- **Parlour organ:** a full-size foot-pumped reed organ in a wooden case: strong, steady wind.
 
 ## How it's modelled
 - **Reeds.** Each reed is a brass tongue swinging through a slot (a damped mass-spring). Air from the
@@ -11,8 +25,8 @@ renderer, ahead of the plug-in. You pump it with the volume pedal.
     about 180 ms for C2 against 25 ms for C6 at moderate wind.
   - More suction swings the tongue harder: louder, and brighter as the chops get sharper.
   - A hard-driven tongue sags a few cents flat.
-- **A worn-in instrument** (Tuning age; 1 = worn in, 0 = factory fresh).
-  - Each key sits a few cents off its mark (up to about 4), all its stops roughly together. Each reed
+- **A worn-in instrument** (Tuning age; 1 = as found, 0 = factory fresh).
+  - Each key sits a few cents off its mark (up to about 4 on the parlour organ, 8 on the chord organ), all its stops roughly together. Each reed
     sits a little off that (about 1 cent), so a key's stops beat gently against each other.
   - Every reed's pitch wanders slowly (about 0.5 cent). The beats between reeds drift irregularly
     instead of sweeping evenly like a phaser.
@@ -39,7 +53,7 @@ renderer, ahead of the plug-in. You pump it with the volume pedal.
   front of the reed board, plus air hiss, pallet and key noise, and the bellows.
 
 The reeds run at 4x the output rate, through a steep down-sampling filter, so their sharp pulses
-don't fold back as haze. Ten notes on all six stops (52 reeds) use about 18% of one core.
+don't fold back as haze. Ten notes on all six stops (52 reeds) use about 25% of one core.
 
 ## Build, test, listen
 ```
@@ -50,7 +64,8 @@ build/pumporgan/pumporgan_demo <folder>
 The tests check tuning across C2-C7, the speech threshold and speech times, loudness and brightness
 rising with wind, Melodia mellower than Diapason, the Celeste beating, the reservoir filling and
 running dry, Expression responding only to strokes, the wind sagging under a big chord, the Celeste's
-beat rate, the worn tuning spread, the pitch wander, stability and CPU.
+beat rate, the worn tuning spread, the pitch wander, and for the chord organ: the fan's spin-up, its
+weaker wind, the slow sag and droop under a big chord, and its wear. Then stability and CPU.
 
 Demos:
 1. Diapason C2-C6
@@ -63,3 +78,7 @@ Demos:
 8. A big chord sagging the wind
 9. The treble with the higher stops (Diapason, Dulciana, Celeste, Flute 4')
 10. A hymn phrase worn in, then factory fresh
+11. The chord organ switched on: its fan spins up under a held chord
+12. The same phrase on the chord organ, then the parlour organ
+
+Demos 1-11 are the chord organ. Except for demo 11, each starts with the fan already running.

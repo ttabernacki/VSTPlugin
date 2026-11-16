@@ -60,8 +60,37 @@ inline const std::array<RankVoice, kStops>& rankVoices()
 
 enum class Wind { Easy, Reservoir, Expression };
 
+// The instrument the reeds sit in.
+//   Chord organ: a small 1950s-60s home organ in a plastic case. A cheap electric fan pulls the wind,
+//     weakly: it spins up when switched on, wobbles a little, hums, and can't keep up with a big chord,
+//     so the wind sags (slowly, as the fan labours) and every note droops flat and quieter. Cheap reeds,
+//     long neglected: well out of tune, some lazy or weak, some buzzy.
+//   Parlour organ: a full-size foot-pumped reed organ in a wooden case: strong, steady wind.
+enum class Model { ChordOrgan, Parlour };
+struct ModelVoice
+{
+    const char* name;
+    double windPower;   // the most suction the wind can give (reeds swing less: softer, darker, slower)
+    double loadSag;     // chest suction / (1 + this x what the open reeds draw)
+    double sagTau;      // how quickly the wind settles when the load changes, s
+    double droopCents;  // how flat everything goes as the wind sags
+    bool fan;           // an electric blower: spin-up, wobble, hum
+    double wear;        // Tuning age is scaled by this (how far gone the reeds are at "as found")
+    bool lazyReeds;     // some reeds weak and slow, some buzzy
+    int box;            // 0 wooden parlour case, 1 small plastic case
+};
+inline const ModelVoice& modelVoice (Model m)
+{
+    static const ModelVoice v[] = {
+        { "Chord organ", 0.45, 1.8, 0.16, 38.0, true, 2.2, true, 1 },
+        { "Parlour organ", 1.0, 0.15, 0.02, 0.0, false, 1.0, false, 0 },
+    };
+    return v[m == Model::ChordOrgan ? 0 : 1];
+}
+
 struct OrganParams
 {
+    Model model = Model::ChordOrgan;
     Wind wind = Wind::Easy;
     std::array<bool, kStops> stops { true, false, false, false, false, false }; // Diapason
     bool voxHumana = false;     // the fan tremolo
@@ -108,14 +137,14 @@ struct Reed
 
     // one step at the inner rate. suction 0..~1.2; noise -1..1; breath: turbulence in the flow through
     // the slot (the reed's own air noise, pulsing with it). Returns what radiates.
-    double step (double suction, double noise, double breath)
+    double step (double suction, double noise, double breath, double pitch)
     {
         seed = seed * 1664525u + 1013904223u;
         wander += wanderK * ((double) (seed >> 8) * (2.0 / 16777216.0) - 1.0 - wander);
         pallet += (palletTarget - pallet) * palletRate;
         const double p = std::max (0.0, suction) * pallet;
         const double g = kGrowth * drive * p - 2.0 * zeta;            // net negative damping from the flow
-        const double c = c0 * (1.0 - kSag * env + wanderAmt * wander);  // pitch sags with the swing, and wanders
+        const double c = c0 * pitch * (1.0 - kSag * env + wanderAmt * wander); // the wind's droop; the swing's sag; the wander
         // turbulence nudges the tongue (that's how it starts), more with more flow
         const double kick = 2e-4 * noise * std::sqrt (p);
         v += -c * c * x + c * (g - kLimit * x * x) * v + c * kick;
@@ -158,6 +187,11 @@ struct Biquad
     {
         const double w = 2 * kPi * std::min (f, 0.45 * fs) / fs, al = std::sin (w) / (2 * q), cw = std::cos (w), a0 = 1 + al;
         b0 = (1 - cw) / 2 / a0; b1 = (1 - cw) / a0; b2 = b0; a1 = -2 * cw / a0; a2 = (1 - al) / a0;
+    }
+    void highpass (double fs, double f, double q)
+    {
+        const double w = 2 * kPi * f / fs, al = std::sin (w) / (2 * q), cw = std::cos (w), a0 = 1 + al;
+        b0 = (1 + cw) / 2 / a0; b1 = -(1 + cw) / a0; b2 = b0; a1 = -2 * cw / a0; a2 = (1 - al) / a0;
     }
     void bandpass (double fs, double f, double q)
     {
@@ -208,11 +242,8 @@ public:
         applyVoicing();
         windLp_.lowpass (fs, 2.0, 0.7);
         rumbleLp_.lowpass (fs, 220.0, 0.7);
-        // case: the wooden box's resonances, and the mic in front of the reed board
-        body_[0].peak (fs, 170.0, 1.2, 4.0);
-        body_[1].peak (fs, 420.0, 1.6, 2.5);
-        body_[2].peak (fs, 1150.0, 2.0, -2.0);
-        body_[3].peak (fs, 2600.0, 1.4, 2.0);
+        motorLp_.lowpass (fs, 1.5, 0.7);
+        fanLp_.lowpass (fs, 500.0, 0.6);
         hissBp_.bandpass (fs, 3500.0, 0.7);
         thumpLp_.lowpass (fs, 900.0, 0.7);
         pumpLp_.lowpass (fs, 400.0, 0.7);
@@ -245,7 +276,8 @@ public:
         active_.clear();
         held_.fill (false);
         reservoir_ = 0.0;
-        suction_ = 0.0;
+        suction_ = chest_ = 0.0;
+        motor_ = 0.0; // switched on: the fan spins up
         pedalPos_ = pedalSmooth_ = pedalVel_ = 0.0;
         dcX_ = dcY_ = 0.0;
         firPos_ = 0;
@@ -255,7 +287,7 @@ public:
     void setParams (const OrganParams& p)
     {
         // retune for Tuning age, and re-stop held keys
-        const bool retune = p.tuningAge != prm_.tuningAge;
+        const bool retune = p.tuningAge != prm_.tuningAge || p.model != prm_.model;
         const auto oldStops = prm_.stops;
         prm_ = p;
         if (retune)
@@ -265,10 +297,10 @@ public:
                 for (int r = 0; r < kStops; ++r)
                     if (oldStops[(size_t) r] != prm_.stops[(size_t) r])
                         setPallet (k, r, prm_.stops[(size_t) r], 0.6);
-        // the swell lid: closed, the case muffles the reeds; Forte opens it
-        swell_.lowpass (fs_, prm_.forte ? 7500.0 : 3200.0, 0.6);
+        setupCase();
     }
     const OrganParams& params() const { return prm_; }
+    const ModelVoice& model() const { return modelVoice (prm_.model); }
 
     // --- playing ---------------------------------------------------------------------------
     void noteOn (int note, double vel = 0.8)
@@ -321,14 +353,32 @@ public:
             // the chest: the suction the reeds see, sagging under load
             // the wind is never quite steady: a slight flutter from the bellows and valves
             const double flutter = 1.0 + prm_.airNoise * windLp_.process (rng_.next()) * 1.4; // ~0.8 % rms
-            const double chest = suction_ * flutter / (1.0 + kLoadSag * draw);
+            const auto& mv = model();
+            double source = suction_ * mv.windPower;
+            if (mv.fan)
+            {
+                // the blower: spins up over a second or two from switch-on, then never quite steady
+                motor_ += (1.0 - std::exp (-dt / 0.5)) * (1.0 - motor_);
+                motorPh_ += 0.43 * dt;
+                motorPh_ -= std::floor (motorPh_);
+                const double wobble = 1.0 + 0.012 * std::sin (2 * kPi * motorPh_) + 0.6 * motorLp_.process (rng_.next());
+                source *= motor_ * motor_ * wobble;
+            }
+            // the chest: what the wind can give, less what the open reeds pull; a weak fan settles slowly
+            const double target = source * flutter / (1.0 + mv.loadSag * draw);
+            chest_ += (1.0 - std::exp (-dt / mv.sagTau)) * (target - chest_);
+            const double chest = chest_;
+            // droop: as the wind sags under the load (and, less, as it's turned down) the reeds go flat
+            const double loadDrop = source > 1e-6 ? std::clamp (1.0 - chest / (source * flutter), 0.0, 1.0) : 0.0;
+            const double levelDrop = std::clamp (1.0 - suction_, 0.0, 1.0);
+            const double pitch = std::exp2 (-mv.droopCents * (loadDrop + 0.3 * levelDrop * levelDrop) / 1200.0);
             const double breath = kBreath * prm_.airNoise;
             // os reed steps per output sample, then down-sampled
             for (int h = 0; h < os_; ++h)
             {
                 double sum = 0;
                 for (size_t a = 0; a < active_.size(); ++a)
-                    sum += reeds_[(size_t) active_[a]].step (chest, rng_.next(), breath);
+                    sum += reeds_[(size_t) active_[a]].step (chest, rng_.next(), breath, pitch);
                 pushFir (sum);
             }
             double y = firOut();
@@ -347,7 +397,7 @@ public:
             // case, swell lid, mic
             for (auto& b : body_)
                 y = b.process (y);
-            y = swell_.process (y) * (prm_.forte ? 1.5 : 1.0);
+            y = lowCut_.process (swell_.process (y)) * (prm_.forte ? 1.5 : 1.0);
             // noises: air hiss through the open reeds, pallets and keys, the bellows working
             const double nz = prm_.airNoise;
             if (nz > 0)
@@ -358,6 +408,13 @@ public:
                 thump_ *= 0.995;
                 y += nz * 0.05 * thumpLp_.process (rng_.next() * thump_);
                 y += nz * 0.015 * pumpLp_.process (rng_.next()) * std::min (stroke, 4.0);
+                if (mv.fan) // the blower: its whoosh, and a little mains hum from the motor
+                {
+                    y += nz * 0.012 * fanLp_.process (rng_.next()) * motor_;
+                    humPh_ += 60.0 * dt;
+                    humPh_ -= std::floor (humPh_);
+                    y += nz * 0.0012 * motor_ * (std::sin (2 * kPi * humPh_) + 0.6 * std::sin (4 * kPi * humPh_) + 0.3 * std::sin (6 * kPi * humPh_));
+                }
             }
             out[i] = (float) (y * prm_.level);
             if ((++clock_ & 255) == 0)
@@ -374,10 +431,10 @@ public:
         const int k = note - kLowKey;
         return k >= 0 && k < kKeys ? std::sqrt (2.0 * reeds_[(size_t) (k * kStops + stop)].env) : 0.0;
     }
-    double reedFrequency (int note, int stop) const { return freqOf (note - kLowKey, stop, prm_.tuningAge); }
+    double reedFrequency (int note, int stop) const { return freqOf (note - kLowKey, stop, wear()); }
+    double chestSuction() const { return chest_; }
 
     // wind constants
-    static constexpr double kLoadSag = 0.15;     // chest suction / (1 + this x total draw)
     static constexpr double kPumpGain = 0.35;    // Reservoir: fill per unit of pedal travel
     static constexpr double kUse = 0.8;          // Reservoir: emptied per unit of draw per second
     static constexpr double kExprGain = 0.55;    // Expression: suction per unit/s of pedal travel
@@ -413,7 +470,8 @@ private:
     // each reed's voicing: its pitch, and how it was made and has worn: drive, set, tone and level vary a little
     void applyVoicing()
     {
-        const double age = prm_.tuningAge;
+        const double age = wear();
+        const bool lazy = model().lazyReeds;
         for (int k = 0; k < kKeys; ++k)
             for (int r = 0; r < kStops; ++r)
             {
@@ -425,10 +483,40 @@ private:
                 rd.drive = rv.drive * (1.0 + 0.12 * var * rn[1]);
                 rd.set = rv.set * (1.0 + 0.3 * var * rn[2]);
                 rd.gain = rv.gain * (1.0 + 0.15 * var * rn[3]);
+                if (lazy && rn[1] < -0.5) // a weak, lazy reed (about 1 in 8): dirt on the tongue, a tired spring
+                {
+                    rd.drive *= 0.6;
+                    rd.gain *= 0.75;
+                }
+                if (lazy && rn[2] > 0.6) // a buzzy one (about 1 in 12): the tongue sits well off its slot
+                    rd.set *= 1.8;
                 rd.cellCoef = 1.0 - std::exp (-2 * kPi * std::min (f * rv.cell * (1.0 + 0.2 * var * rn[4]), 0.4 * fsi_) / fsi_);
                 rd.c0 = stepFor (f);
                 rd.wanderAmt = age * kWanderCents * std::log (2.0) / 1200.0 * kWanderNorm / std::sqrt (rd.wanderK);
             }
+    }
+    double wear() const { return prm_.tuningAge * model().wear; }
+    // the case and the mic: a wooden parlour case, or a small plastic box (boxy, thin in the bass, dull)
+    void setupCase()
+    {
+        if (model().box == 0)
+        {
+            body_[0].peak (fs_, 170.0, 1.2, 4.0);
+            body_[1].peak (fs_, 420.0, 1.6, 2.5);
+            body_[2].peak (fs_, 1150.0, 2.0, -2.0);
+            body_[3].peak (fs_, 2600.0, 1.4, 2.0);
+            lowCut_.highpass (fs_, 40.0, 0.7);
+            swell_.lowpass (fs_, prm_.forte ? 7500.0 : 3200.0, 0.6);
+        }
+        else
+        {
+            body_[0].peak (fs_, 310.0, 1.6, 4.0);
+            body_[1].peak (fs_, 720.0, 2.2, 5.0);
+            body_[2].peak (fs_, 1600.0, 1.8, -3.0);
+            body_[3].peak (fs_, 2300.0, 2.5, 2.0);
+            lowCut_.highpass (fs_, 150.0, 0.8);
+            swell_.lowpass (fs_, prm_.forte ? 4800.0 : 2600.0, 0.7);
+        }
     }
     void setPallet (int k, int r, bool open, double vel)
     {
@@ -516,10 +604,11 @@ private:
     std::array<double, kKeys> keyOff_ {};
     std::array<bool, kKeys> held_ {};
     double suction_ = 0, reservoir_ = 0, pedalPos_ = 0, pedalSmooth_ = 0, pedalVel_ = 0;
+    double chest_ = 0, motor_ = 0, motorPh_ = 0, humPh_ = 0;
     bool valve_ = false;
     double dcX_ = 0, dcY_ = 0, voxPh_ = 0, thump_ = 0;
     std::array<Biquad, 4> body_;
-    Biquad swell_, hissBp_, thumpLp_, pumpLp_, windLp_, rumbleLp_;
+    Biquad swell_, lowCut_, hissBp_, thumpLp_, pumpLp_, windLp_, rumbleLp_, motorLp_, fanLp_;
     std::vector<double> fir_, firBuf_;
     int firPos_ = 0, os_ = 4;
     int64_t clock_ = 0;
