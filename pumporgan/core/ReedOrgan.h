@@ -78,12 +78,17 @@ struct ModelVoice
     double wear;        // Tuning age is scaled by this (how far gone the reeds are at "as found")
     bool lazyReeds;     // some reeds weak and slow, some buzzy
     int box;            // 0 wooden parlour case, 1 small plastic case
+    // struggling on little wind
+    double labourBelow; // below this share of its full wind it starts to labour
+    double gust;        // gusts in the chest, of a fixed size: nothing at full wind, a lot at a trickle
+    double wowCents;    // the shared pitch warble at its worst
+    double sputter;     // how much each reed's drive flutters on its own at its worst
 };
 inline const ModelVoice& modelVoice (Model m)
 {
     static const ModelVoice v[] = {
-        { "Chord organ", 0.45, 1.8, 0.16, 38.0, true, 2.2, true, 1 },
-        { "Parlour organ", 1.0, 0.15, 0.02, 0.0, false, 1.0, false, 0 },
+        { "Chord organ", 0.45, 1.8, 0.16, 38.0, true, 2.2, true, 1, 0.6, 0.035, 10.0, 0.9 },
+        { "Parlour organ", 1.0, 0.15, 0.02, 0.0, false, 1.0, false, 0, 0.3, 0.008, 4.0, 0.25 },
     };
     return v[m == Model::ChordOrgan ? 0 : 1];
 }
@@ -124,7 +129,7 @@ struct Reed
     double slow = 0.0005;     // the envelope and mean-flow followers' rate (set for the inner sample rate)
     // a living pitch: the tongue's rate drifts a little and slowly (temperature, wind turbulence), so
     // beats between reeds wander instead of sweeping evenly like a phaser
-    double wander = 0, wanderK = 2e-5, wanderAmt = 0;
+    double wander = 0, wanderK = 2e-5, wanderAmt = 0, wanderScale = 1; // wander x wanderScale: ~1 rms
     uint32_t seed = 1;
     bool active = false;
 
@@ -137,14 +142,17 @@ struct Reed
 
     // one step at the inner rate. suction 0..~1.2; noise -1..1; breath: turbulence in the flow through
     // the slot (the reed's own air noise, pulsing with it). Returns what radiates.
-    double step (double suction, double noise, double breath, double pitch)
+    // struggle 0..1: how hard the wind is labouring (little flow). The reed's margin over its threshold is
+    // small then, so it sputters on its own and its pitch wanders further.
+    double step (double suction, double noise, double breath, double pitch, double struggle, double sputter)
     {
         seed = seed * 1664525u + 1013904223u;
         wander += wanderK * ((double) (seed >> 8) * (2.0 / 16777216.0) - 1.0 - wander);
         pallet += (palletTarget - pallet) * palletRate;
         const double p = std::max (0.0, suction) * pallet;
-        const double g = kGrowth * drive * p - 2.0 * zeta;            // net negative damping from the flow
-        const double c = c0 * pitch * (1.0 - kSag * env + wanderAmt * wander); // the wind's droop; the swing's sag; the wander
+        const double wn = wander * wanderScale;
+        const double g = kGrowth * drive * (1.0 + sputter * struggle * wn) * p - 2.0 * zeta; // net negative damping from the flow
+        const double c = c0 * pitch * (1.0 - kSag * env + wanderAmt * wander * (1.0 + 4.0 * struggle)); // droop; swing sag; wander
         // turbulence nudges the tongue (that's how it starts), more with more flow
         const double kick = 2e-4 * noise * std::sqrt (p);
         v += -c * c * x + c * (g - kLimit * x * x) * v + c * kick;
@@ -243,6 +251,8 @@ public:
         windLp_.lowpass (fs, 2.0, 0.7);
         rumbleLp_.lowpass (fs, 220.0, 0.7);
         motorLp_.lowpass (fs, 1.5, 0.7);
+        gustLp_.lowpass (fs, 3.0, 0.7);
+        wowLp_.lowpass (fs, 1.2, 0.7);
         fanLp_.lowpass (fs, 500.0, 0.6);
         hissBp_.bandpass (fs, 3500.0, 0.7);
         thumpLp_.lowpass (fs, 900.0, 0.7);
@@ -367,18 +377,28 @@ public:
             // the chest: what the wind can give, less what the open reeds pull; a weak fan settles slowly
             const double target = source * flutter / (1.0 + mv.loadSag * draw);
             chest_ += (1.0 - std::exp (-dt / mv.sagTau)) * (target - chest_);
-            const double chest = chest_;
+            // gusts: the fan's air never comes quite even. Fixed in size, so at a trickle they're a big part of it
+            const double gust = mv.gust * prm_.airNoise * gustLp_.process (rng_.next()) * 60.0;
+            const double chest = std::max (0.0, chest_ + gust * std::min (1.0, chest_ * 20.0));
+            // labouring: below part of its full wind the organ struggles, more the less it gets
+            const double ref = mv.labourBelow * mv.windPower * (mv.fan ? motor_ * motor_ : 1.0);
+            const double struggle = ref > 1e-6 ? std::clamp ((ref - chest) / ref, 0.0, 1.0) : 0.0;
+            // the wow: a slow, uneven warble in everything's pitch as it labours
+            wowPh_ += 0.55 * dt;
+            wowPh_ -= std::floor (wowPh_);
+            const double wow = struggle * mv.wowCents * (0.5 * std::sin (2 * kPi * wowPh_) + 0.9 * wowLp_.process (rng_.next()) * 55.0);
             // droop: as the wind sags under the load (and, less, as it's turned down) the reeds go flat
             const double loadDrop = source > 1e-6 ? std::clamp (1.0 - chest / (source * flutter), 0.0, 1.0) : 0.0;
             const double levelDrop = std::clamp (1.0 - suction_, 0.0, 1.0);
-            const double pitch = std::exp2 (-mv.droopCents * (loadDrop + 0.3 * levelDrop * levelDrop) / 1200.0);
+            const double pitch = std::exp2 ((wow - mv.droopCents * (loadDrop + 0.3 * levelDrop * levelDrop)) / 1200.0);
+            lastStruggle_ = struggle;
             const double breath = kBreath * prm_.airNoise;
             // os reed steps per output sample, then down-sampled
             for (int h = 0; h < os_; ++h)
             {
                 double sum = 0;
                 for (size_t a = 0; a < active_.size(); ++a)
-                    sum += reeds_[(size_t) active_[a]].step (chest, rng_.next(), breath, pitch);
+                    sum += reeds_[(size_t) active_[a]].step (chest, rng_.next(), breath, pitch, struggle, mv.sputter);
                 pushFir (sum);
             }
             double y = firOut();
@@ -433,6 +453,7 @@ public:
     }
     double reedFrequency (int note, int stop) const { return freqOf (note - kLowKey, stop, wear()); }
     double chestSuction() const { return chest_; }
+    double struggle() const { return lastStruggle_; } // 0 at good wind .. 1 at a trickle
 
     // wind constants
     static constexpr double kPumpGain = 0.35;    // Reservoir: fill per unit of pedal travel
@@ -492,6 +513,7 @@ private:
                     rd.set *= 1.8;
                 rd.cellCoef = 1.0 - std::exp (-2 * kPi * std::min (f * rv.cell * (1.0 + 0.2 * var * rn[4]), 0.4 * fsi_) / fsi_);
                 rd.c0 = stepFor (f);
+                rd.wanderScale = kWanderNorm / std::sqrt (rd.wanderK);
                 rd.wanderAmt = age * kWanderCents * std::log (2.0) / 1200.0 * kWanderNorm / std::sqrt (rd.wanderK);
             }
     }
@@ -604,11 +626,11 @@ private:
     std::array<double, kKeys> keyOff_ {};
     std::array<bool, kKeys> held_ {};
     double suction_ = 0, reservoir_ = 0, pedalPos_ = 0, pedalSmooth_ = 0, pedalVel_ = 0;
-    double chest_ = 0, motor_ = 0, motorPh_ = 0, humPh_ = 0;
+    double chest_ = 0, motor_ = 0, motorPh_ = 0, humPh_ = 0, wowPh_ = 0, lastStruggle_ = 0;
     bool valve_ = false;
     double dcX_ = 0, dcY_ = 0, voxPh_ = 0, thump_ = 0;
     std::array<Biquad, 4> body_;
-    Biquad swell_, lowCut_, hissBp_, thumpLp_, pumpLp_, windLp_, rumbleLp_, motorLp_, fanLp_;
+    Biquad swell_, lowCut_, hissBp_, thumpLp_, pumpLp_, windLp_, rumbleLp_, motorLp_, fanLp_, gustLp_, wowLp_;
     std::vector<double> fir_, firBuf_;
     int firPos_ = 0, os_ = 4;
     int64_t clock_ = 0;

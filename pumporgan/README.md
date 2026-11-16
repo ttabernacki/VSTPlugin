@@ -12,6 +12,16 @@ ahead of the plug-in. The volume pedal is the wind.
   - **Saggy:** a big chord is more than the fan can keep up with. The wind sags (to about 70% under an
     8-note chord), settling over a moment as the fan labours, and everything droops flat and quieter: a
     held note goes about 10 cents flat when a big chord comes in.
+  - **Struggling on little wind:** below about 60% of its full wind it labours, more the less it gets.
+    - Gusts: the fan's air comes unevenly, in gusts of a fixed size. At full wind they're nothing; at a
+      trickle they're a big part of what's there.
+    - Wow: a slow, uneven warble in everything's pitch, and each reed's own wander grows.
+    - Sputter: each reed's grip on the wind flutters on its own, so notes in a chord swell and fade
+      unevenly, and at a trickle they nearly drop out and come back.
+    - For one held note: about 6 cents of drift at full wind, 12 at 55% pedal, 18 at 40% and 27 at 30%.
+      Its level holds within a dB down to about 55% pedal, then swings about 14 dB at 40% and drops
+      almost out at 30%.
+    - The parlour organ only labours below 30% of its wind, and less.
   - **Worn:** keys up to about 8 cents off. Some reeds are weak and lazy (about 1 in 8) and some buzzy
     (about 1 in 12).
   - **The case:** a boxy plastic case, thin in the bass, dull on top.
@@ -65,7 +75,8 @@ The tests check tuning across C2-C7, the speech threshold and speech times, loud
 rising with wind, Melodia mellower than Diapason, the Celeste beating, the reservoir filling and
 running dry, Expression responding only to strokes, the wind sagging under a big chord, the Celeste's
 beat rate, the worn tuning spread, the pitch wander, and for the chord organ: the fan's spin-up, its
-weaker wind, the slow sag and droop under a big chord, and its wear. Then stability and CPU.
+weaker wind, the slow sag and droop under a big chord, how it labours, warbles and sputters on little
+wind (and holds steady on full), and its wear. Then stability and CPU.
 
 Demos:
 1. Diapason C2-C6
@@ -80,5 +91,7 @@ Demos:
 10. A hymn phrase worn in, then factory fresh
 11. The chord organ switched on: its fan spins up under a held chord
 12. The same phrase on the chord organ, then the parlour organ
+13. Struggling on low wind: a chord held as the pedal eases to a trickle, up to full, and down again
+14. A melody on a trickle of wind
 
 Demos 1-11 are the chord organ. Except for demo 11, each starts with the fan already running.

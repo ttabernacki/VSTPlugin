@@ -67,6 +67,19 @@ struct Rig
             }
             if (std::abs (acc) > bestM) { bestM = std::abs (acc); best = ff; }
         }
+        // then finer, around it
+        const double coarse = best;
+        for (double c = -0.5; c <= 0.5; c += 0.05)
+        {
+            const double ff = coarse * std::pow (2.0, c / 1200.0);
+            std::complex<double> acc = 0;
+            for (size_t i = 0; i < n; ++i)
+            {
+                const double w = 0.5 - 0.5 * std::cos (2 * kPi * i / n);
+                acc += w * out[a + i] * std::polar (1.0, -2 * kPi * ff * i / kFs);
+            }
+            if (std::abs (acc) > bestM) { bestM = std::abs (acc); best = ff; }
+        }
         return best;
     }
     // spectral brightness: share of energy above 4x the fundamental
@@ -220,7 +233,7 @@ int main()
             return cents (hi, lo);
         };
         const double aged = drift (1.0), fresh = drift (0.0);
-        CHECK (aged > 0.4 && aged < 4.0 && fresh < 0.3, "pitch wander over 5 s: %.2f cents worn, %.2f cents new", aged, fresh);
+        CHECK (aged > 0.4 && aged < 4.0 && fresh < 0.25 && aged > 2.0 * fresh, "pitch wander over 5 s: %.2f cents worn, %.2f cents new", aged, fresh);
     }
     std::printf ("Wind\n");
     {
@@ -318,7 +331,7 @@ int main()
             r.run (1.5);
             const double f0 = r.peakNear (r.o->reedFrequency (76, Diapason), 4.0, 0.5), a0 = r.o->reedAmplitude (76, Diapason);
             const double s0 = r.o->chestSuction();
-            for (int n : { 41, 48, 53, 57, 60, 65, 69 })
+            for (int n : { 41, 53, 55, 60, 65, 67, 72 }) // nothing with a harmonic near E5, which would fool the pitch measurement
                 r.o->noteOn (n);
             r.run (0.05);
             const double sQuick = r.o->chestSuction();
@@ -327,6 +340,38 @@ int main()
             const double s1 = r.o->chestSuction();
             CHECK (s1 < 0.7 * s0 && sQuick > s1 + 0.3 * (s0 - s1), "a big chord sags the wind to %.0f%%, settling over a moment, not at once", 100 * s1 / s0);
             CHECK (cents (f1, f0) < -6.0 && a1 < 0.85 * a0, "the held E5 droops %.1f cents and its swing falls %.0f%%", cents (f1, f0), 100 * (1 - a1 / a0));
+        }
+        // struggling on little wind: the pitch warbles and the level wavers far more than on full wind
+        {
+            auto wobble = [&] (double pedal, double& pitchRange, double& levelRange) {
+                OrganParams p = co ({ Diapason, Melodia });
+                p.airNoise = 1.0;
+                p.tuningAge = 1.0;
+                Rig r (p);
+                r.o->pedal (pedal);
+                r.run (2.5);
+                for (int n : { 57, 60, 64 })
+                    r.o->noteOn (n);
+                r.run (8.0);
+                double flo = 1e9, fhi = -1e9, llo = 1e9, lhi = 0;
+                for (double t = 4.0; t < 10.5; t += 0.25)
+                {
+                    const double f = r.peakNear (r.o->reedFrequency (64, Diapason), t, 0.25);
+                    flo = std::min (flo, f);
+                    fhi = std::max (fhi, f);
+                    const double l = r.rms (t, t + 0.25);
+                    llo = std::min (llo, l);
+                    lhi = std::max (lhi, l);
+                }
+                pitchRange = cents (fhi, flo);
+                levelRange = 20 * std::log10 (lhi / llo);
+                return r.o->struggle();
+            };
+            double pLow, lLow, pHigh, lHigh;
+            const double sLow = wobble (0.4, pLow, lLow), sHigh = wobble (1.0, pHigh, lHigh);
+            CHECK (sLow > 0.3 && sHigh < 0.15, "it labours on little wind (struggle %.2f at 40%% pedal, %.2f at full)", sLow, sHigh);
+            CHECK (pLow > 2.0 * pHigh && pLow > 6.0, "and warbles: the pitch wanders %.1f cents at 40%% pedal, %.1f at full", pLow, pHigh);
+            CHECK (lLow > 1.5 * lHigh && lLow > 3.0, "and sputters: the level wavers %.1f dB at 40%% pedal, %.1f dB at full", lLow, lHigh);
         }
         // more worn: keys well out
         {

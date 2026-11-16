@@ -267,5 +267,30 @@ int main (int argc, char** argv)
         s.pedal = [] (double) { return 0.75; };
         writeWav16 (dir + "12_chord_organ_then_parlour.wav", s.render (t + 0.5, co), 48000.0);
     }
+    { // 13: struggling on little wind: a chord held as the pedal eases down to a trickle, back up to full, and down again
+        Script s;
+        s.chord (0.3, 21.0, { 48, 55, 64 });
+        s.chord (12.0, 21.0, { 72 });
+        s.pedal = [] (double t) {
+            if (t < 7.0) return 0.75 - 0.43 * t / 7.0;           // down to 32%: it labours, warbles and sputters
+            if (t < 11.0) return 0.32 + 0.68 * (t - 7.0) / 4.0;   // up to full: steady again
+            if (t < 13.0) return 1.0;
+            return std::max (0.36, 1.0 - 0.64 * (t - 13.0) / 4.0); // and back down
+        };
+        writeWav16 (dir + "13_struggling_on_low_wind.wav", s.render (21.8, stops ({ Diapason, Melodia })), 48000.0);
+    }
+    { // 14: a melody on a trickle of wind over a soft chord
+        Script s;
+        s.chord (0.3, 12.0, { 53, 60, 65 });
+        const int mel[] = { 72, 74, 76, 79, 77, 76, 74, 72 };
+        double t = 0.8;
+        for (int n : mel)
+        {
+            s.chord (t, t + 1.3, { n });
+            t += 1.35;
+        }
+        s.pedal = [] (double) { return 0.42; };
+        writeWav16 (dir + "14_melody_on_a_trickle.wav", s.render (12.8, stops ({ Diapason })), 48000.0);
+    }
     return 0;
 }
