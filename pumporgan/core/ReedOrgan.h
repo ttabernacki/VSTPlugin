@@ -12,7 +12,7 @@
 //   - every open reed draws on the same chest, so a big chord sags the wind for everyone.
 //
 // Reed:   a damped mass-spring tongue (x'' + 2 zeta w x' + w^2 x = F), excited by the flow, with the
-//         self-limiting the slot gives (van der Pol form). Simulated at 2x the output rate.
+//         self-limiting the slot gives (van der Pol form). Simulated at 4x the output rate.
 // Flow:   U = aperture(x) * sqrt(suction): the slot is shut while the tongue is inside it and opens
 //         smoothly as it swings out either side (the tongue rests a little off the slot, so the two sides differ).
 // Wind:   Easy (pedal position = suction), Reservoir (each pedal stroke pumps air out; reeds use it up),
@@ -43,6 +43,7 @@ struct RankVoice
     double cell;       // reed cell low-pass, in multiples of the reed's pitch (mellow .. bright)
     double gain;
     int lowKey, highKey; // compass (Sub Bass: the bottom octave and a half)
+    double beat = 0;     // Celeste: tuned to beat this many times a second against its partner (slower in the bass)
 };
 inline const std::array<RankVoice, kStops>& rankVoices()
 {
@@ -50,7 +51,7 @@ inline const std::array<RankVoice, kStops>& rankVoices()
         { "Diapason 8'", 0, 0.0, 1.0, 0.16, 14.0, 1.0, kLowKey, kHighKey },
         { "Melodia 8'", 0, 0.0, 0.85, 0.10, 6.0, 0.9, kLowKey, kHighKey },
         { "Dulciana 8'", 0, 0.0, 0.55, 0.09, 5.0, 0.55, kLowKey, kHighKey },
-        { "Celeste 8'", 0, 7.0, 0.55, 0.09, 5.0, 0.55, 48, kHighKey }, // tuned sharp against the Dulciana; treble only, as usual
+        { "Celeste 8'", 0, 0.0, 0.55, 0.09, 5.0, 0.55, 48, kHighKey, 1.0 }, // sharp of the Dulciana by a slow beat; treble only, as usual
         { "Sub Bass 16'", -1, 0.0, 0.9, 0.12, 7.0, 1.1, kLowKey, kLowKey + 17 },
         { "Flute 4'", 1, 0.0, 0.7, 0.07, 3.5, 0.6, kLowKey, kHighKey },
     } };
@@ -91,6 +92,11 @@ struct Reed
     double cellCoef = 0.5;    // one-pole low-pass of the reed cell
     // state
     double x = 0, v = 0, env = 0, cellY = 0, pallet = 0, palletTarget = 0, palletRate = 0.002, flowMean = 0;
+    double slow = 0.0005;     // the envelope and mean-flow followers' rate (set for the inner sample rate)
+    // a living pitch: the tongue's rate drifts a little and slowly (temperature, wind turbulence), so
+    // beats between reeds wander instead of sweeping evenly like a phaser
+    double wander = 0, wanderK = 2e-5, wanderAmt = 0;
+    uint32_t seed = 1;
     bool active = false;
 
     static constexpr double kSlot = 0.2;   // half the slot's depth, in tongue-swing units
@@ -100,18 +106,21 @@ struct Reed
     static constexpr double kOpen = 0.08;   // the opening around the tongue that limits the flow, in swing units
     static constexpr double kInside = 0.35; // how far the slot opens on the cell side, relative to the room side
 
-    // one step at the inner rate. suction 0..~1.2; noise -1..1. Returns the flow through the slot.
-    double step (double suction, double noise)
+    // one step at the inner rate. suction 0..~1.2; noise -1..1; breath: turbulence in the flow through
+    // the slot (the reed's own air noise, pulsing with it). Returns what radiates.
+    double step (double suction, double noise, double breath)
     {
+        seed = seed * 1664525u + 1013904223u;
+        wander += wanderK * ((double) (seed >> 8) * (2.0 / 16777216.0) - 1.0 - wander);
         pallet += (palletTarget - pallet) * palletRate;
         const double p = std::max (0.0, suction) * pallet;
         const double g = kGrowth * drive * p - 2.0 * zeta;            // net negative damping from the flow
-        const double c = c0 * (1.0 - kSag * env);                     // pitch sags with the swing
+        const double c = c0 * (1.0 - kSag * env + wanderAmt * wander);  // pitch sags with the swing, and wanders
         // turbulence nudges the tongue (that's how it starts), more with more flow
         const double kick = 2e-4 * noise * std::sqrt (p);
         v += -c * c * x + c * (g - kLimit * x * x) * v + c * kick;
         x += v;
-        env += 0.0005 * (x * x - env);
+        env += slow * (x * x - env);
         // the slot opens as the tongue swings out of it. Out towards the room it opens wide; in towards
         // the chest it swings into the reed cell, whose walls keep that side narrower.
         const double y = x + set;
@@ -124,13 +133,14 @@ struct Reed
             return r * kOpen / (kOpen + r);
         };
         const double ap = 0.01 + opening (zo) + kInside * opening (zi);
-        const double u = ap * std::sqrt (p);
-        flowMean += 0.0005 * (u - flowMean);
+        const double u = ap * std::sqrt (p) * (1.0 + breath * noise);
+        flowMean += slow * (u - flowMean);
         // the cell, then what radiates: the change in flow (a pulsing source), level-matched across the compass
         const double prev = cellY;
         cellY += cellCoef * (u - cellY);
         return (cellY - prev) / c0 * gain;
     }
+    void clearState() { x = v = env = cellY = pallet = palletTarget = flowMean = 0; active = false; }
     bool quiet() const { return palletTarget == 0.0 && pallet < 1e-4 && env < 1e-8; }
 };
 
@@ -167,28 +177,37 @@ class ReedOrgan
 public:
     ReedOrgan() { reeds_.resize ((size_t) (kKeys * kStops)); active_.reserve (reeds_.size()); }
 
-    void prepare (double fs)
+    // os: how many reed steps per output sample. The reeds' sharp pulses are rich far past the audio
+    // band; too few steps and those harmonics fold back down as a swirling, phasey haze on the treble.
+    void prepare (double fs, int os = 4)
     {
         fs_ = fs;
-        fsi_ = 2.0 * fs; // the reeds run at twice the output rate
+        os_ = std::clamp (os, 1, 8);
+        fsi_ = os_ * fs;
         Rng tune;
         tune.s = 0x9e3779b9u;
         for (int k = 0; k < kKeys; ++k)
+        {
             for (int r = 0; r < kStops; ++r)
             {
                 auto& rd = reed (k, r);
                 rd = {};
                 const auto& rv = rankVoices()[(size_t) r];
-                const double off = tune.next(), dv = tune.next(), sv = tune.next();
-                detune_[(size_t) (k * kStops + r)] = off; // each reed a little off its mark (scaled by Tuning age)
-                const double f = freqOf (k, r, 0.0);
+                (void) rv;
+                auto& rn = rand_[(size_t) (k * kStops + r)];
+                for (auto& v : rn)
+                    v = 0.5 * (tune.next() + tune.next()); // -1..1, most near 0
                 rd.zeta = 1.0 / (2.0 * 250.0);
-                rd.drive = rv.drive * (1.0 + 0.04 * dv);
-                rd.set = rv.set * (1.0 + 0.15 * sv);
-                rd.gain = rv.gain;
-                rd.cellCoef = 1.0 - std::exp (-2 * kPi * std::min (f * rv.cell, 0.4 * fsi_) / fsi_);
-                rd.c0 = stepFor (f);
+                rd.slow = 0.0005 * 96000.0 / fsi_;
+                rd.seed = 0x1234567u + (uint32_t) (k * kStops + r) * 2654435761u;
+                // the slow pitch wander: a one-pole at ~0.5 Hz on white noise
+                rd.wanderK = 1.0 - std::exp (-2 * kPi * 0.5 / fsi_);
             }
+            keyOff_[(size_t) k] = 0.5 * (tune.next() + tune.next());
+        }
+        applyVoicing();
+        windLp_.lowpass (fs, 2.0, 0.7);
+        rumbleLp_.lowpass (fs, 220.0, 0.7);
         // case: the wooden box's resonances, and the mic in front of the reed board
         body_[0].peak (fs, 170.0, 1.2, 4.0);
         body_[1].peak (fs, 420.0, 1.6, 2.5);
@@ -197,12 +216,18 @@ public:
         hissBp_.bandpass (fs, 3500.0, 0.7);
         thumpLp_.lowpass (fs, 900.0, 0.7);
         pumpLp_.lowpass (fs, 400.0, 0.7);
-        // 2x down-sampling: a 31-tap windowed-sinc half-band
-        for (int i = 0; i < kFir; ++i)
+        // down-sampling: a windowed-sinc low-pass at ~21 kHz (Blackman), steep enough that nothing folds
+        // back into the audio band
+        const int taps = os_ == 1 ? 1 : 34 * os_ + 1;
+        fir_.assign ((size_t) taps, 0.0);
+        firBuf_.assign ((size_t) taps, 0.0);
+        const double fc = std::min (21000.0, 0.44 * fs_) / fsi_;
+        for (int i = 0; i < taps; ++i)
         {
-            const double m = i - (kFir - 1) / 2.0;
-            const double sinc = m == 0 ? 0.5 : std::sin (kPi * 0.5 * m) / (kPi * m);
-            fir_[(size_t) i] = sinc * (0.42 - 0.5 * std::cos (2 * kPi * i / (kFir - 1)) + 0.08 * std::cos (4 * kPi * i / (kFir - 1)));
+            const double m = i - (taps - 1) / 2.0;
+            const double sinc = m == 0 ? 2 * fc : std::sin (2 * kPi * fc * m) / (kPi * m);
+            const double w = taps == 1 ? 1.0 : 0.42 - 0.5 * std::cos (2 * kPi * i / (taps - 1)) + 0.08 * std::cos (4 * kPi * i / (taps - 1));
+            fir_[(size_t) i] = sinc * w;
         }
         double s = 0;
         for (double c : fir_) s += c;
@@ -215,9 +240,7 @@ public:
     {
         for (auto& r : reeds_)
         {
-            const auto c0 = r.c0, z = r.zeta, d = r.drive, st = r.set, g = r.gain, cc = r.cellCoef;
-            r = {};
-            r.c0 = c0; r.zeta = z; r.drive = d; r.set = st; r.gain = g; r.cellCoef = cc;
+            r.clearState();
         }
         active_.clear();
         held_.fill (false);
@@ -226,7 +249,7 @@ public:
         pedalPos_ = pedalSmooth_ = pedalVel_ = 0.0;
         dcX_ = dcY_ = 0.0;
         firPos_ = 0;
-        firBuf_.fill (0.0);
+        std::fill (firBuf_.begin(), firBuf_.end(), 0.0);
     }
 
     void setParams (const OrganParams& p)
@@ -236,9 +259,7 @@ public:
         const auto oldStops = prm_.stops;
         prm_ = p;
         if (retune)
-            for (int k = 0; k < kKeys; ++k)
-                for (int r = 0; r < kStops; ++r)
-                    reed (k, r).c0 = stepFor (freqOf (k, r, prm_.tuningAge));
+            applyVoicing();
         for (int k = 0; k < kKeys; ++k)
             if (held_[(size_t) k])
                 for (int r = 0; r < kStops; ++r)
@@ -298,13 +319,16 @@ public:
                 draw += reeds_[(size_t) idx].flowMean;
             updateWind (stroke, draw, dt);
             // the chest: the suction the reeds see, sagging under load
-            const double chest = suction_ / (1.0 + kLoadSag * draw);
-            // two reed steps per output sample, then down-sampled
-            for (int h = 0; h < 2; ++h)
+            // the wind is never quite steady: a slight flutter from the bellows and valves
+            const double flutter = 1.0 + prm_.airNoise * windLp_.process (rng_.next()) * 1.4; // ~0.8 % rms
+            const double chest = suction_ * flutter / (1.0 + kLoadSag * draw);
+            const double breath = kBreath * prm_.airNoise;
+            // os reed steps per output sample, then down-sampled
+            for (int h = 0; h < os_; ++h)
             {
                 double sum = 0;
                 for (size_t a = 0; a < active_.size(); ++a)
-                    sum += reeds_[(size_t) active_[a]].step (chest, rng_.next());
+                    sum += reeds_[(size_t) active_[a]].step (chest, rng_.next(), breath);
                 pushFir (sum);
             }
             double y = firOut();
@@ -328,7 +352,9 @@ public:
             const double nz = prm_.airNoise;
             if (nz > 0)
             {
-                y += nz * 0.04 * hissBp_.process (rng_.next()) * std::sqrt (draw * chest);
+                const double air = std::sqrt (draw * chest);
+                y += nz * 0.11 * hissBp_.process (rng_.next()) * air;      // hiss of air through the reeds
+                y += nz * 0.09 * rumbleLp_.process (rng_.next()) * air;    // the draught in the chest
                 thump_ *= 0.995;
                 y += nz * 0.05 * thumpLp_.process (rng_.next() * thump_);
                 y += nz * 0.015 * pumpLp_.process (rng_.next()) * std::min (stroke, 4.0);
@@ -355,6 +381,12 @@ public:
     static constexpr double kPumpGain = 0.35;    // Reservoir: fill per unit of pedal travel
     static constexpr double kUse = 0.8;          // Reservoir: emptied per unit of draw per second
     static constexpr double kExprGain = 0.55;    // Expression: suction per unit/s of pedal travel
+    // character (all scaled by Tuning age, 1 = a worn-in instrument)
+    static constexpr double kKeyCents = 4.0;     // keys off their marks, up to about this
+    static constexpr double kReedCents = 1.2;    // each reed off its key, up to about this
+    static constexpr double kWanderCents = 0.5;  // the slow pitch wander, rms
+    static constexpr double kWanderNorm = 2.45;  // a one-pole on uniform noise: rms = sqrt(k / 6), so this x sqrt(k) is ~1/rms
+    static constexpr double kBreath = 0.10;      // turbulence in each reed's flow
 
 private:
     Reed& reed (int k, int r) { return reeds_[(size_t) (k * kStops + r)]; }
@@ -370,8 +402,33 @@ private:
     double freqOf (int k, int r, double age) const
     {
         const auto& rv = rankVoices()[(size_t) r];
-        const double cents = rv.cents + 1.5 * age * detune_[(size_t) (k * kStops + r)];
-        return 440.0 * std::pow (2.0, (kLowKey + k + 12 * rv.octave - 69) / 12.0 + cents / 1200.0);
+        // worn tuning: each key a few cents off its mark (all its reeds, roughly together), and each reed a
+        // little off that
+        const double cents = rv.cents + age * (kKeyCents * keyOff_[(size_t) k] + kReedCents * rand_[(size_t) (k * kStops + r)][0]);
+        double f = 440.0 * std::pow (2.0, (kLowKey + k + 12 * rv.octave - 69) / 12.0 + cents / 1200.0);
+        if (rv.beat > 0) // Celeste: a slow beat, ~1.3 Hz in the bass to 2 Hz at the top
+            f += rv.beat * (1.3 + 0.7 * std::clamp (std::log2 (f / 130.0) / 4.0, 0.0, 1.0));
+        return f;
+    }
+    // each reed's voicing: its pitch, and how it was made and has worn: drive, set, tone and level vary a little
+    void applyVoicing()
+    {
+        const double age = prm_.tuningAge;
+        for (int k = 0; k < kKeys; ++k)
+            for (int r = 0; r < kStops; ++r)
+            {
+                auto& rd = reed (k, r);
+                const auto& rv = rankVoices()[(size_t) r];
+                const auto& rn = rand_[(size_t) (k * kStops + r)];
+                const double f = freqOf (k, r, age);
+                const double var = 0.4 + 0.6 * std::min (age, 2.0); // a new organ is more even, never perfect
+                rd.drive = rv.drive * (1.0 + 0.12 * var * rn[1]);
+                rd.set = rv.set * (1.0 + 0.3 * var * rn[2]);
+                rd.gain = rv.gain * (1.0 + 0.15 * var * rn[3]);
+                rd.cellCoef = 1.0 - std::exp (-2 * kPi * std::min (f * rv.cell * (1.0 + 0.2 * var * rn[4]), 0.4 * fsi_) / fsi_);
+                rd.c0 = stepFor (f);
+                rd.wanderAmt = age * kWanderCents * std::log (2.0) / 1200.0 * kWanderNorm / std::sqrt (rd.wanderK);
+            }
     }
     void setPallet (int k, int r, bool open, double vel)
     {
@@ -397,9 +454,7 @@ private:
             auto& rd = reeds_[(size_t) active_[a]];
             if (rd.quiet())
             {
-                const auto c0 = rd.c0, z = rd.zeta, d = rd.drive, st = rd.set, g = rd.gain, cc = rd.cellCoef;
-                rd = {};
-                rd.c0 = c0; rd.zeta = z; rd.drive = d; rd.set = st; rd.gain = g; rd.cellCoef = cc;
+                rd.clearState();
                 active_[a] = active_.back();
                 active_.pop_back();
             }
@@ -442,30 +497,31 @@ private:
     void pushFir (double x)
     {
         firBuf_[(size_t) firPos_] = x;
-        firPos_ = (firPos_ + 1) % kFir;
+        firPos_ = (firPos_ + 1) % (int) firBuf_.size();
     }
     double firOut() const
     {
+        const int n = (int) fir_.size();
         double y = 0;
-        for (int i = 0; i < kFir; ++i)
-            y += fir_[(size_t) i] * firBuf_[(size_t) ((firPos_ + i) % kFir)];
+        for (int i = 0, j = firPos_; i < n; ++i, j = j + 1 == n ? 0 : j + 1)
+            y += fir_[(size_t) i] * firBuf_[(size_t) j];
         return y;
     }
 
-    double fs_ = 48000.0, fsi_ = 96000.0;
+    double fs_ = 48000.0, fsi_ = 192000.0;
     OrganParams prm_;
     std::vector<Reed> reeds_;
     std::vector<int> active_;
-    std::array<double, kKeys * kStops> detune_ {};
+    std::array<std::array<double, 5>, kKeys * kStops> rand_ {}; // per reed: tuning, drive, set, level, tone
+    std::array<double, kKeys> keyOff_ {};
     std::array<bool, kKeys> held_ {};
     double suction_ = 0, reservoir_ = 0, pedalPos_ = 0, pedalSmooth_ = 0, pedalVel_ = 0;
     bool valve_ = false;
     double dcX_ = 0, dcY_ = 0, voxPh_ = 0, thump_ = 0;
     std::array<Biquad, 4> body_;
-    Biquad swell_, hissBp_, thumpLp_, pumpLp_;
-    static constexpr int kFir = 31;
-    std::array<double, kFir> fir_ {}, firBuf_ {};
-    int firPos_ = 0;
+    Biquad swell_, hissBp_, thumpLp_, pumpLp_, windLp_, rumbleLp_;
+    std::vector<double> fir_, firBuf_;
+    int firPos_ = 0, os_ = 4;
     int64_t clock_ = 0;
     Rng rng_;
 };

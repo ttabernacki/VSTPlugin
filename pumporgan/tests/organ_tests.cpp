@@ -181,6 +181,46 @@ int main()
         }
         CHECK (hi > 1.5 * lo, "Celeste beats against the Dulciana (level swings %.1f dB)", 20 * std::log10 (hi / lo));
     }
+    std::printf ("Character\n");
+    {
+        // the Celeste is tuned by beat rate, not cents: a slow beat everywhere, a little quicker up top
+        Rig r (only (Dulciana));
+        const double lo = r.o->reedFrequency (48, Celeste) - r.o->reedFrequency (48, Dulciana);
+        const double hi = r.o->reedFrequency (96, Celeste) - r.o->reedFrequency (96, Dulciana);
+        CHECK (lo > 1.0 && lo < 1.6 && hi > 1.6 && hi < 2.4, "Celeste beats %.2f Hz at C3, %.2f Hz at C7 (not 7 cents: that was 4+ Hz up top)", lo, hi);
+        // worn tuning: keys a few cents off their marks, every reed a little off its key
+        auto worn = only (Diapason);
+        worn.tuningAge = 1.0;
+        Rig w (worn);
+        double spread = 0, rankSpread = 0;
+        for (int n = 36; n <= 96; ++n)
+        {
+            spread = std::max (spread, std::fabs (cents (w.o->reedFrequency (n, Diapason), midiHz (n))));
+            rankSpread = std::max (rankSpread, std::fabs (cents (w.o->reedFrequency (n, Diapason), w.o->reedFrequency (n, Melodia))));
+        }
+        CHECK (spread > 2.0 && spread < 6.0 && rankSpread > 0.5 && rankSpread < 3.0,
+               "worn in: keys up to %.1f cents off, a key's stops up to %.1f cents apart", spread, rankSpread);
+        // a living pitch: with age, a held note's pitch wanders a little; new, it holds still
+        auto drift = [] (double age) {
+            auto p = only (Diapason);
+            p.tuningAge = age;
+            Rig r (p);
+            r.o->pedal (0.6);
+            r.run (0.2);
+            r.o->noteOn (69);
+            r.run (6.0);
+            double lo = 1e9, hi = -1e9;
+            for (double t = 1.0; t < 5.5; t += 0.5)
+            {
+                const double f = r.peakNear (r.o->reedFrequency (69, Diapason), t, 0.5);
+                lo = std::min (lo, f);
+                hi = std::max (hi, f);
+            }
+            return cents (hi, lo);
+        };
+        const double aged = drift (1.0), fresh = drift (0.0);
+        CHECK (aged > 0.4 && aged < 4.0 && fresh < 0.3, "pitch wander over 5 s: %.2f cents worn, %.2f cents new", aged, fresh);
+    }
     std::printf ("Wind\n");
     {
         // Reservoir: pumping fills it; with the feet still, the reeds empty it and fall silent

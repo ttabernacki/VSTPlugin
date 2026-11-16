@@ -190,5 +190,38 @@ int main (int argc, char** argv)
         s.pedal = [] (double) { return 0.55; };
         writeWav16 (dir + "08_wind_sag_under_a_big_chord.wav", s.render (7.6, p), 48000.0);
     }
+    { // 09: the treble with the higher stops (where the phasing was): Diapason + Flute 4' + Celeste, a melody over a held chord
+        Script s;
+        s.chord (0.3, 10.5, { 60, 64, 67 });
+        const int mel[] = { 76, 79, 81, 79, 84, 83, 79, 76 };
+        double t = 0.6;
+        for (int n : mel)
+        {
+            s.chord (t, t + 1.15, { n });
+            t += 1.2;
+        }
+        s.pedal = [] (double t) { return 0.55 + 0.2 * std::sin (2 * kPi * t / 9.0); };
+        writeWav16 (dir + "09_treble_higher_stops.wav", s.render (11.5, stops ({ Diapason, Dulciana, Celeste, Flute })), 48000.0);
+    }
+    { // 10: worn vs new: the same hymn phrase with Tuning age 1 (worn in), then 0 (factory fresh)
+        Script s;
+        const std::vector<std::vector<int>> chords = { { 48, 55, 64, 72 }, { 53, 57, 65, 72 }, { 43, 55, 62, 71 }, { 48, 55, 64, 72 } };
+        auto worn = stops ({ Diapason, Melodia, Dulciana });
+        auto fresh = worn;
+        fresh.tuningAge = 0.0;
+        double t = 0.3;
+        for (int pass = 0; pass < 2; ++pass)
+        {
+            s.params (t - 0.2, pass == 0 ? worn : fresh);
+            for (const auto& c : chords)
+            {
+                for (int n : c) { s.on (t, n); s.off (t + 1.75, n); }
+                t += 1.8;
+            }
+            t += 0.8;
+        }
+        s.pedal = [] (double) { return 0.6; };
+        writeWav16 (dir + "10_worn_then_new.wav", s.render (t + 0.5, worn), 48000.0);
+    }
     return 0;
 }
