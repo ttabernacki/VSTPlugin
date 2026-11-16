@@ -4,27 +4,31 @@ A physically modelled suction reed organ: no samples. This is the sound engine a
 ahead of the plug-in. The volume pedal is the wind.
 
 ## Two instruments
-- **Chord organ** (default): a small 1950s-60s home organ in a plastic case.
+- **Chord organ** (default): a small 1950s-60s home organ in a plastic case, found in a basement.
   - **The fan:** a cheap electric blower pulls the wind. It spins up over a second or so when switched
     on, never runs quite steady, and hums and whooshes quietly.
-  - **Weak wind:** its most is under half a parlour organ's, so the reeds swing less: softer, darker,
-    slower to speak.
-  - **Saggy:** a big chord is more than the fan can keep up with. The wind sags (to about 70% under an
-    8-note chord), settling over a moment as the fan labours, and everything droops flat and quieter: a
-    held note goes about 10 cents flat when a big chord comes in.
+  - **Weak wind:** its most is about a third of a parlour organ's, so the reeds swing about half as
+    far: softer, darker, slower to speak, about 9 dB under the parlour organ at the same pedal. Leaky
+    pallets and cracked leather waste some of it all the time.
+  - **Saggy:** every note is more than the tired fan wants to give. The wind sags with each one,
+    settling over about a third of a second as the fan labours. Everything droops flat and quieter: a
+    held note goes about 16 cents flat and a fifth weaker when a big chord comes in, and turning the
+    wind down flattens it too.
   - **Struggling on little wind:** below about 60% of its full wind it labours, more the less it gets.
     - Gusts: the fan's air comes unevenly, in gusts of a fixed size. At full wind they're nothing; at a
       trickle they're a big part of what's there.
     - Wow: a slow, uneven warble in everything's pitch, and each reed's own wander grows.
     - Sputter: each reed's grip on the wind flutters on its own, so notes in a chord swell and fade
       unevenly, and at a trickle they nearly drop out and come back.
-    - For one held note: about 6 cents of drift at full wind, 12 at 55% pedal, 18 at 40% and 27 at 30%.
-      Its level holds within a dB down to about 55% pedal, then swings about 14 dB at 40% and drops
-      almost out at 30%.
+    - For one held note: about 12 cents of drift at full wind, 17 at 75% pedal, 27 at 55% and 37 at
+      40%. Its level holds within a dB or so down to 75% pedal, wavers about 4 dB at 55%, and from 40%
+      down it drops in and out.
     - The parlour organ only labours below 30% of its wind, and less.
-  - **Worn:** keys up to about 8 cents off. Some reeds are weak and lazy (about 1 in 8) and some buzzy
-    (about 1 in 12).
-  - **The case:** a boxy plastic case, thin in the bass, dull on top.
+  - **Worn:** keys up to about 13 cents off, and each reed's pitch wanders about 1.6 cents. About 1 reed
+    in 5 is weak and lazy and about 1 in 8 buzzy, and three keys stick, their notes hanging on a moment
+    after you let go.
+  - **The case:** a boxy plastic case, thin in the bass, dusty and dull on top. The fan is louder and
+    wobblier than it should be.
 - **Parlour organ:** a full-size foot-pumped reed organ in a wooden case: strong, steady wind.
 
 ## How it's modelled
@@ -36,7 +40,7 @@ ahead of the plug-in. The volume pedal is the wind.
   - More suction swings the tongue harder: louder, and brighter as the chops get sharper.
   - A hard-driven tongue sags a few cents flat.
 - **A worn-in instrument** (Tuning age; 1 = as found, 0 = factory fresh).
-  - Each key sits a few cents off its mark (up to about 4 on the parlour organ, 8 on the chord organ), all its stops roughly together. Each reed
+  - Each key sits a few cents off its mark (up to about 4 on the parlour organ, 13 on the chord organ), all its stops roughly together. Each reed
     sits a little off that (about 1 cent), so a key's stops beat gently against each other.
   - Every reed's pitch wanders slowly (about 0.5 cent). The beats between reeds drift irregularly
     instead of sweeping evenly like a phaser.

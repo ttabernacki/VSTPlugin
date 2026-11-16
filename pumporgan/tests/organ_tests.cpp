@@ -339,7 +339,7 @@ int main()
             const double f1 = r.peakNear (r.o->reedFrequency (76, Diapason), 6.0, 0.5), a1 = r.o->reedAmplitude (76, Diapason);
             const double s1 = r.o->chestSuction();
             CHECK (s1 < 0.7 * s0 && sQuick > s1 + 0.3 * (s0 - s1), "a big chord sags the wind to %.0f%%, settling over a moment, not at once", 100 * s1 / s0);
-            CHECK (cents (f1, f0) < -6.0 && a1 < 0.85 * a0, "the held E5 droops %.1f cents and its swing falls %.0f%%", cents (f1, f0), 100 * (1 - a1 / a0));
+            CHECK (cents (f1, f0) < -10.0 && a1 < 0.93 * a0, "the held E5 droops %.1f cents and its swing falls %.0f%%", cents (f1, f0), 100 * (1 - a1 / a0));
         }
         // struggling on little wind: the pitch warbles and the level wavers far more than on full wind
         {
@@ -383,7 +383,7 @@ int main()
             for (int n = 36; n <= 96; ++n)
                 spread = std::max (spread, std::fabs (cents (r.o->reedFrequency (n, Diapason), midiHz (n))));
             (void) lazy;
-            CHECK (spread > 5.0 && spread < 14.0, "worn: keys up to %.1f cents off (the parlour organ: ~4)", spread);
+            CHECK (spread > 8.0 && spread < 20.0, "worn: keys up to %.1f cents off (the parlour organ: ~4)", spread);
         }
     }
     std::printf ("Robustness\n");

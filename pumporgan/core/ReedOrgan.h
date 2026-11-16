@@ -83,12 +83,20 @@ struct ModelVoice
     double gust;        // gusts in the chest, of a fixed size: nothing at full wind, a lot at a trickle
     double wowCents;    // the shared pitch warble at its worst
     double sputter;     // how much each reed's drive flutters on its own at its worst
+    // neglect
+    double leak;        // wind lost all the time through leaky pallets and cracked leather (as a draw)
+    double lazyShare;   // threshold for weak, lazy reeds (higher: more of them)
+    double buzzyShare;  // threshold for buzzy reeds (lower: more of them)
+    double stickyKeys;  // keys whose pallets hang on after the key is let go (threshold; 1 = none)
+    double dull;        // the swell lid / case top end, Hz (closed)
+    double fanNoise;    // the blower's whoosh, hum and wobble
 };
 inline const ModelVoice& modelVoice (Model m)
 {
     static const ModelVoice v[] = {
-        { "Chord organ", 0.45, 1.8, 0.16, 38.0, true, 2.2, true, 1, 0.6, 0.035, 10.0, 0.9 },
-        { "Parlour organ", 1.0, 0.15, 0.02, 0.0, false, 1.0, false, 0, 0.3, 0.008, 4.0, 0.25 },
+        // found in a basement: a weak, tired fan, leaky valves, reeds far gone
+        { "Chord organ", 0.36, 3.2, 0.32, 65.0, true, 3.2, true, 1, 0.6, 0.04, 13.0, 1.0, 0.07, -0.3, 0.45, 0.62, 2000.0, 1.8 },
+        { "Parlour organ", 1.0, 0.15, 0.02, 0.0, false, 1.0, false, 0, 0.3, 0.008, 4.0, 0.25, 0.0, -1.0, 1.0, 1.0, 3200.0, 0.0 },
     };
     return v[m == Model::ChordOrgan ? 0 : 1];
 }
@@ -246,6 +254,7 @@ public:
                 rd.wanderK = 1.0 - std::exp (-2 * kPi * 0.5 / fsi_);
             }
             keyOff_[(size_t) k] = 0.5 * (tune.next() + tune.next());
+            keySticky_[(size_t) k] = 0.5 * (tune.next() + tune.next());
         }
         applyVoicing();
         windLp_.lowpass (fs, 2.0, 0.7);
@@ -371,11 +380,11 @@ public:
                 motor_ += (1.0 - std::exp (-dt / 0.5)) * (1.0 - motor_);
                 motorPh_ += 0.43 * dt;
                 motorPh_ -= std::floor (motorPh_);
-                const double wobble = 1.0 + 0.012 * std::sin (2 * kPi * motorPh_) + 0.6 * motorLp_.process (rng_.next());
+                const double wobble = 1.0 + mv.fanNoise * (0.012 * std::sin (2 * kPi * motorPh_) + 0.6 * motorLp_.process (rng_.next()));
                 source *= motor_ * motor_ * wobble;
             }
             // the chest: what the wind can give, less what the open reeds pull; a weak fan settles slowly
-            const double target = source * flutter / (1.0 + mv.loadSag * draw);
+            const double target = source * flutter / (1.0 + mv.loadSag * (draw + mv.leak));
             chest_ += (1.0 - std::exp (-dt / mv.sagTau)) * (target - chest_);
             // gusts: the fan's air never comes quite even. Fixed in size, so at a trickle they're a big part of it
             const double gust = mv.gust * prm_.airNoise * gustLp_.process (rng_.next()) * 60.0;
@@ -388,7 +397,7 @@ public:
             wowPh_ -= std::floor (wowPh_);
             const double wow = struggle * mv.wowCents * (0.5 * std::sin (2 * kPi * wowPh_) + 0.9 * wowLp_.process (rng_.next()) * 55.0);
             // droop: as the wind sags under the load (and, less, as it's turned down) the reeds go flat
-            const double loadDrop = source > 1e-6 ? std::clamp (1.0 - chest / (source * flutter), 0.0, 1.0) : 0.0;
+            const double loadDrop = source > 1e-6 ? std::clamp (1.0 - chest * (1.0 + mv.loadSag * mv.leak) / (source * flutter), 0.0, 1.0) : 0.0;
             const double levelDrop = std::clamp (1.0 - suction_, 0.0, 1.0);
             const double pitch = std::exp2 ((wow - mv.droopCents * (loadDrop + 0.3 * levelDrop * levelDrop)) / 1200.0);
             lastStruggle_ = struggle;
@@ -430,10 +439,10 @@ public:
                 y += nz * 0.015 * pumpLp_.process (rng_.next()) * std::min (stroke, 4.0);
                 if (mv.fan) // the blower: its whoosh, and a little mains hum from the motor
                 {
-                    y += nz * 0.012 * fanLp_.process (rng_.next()) * motor_;
+                    y += nz * 0.012 * mv.fanNoise * fanLp_.process (rng_.next()) * motor_;
                     humPh_ += 60.0 * dt;
                     humPh_ -= std::floor (humPh_);
-                    y += nz * 0.0012 * motor_ * (std::sin (2 * kPi * humPh_) + 0.6 * std::sin (4 * kPi * humPh_) + 0.3 * std::sin (6 * kPi * humPh_));
+                    y += nz * 0.0012 * mv.fanNoise * motor_ * (std::sin (2 * kPi * humPh_) + 0.6 * std::sin (4 * kPi * humPh_) + 0.3 * std::sin (6 * kPi * humPh_));
                 }
             }
             out[i] = (float) (y * prm_.level);
@@ -504,12 +513,12 @@ private:
                 rd.drive = rv.drive * (1.0 + 0.12 * var * rn[1]);
                 rd.set = rv.set * (1.0 + 0.3 * var * rn[2]);
                 rd.gain = rv.gain * (1.0 + 0.15 * var * rn[3]);
-                if (lazy && rn[1] < -0.5) // a weak, lazy reed (about 1 in 8): dirt on the tongue, a tired spring
+                if (lazy && rn[1] < model().lazyShare) // a weak, lazy reed: dirt on the tongue, a tired spring
                 {
                     rd.drive *= 0.6;
                     rd.gain *= 0.75;
                 }
-                if (lazy && rn[2] > 0.6) // a buzzy one (about 1 in 12): the tongue sits well off its slot
+                if (lazy && rn[2] > model().buzzyShare) // a buzzy one: the tongue sits well off its slot
                     rd.set *= 1.8;
                 rd.cellCoef = 1.0 - std::exp (-2 * kPi * std::min (f * rv.cell * (1.0 + 0.2 * var * rn[4]), 0.4 * fsi_) / fsi_);
                 rd.c0 = stepFor (f);
@@ -537,7 +546,7 @@ private:
             body_[2].peak (fs_, 1600.0, 1.8, -3.0);
             body_[3].peak (fs_, 2300.0, 2.5, 2.0);
             lowCut_.highpass (fs_, 150.0, 0.8);
-            swell_.lowpass (fs_, prm_.forte ? 4800.0 : 2600.0, 0.7);
+            swell_.lowpass (fs_, prm_.forte ? 2.0 * model().dull : model().dull, 0.7);
         }
     }
     void setPallet (int k, int r, bool open, double vel)
@@ -549,7 +558,9 @@ private:
         auto& rd = reed (k, r);
         rd.palletTarget = open ? 1.0 : 0.0;
         // a pallet opens in ~4-12 ms (faster for a firm key), closes in ~6 ms
-        const double ms = open ? 12.0 - 8.0 * std::clamp (vel, 0.0, 1.0) : 6.0;
+        // a sticky key's pallet hangs on a moment after the key is let go
+        const bool sticky = keySticky_[(size_t) k] > model().stickyKeys;
+        const double ms = open ? 12.0 - 8.0 * std::clamp (vel, 0.0, 1.0) : sticky ? 160.0 : 6.0;
         rd.palletRate = 1.0 - std::exp (-1.0 / (ms * 1e-3 * fsi_));
         if (open && ! rd.active)
         {
@@ -623,7 +634,7 @@ private:
     std::vector<Reed> reeds_;
     std::vector<int> active_;
     std::array<std::array<double, 5>, kKeys * kStops> rand_ {}; // per reed: tuning, drive, set, level, tone
-    std::array<double, kKeys> keyOff_ {};
+    std::array<double, kKeys> keyOff_ {}, keySticky_ {};
     std::array<bool, kKeys> held_ {};
     double suction_ = 0, reservoir_ = 0, pedalPos_ = 0, pedalSmooth_ = 0, pedalVel_ = 0;
     double chest_ = 0, motor_ = 0, motorPh_ = 0, humPh_ = 0, wowPh_ = 0, lastStruggle_ = 0;
