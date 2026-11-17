@@ -127,6 +127,9 @@ APVTS::ParameterLayout SteelwaveProcessor::createLayout()
     l.add (std::make_unique<AudioParameterChoice> (ParameterID { "wheel", 1 }, "Pitch wheel", StringArray { "Melody note", "Chord move" }, 0));
     l.add (std::make_unique<AudioParameterChoice> (ParameterID { "chordmove", 1 }, "Chord changes",
                                                     StringArray { "Re-pick", "Move when legato", "Always move" }, 2));
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "melody", 1 }, "Melody", Range (0.0f, 18.0f), 6.0f,
+                                                  Attr().withStringFromValueFunction ([] (float v, int) { return v < 0.05f ? String ("Even") : "+" + String (v, 1) + " dB"; })
+                                                      .withValueFromStringFunction (num)));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "sweeten", 1 }, "Sweeten", Range (0.0f, 1.0f), 0.6f,
                                                   Attr().withStringFromValueFunction (pct).withValueFromStringFunction (pctIn)));
 
@@ -258,6 +261,7 @@ sw::EngineParams SteelwaveProcessor::readParams() const
     p.sweeten = raw ("sweeten");
     p.wheelMelody = (int) raw ("wheel") == 0;
     p.chordMove = (int) raw ("chordmove");
+    p.melodyDb = raw ("melody");
     p.pattern = juce::jlimit (0, sw::kPatterns - 1, (int) raw ("pattern"));
     p.patternRate = juce::jlimit (0, sw::kPatternRates - 1, (int) raw ("patrate"));
     if ((int) raw ("tempsync") == 1) // vibrato, swells and slides land on the host's beat

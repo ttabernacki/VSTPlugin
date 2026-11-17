@@ -460,5 +460,34 @@ int main (int argc, char** argv)
         writeWav16 (dir + "05_vibrato.wav", x, Steel::fs);
     }
     engineDemos (dir);
+    { // 15: a run of chords down two octaves played detached (each lower than the last, gliding out of the one
+      // still ringing), then back up legato; Melody +6 dB lifts the top note
+        Midi m;
+        EngineParams p;
+        p.keyPc = 4;
+        p.glide = 0.22;
+        p.melodyDb = 6.0;
+        p.autoVibrato = 0.3;
+        p.vibDelay = 0.7;
+        const int down[] = { 76, 74, 72, 71, 69, 67, 65, 64, 62, 60, 59, 57, 55, 53, 52 };
+        double t = 0.3;
+        for (int n : down)
+        {
+            m.on (t, n, 0.75);
+            m.off (t + 0.5, n);
+            t += 0.6;
+        }
+        t += 0.4;
+        int prev = -1;
+        for (int i = 14; i >= 0; --i)
+        {
+            m.on (t, down[i], 0.75);
+            if (prev >= 0) m.off (t + 0.05, prev);
+            prev = down[i];
+            t += 0.6;
+        }
+        m.off (t + 0.8, prev);
+        writeWav16 (dir + "15_chord_run_down_and_up.wav", m.render (0, t + 2.5, p), 48000.0);
+    }
     return 0;
 }

@@ -34,7 +34,7 @@ private:
     juce::String sourceName (int src) const;
 };
 
-// One simple page to play from (mode, key, pattern, eight knobs, the neck and the keyboard's chord map),
+// One simple page to play from (mode, key, pattern, nine knobs, the neck and the keyboard's chord map),
 // with everything else behind SETTINGS: Sound, Playing and Model. Presets, A/B, favourites, audition and
 // MIDI learn live in the header. The whole layout is drawn at 1000 x 660 and scaled to the window.
 class SteelwaveEditor : public juce::AudioProcessorEditor, private juce::Timer
@@ -102,7 +102,7 @@ private:
 
     // Play page
     Choice mode, voicing, scale, key, pattern, patRate;
-    Knob tone, pick, sustain, vibDepth, glide, swellMain, sweeten, level;
+    Knob tone, pick, sustain, vibDepth, glide, melody, swellMain, sweeten, level;
     juce::Rectangle<int> neckArea, mapArea, modeHint;
     void drawNeck (juce::Graphics&);
     void drawChordMap (juce::Graphics&, juce::Rectangle<int>);

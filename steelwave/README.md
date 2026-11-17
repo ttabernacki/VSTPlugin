@@ -48,7 +48,11 @@ The window can be resized (drag the corner); everything scales.
   - **Mode** (Smart notes, Chords, Single notes), with **Chord voicing** (Classic, Full, High, Low,
     Close, Octave up, Wide, Pad) or **Single-note set** beside it, **Key**, and the **Picking pattern**
     and its **Rate**.
-  - Eight knobs: Tone, Pick, Sustain, Vibrato, Glide, Swell, Sweeten, Level.
+  - Nine knobs: Tone, Pick, Sustain, Vibrato, Glide, Melody, Swell, Sweeten, Level.
+  - **Melody** (0 to +18 dB, default +6): how much the melody stands out. The top note of what you
+    hold (in Chords, the chord's highest note; in Smart and Single notes, the highest note held) is
+    that much louder than the rest. It's raised by half the amount and the rest lowered by half, so the
+    overall level hardly moves. It follows the top note as it bends and as chords change.
   - The neck: the bar, the ringing strings and their notes, the chord, the last chord change (which
     pedals, and whether the bar slid), the pattern with a beat light, the pedals and levers, the wheel
     and the volume pedal.
@@ -136,10 +140,21 @@ bar down would: the same strings, with whichever is the most natural move — a 
 levers, a bar slide, or both. In E, I→IV is A+B down at the same fret, I→vi the A pedal, I→ii B+C,
 I→II the open shape slid up two frets, I→V A+B and up two frets. Each candidate is costed by what the
 feet and hand do and how far the voices travel; the chord always goes the way the keys went (a key
-higher on the keyboard never moves the chord down) and stays within an octave of where the set would
-voice it. Where no move is natural (a big jump), the chord is picked fresh in its own voicing.
-- **Always move** (default): legato chords move without re-picking; a chord played within 1.5 s of the
-  last is picked where the last one was, then pushed into place (pick, then pedal).
+higher on the keyboard never moves the chord down). Where no move is natural (a big jump), the bar
+slides to the chord's own voicing instead.
+
+**The register follows the keyboard.** Each chord is voiced from the last one, the way the keys went
+and about as far: a lower key gives a lower voicing, a higher key a higher one, across octaves too. A
+run of chords down the keyboard keeps going down the neck. At the end of the neck the next chord starts
+again an octave the other way. After a pause of 2 s, chords are voiced at home again: where the set puts
+them for that octave of the keyboard.
+
+- **Always move** (default):
+  - Legato chords move without re-picking. Strings joining the chord are picked softly.
+  - Letting go of the keys doesn't palm-block the chord: it rings down over a few seconds.
+  - A chord played while the last still rings glides out of it, with no new pick, and the strings
+    sustain again.
+  - Only once the chord has died away (about 24 dB down) is the next one picked fresh, as played.
 - **Move when legato:** only overlapping keys move; detached chords are picked fresh.
 - **Re-pick:** every chord in its own voicing (legato chords slide the bar, as before).
 

@@ -260,6 +260,7 @@ SteelwaveEditor::SteelwaveEditor (SteelwaveProcessor& p)
     sustain.setup (c, s, "sustain", "SUSTAIN");
     vibDepth.setup (c, s, "vibdepth", "VIBRATO");
     glide.setup (c, s, "glide", "GLIDE");
+    melody.setup (c, s, "melody", "MELODY");
     swellMain.setup (c, s, "swellbelow", "SWELL");
     sweeten.setup (c, s, "sweeten", "SWEETEN");
     level.setup (c, s, "level", "LEVEL");
@@ -275,6 +276,8 @@ SteelwaveEditor::SteelwaveEditor (SteelwaveProcessor& p)
     pick.slider.setTooltip ("Soft thumb and flesh to hard metal fingerpicks.");
     sustain.slider.setTooltip ("How long notes ring.");
     vibDepth.slider.setTooltip ("Depth of the bar vibrato (aftertouch, mod wheel or auto vibrato bring it in).");
+    melody.slider.setTooltip ("How much the melody stands out: the top note of what you hold (in Chords, the chord's highest note), "
+                              "this much louder than the rest. Even at 0.");
     glide.slider.setTooltip ("How long a move takes: the bend or slide from one chord to the next, and legato slides between notes.");
     swellMain.slider.setTooltip ("Notes played softer than this fade in like a volume-pedal swell. Off at 0; all the way up, every note swells.");
     sweeten.slider.setTooltip ("Tunes thirds and fifths pure against the chord's root, the way steel players tune. 0 is equal temperament.");
@@ -434,7 +437,7 @@ SteelwaveEditor::SteelwaveEditor (SteelwaveProcessor& p)
                                                      &aftertouch, &timing, &mpe, &bendRange, &autoBend, &legatoSlide, &wheelMode, &chordMove, &tempSync })
         registerControl (ch->box, ch->paramId);
     const std::pair<Knob*, const char*> knobs[] = {
-        { &tone, "brightness" }, { &pick, "hardness" }, { &sustain, "sustain" }, { &vibDepth, "vibdepth" }, { &glide, "glide" },
+        { &tone, "brightness" }, { &pick, "hardness" }, { &sustain, "sustain" }, { &vibDepth, "vibdepth" }, { &glide, "glide" }, { &melody, "melody" },
         { &swellMain, "swellbelow" }, { &sweeten, "sweeten" }, { &level, "level" }, { &strum, "strum" }, { &noise, "barnoise" },
         { &behind, "behindbar" }, { &vibRate, "vibrate" }, { &sym, "sympathetic" }, { &pedalSpeed, "pedalspeed" },
         { &swellBelow, "swellbelow" }, { &swellTime, "swelltime" }, { &autoVib, "autovib" }, { &vibDelay, "vibdelay" },
@@ -631,7 +634,7 @@ void SteelwaveEditor::showPage (int p)
         ch->show (play);
     voicing.show (play && lastMode == 1);
     scale.show (play && lastMode == 2);
-    for (auto* k : { &tone, &pick, &sustain, &vibDepth, &glide, &swellMain, &sweeten, &level })
+    for (auto* k : { &tone, &pick, &sustain, &vibDepth, &glide, &melody, &swellMain, &sweeten, &level })
         show (*k, play);
     for (auto* ch : { &pickup, &volcc, &voltype })
         ch->show (sound);
@@ -708,9 +711,9 @@ void SteelwaveEditor::layout()
         placeChoice (patRate, row.removeFromLeft (140));
         a.removeFromTop (8);
         auto knobs = a.removeFromTop (118);
-        const int kw = knobs.getWidth() / 8;
-        for (auto* k : { &tone, &pick, &sustain, &vibDepth, &glide, &swellMain, &sweeten, &level })
-            placeKnob (*k, knobs.removeFromLeft (kw).reduced (8, 0));
+        const int kw = knobs.getWidth() / 9;
+        for (auto* k : { &tone, &pick, &sustain, &vibDepth, &glide, &melody, &swellMain, &sweeten, &level })
+            placeKnob (*k, knobs.removeFromLeft (kw).reduced (6, 0));
         a.removeFromTop (6);
         mapArea = a.removeFromBottom (122);
         a.removeFromBottom (6);
@@ -1065,7 +1068,7 @@ void SteelwaveEditor::drawChordMap (juce::Graphics& g, juce::Rectangle<int> area
     g.drawText ("KEYBOARD", head.removeFromTop (18), juce::Justification::centredLeft);
     g.setColour (kDim);
     g.setFont (juce::FontOptions (10.5f));
-    g.drawFittedText (chords ? "Every octave plays the same chords: higher octaves voice them higher."
+    g.drawFittedText (chords ? "Each chord is voiced from the last, the way the keys went: down the keyboard, down the neck."
                       : smart ? "Play real notes. Lit: the chord you hold. Dots: the key's scale."
                               : "White keys: the key's scale. Black keys: the note below, unbent.",
                       head.withTrimmedRight (8), juce::Justification::topLeft, 5);

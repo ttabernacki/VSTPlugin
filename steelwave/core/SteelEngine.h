@@ -85,6 +85,7 @@ struct EngineParams
     bool wheelMelody = false;      // pitch wheel: only the top note moves, a scale step up or down; the rest hold
     int pattern = PatOff;          // picking pattern over what's held (chord sets and smart notes)
     int patternRate = 1;           // index into patternBeats(): 1/4, 1/8, 1/8T, 1/16, 1/16T
+    double melodyDb = 6.0;         // the top note of what's held, this much louder than the rest (0 = even)
     int chordMove = 2;             // chord sets: 0 = every chord re-picked in its own voicing, 1 = keys played legato
                                    // bend/slide into the next chord, 2 = and so does a chord played soon after the last
 };
@@ -384,6 +385,9 @@ public:
                 ppq_ += bpm_ / (60.0 * fs_);
             if (patRun_ && clock_ >= patNext_)
                 patternTick();
+            // the melody: the top note of what's held stands out (looked at every 64 samples)
+            if ((clock_ & 63) == 0)
+                updateMelody();
             // pedal keys travelling
             if ((clock_ & 31) == 0)
                 movePedalKeys (32.0 / fs_);
@@ -432,7 +436,8 @@ public:
                 strPressS_[(size_t) k] += pressureCoef_ * (strPress_[(size_t) k] - strPressS_[(size_t) k]);
                 s.setVibrato (strPressS_[(size_t) k] > depth ? strPressS_[(size_t) k] * lfo : vib);
                 strYS_[(size_t) k] += pressureCoef_ * (strY_[(size_t) k] - strYS_[(size_t) k]);
-                const double y = s.process (kappa * (bsum - s.bridge())) * strYS_[(size_t) k];
+                melG_[(size_t) k] += melCoef_ * (melTarget_[(size_t) k] - melG_[(size_t) k]);
+                const double y = s.process (kappa * (bsum - s.bridge())) * strYS_[(size_t) k] * melG_[(size_t) k];
                 // auto swell: a soft note fades in, like a volume pedal under that string
                 double& sg = swell_[(size_t) k];
                 if (sg < 1.0)
@@ -470,6 +475,8 @@ public:
     int lastMoveFrets() const { return moveFrets_; }
     int lastMoveCombo() const { return moveCombo_ >= 0 ? (int) playableCombos()[(size_t) moveCombo_] : -1; }
     bool lastChordMoved() const { return moveCombo_ >= 0; }
+    double chordMean() const { return lastMean_; }                 // where the last chord sits (mean MIDI pitch)
+    double melodyGain (int s) const { return melTarget_[(size_t) s]; } // the melody boost each string gets now
     int stringKey (int s) const { return sst_[(size_t) s].owner; } // smart and single notes: the key playing this string, or -1
 
     static constexpr double kOutputScale = 0.12;
@@ -525,6 +532,7 @@ private:
             s.setParams (sp);
         pickup_.set (prm_.pickup, prm_.coilShiftOct, prm_.coilQ);
         volCoef_ = 1.0 - std::exp (-1.0 / (0.01 * fs_));
+        melCoef_ = 1.0 - std::exp (-1.0 / (0.03 * fs_)); // the melody's level moves over ~30 ms
         pressureCoef_ = 1.0 - std::exp (-1.0 / (0.03 * fs_)); // aftertouch arrives in steps: smooth it
         if (prm_.volumeCc < 0)
             volTarget_ = 1.0;
@@ -701,6 +709,8 @@ private:
 
     void stopAll()
     {
+        releaseLevel_ = lastMean_ = 0;
+        chordNote_ = -1;
         for (int s = 0; s < kStrings; ++s)
         {
             block (s);
@@ -794,10 +804,54 @@ private:
             return;
         }
         releasedAt_ = clock_;
-        // last key up: a palm block over all the strings (sympathetic ringing included)
-        if (! sustainPedal_)
+        if (sustainPedal_)
+            return;
+        if (prm_.chordMove >= 2)
+        {
+            // last key up: the hand eases off rather than blocking, so the chord rings down over a few
+            // seconds and the next one can glide out of it instead of being picked again
+            releaseLevel_ = 0;
             for (int s = 0; s < kStrings; ++s)
-                block (s);
+                if (sst_[(size_t) s].inChord)
+                {
+                    releaseLevel_ = std::max (releaseLevel_, str_[(size_t) s].level());
+                    str_[(size_t) s].setDamp (kReleaseDamp);
+                }
+                else
+                    block (s);
+            return;
+        }
+        // last key up: a palm block over all the strings (sympathetic ringing included)
+        for (int s = 0; s < kStrings; ++s)
+            block (s);
+    }
+
+    // --- the melody note --------------------------------------------------------------------
+    // the top note of what's held (chords: the chord's highest string; smart and single notes: the highest
+    // string a key is playing) is boosted by half the Melody level and the rest cut by half, so the
+    // overall level hardly moves. Nothing held (a chord ringing down): as it was.
+    void updateMelody()
+    {
+        int top = -1;
+        double topPitch = -1e9;
+        for (int s = 0; s < kStrings; ++s)
+        {
+            const auto& st = sst_[(size_t) s];
+            if (! (chordMode() ? st.inChord : st.owner >= 0))
+                continue;
+            const double p = kE9Open[(size_t) s] + str_[(size_t) s].currentSemis();
+            if (p > topPitch)
+            {
+                topPitch = p;
+                top = s;
+            }
+        }
+        if (top < 0)
+            return;
+        const double half = 0.5 * std::clamp (prm_.melodyDb, 0.0, 18.0) / 20.0;
+        const double up = std::pow (10.0, half), down = std::pow (10.0, -half);
+        for (int s = 0; s < kStrings; ++s)
+            melTarget_[(size_t) s] = s == top ? up : down;
     }
 
     // --- chord moves -----------------------------------------------------------------------
@@ -809,6 +863,10 @@ private:
     static constexpr int kMoveFrets = 7;          // furthest bar slide a move considers
     static constexpr double kMoveMaxCost = 4.5;   // dearer than this: pick the set's own voicing instead
     static constexpr double kMoveWindow = 1.5;    // s: a chord played this soon after the last is a move too
+    static constexpr double kReleaseDamp = 0.2;   // keys up: the strings ring down (~3 s) instead of a block
+    static constexpr double kCarryDb = -24.0;     // still this loud (vs. when let go): the next chord glides out of it
+    static constexpr double kRegisterMemory = 2.0; // s after the keys are let go: the next chord is voiced from the last
+    static constexpr double kSoftPick = 0.45;     // a string a change has to pick picks this softly
     struct ChordMove { int bar = 0; int combo = -1; double cost = 1e9; };
     ChordMove planMove (ChordName tgt, double targetMean, int dir) const
     {
@@ -873,8 +931,50 @@ private:
     {
         const auto& v = chordSets()[(size_t) set_][(size_t) slot];
         const auto& sl = chordSlots()[(size_t) slot];
-        // the chord as the set voices it...
+        // the chord as the set voices it, in the register the keyboard asks for: from the last chord, the
+        // way the keys went (lower key, lower voicing; higher key, higher), about as far as they went.
+        // Off the end of the neck it starts again an octave away; after a pause, home again.
         int bar = chordBar (set_, v, prm_.keyPc, note);
+        const bool remember = chordNote_ >= 0 && note >= 0 && lastMean_ > 0
+                              && (legato || clock_ - releasedAt_ < (int64_t) (kRegisterMemory * fs_));
+        if (remember)
+        {
+            const int dir = (note > chordNote_) - (note < chordNote_);
+            const double target = lastMean_ + std::clamp (note - chordNote_, -12, 12);
+            int best = -1;
+            double bestD = 1e9;
+            for (int o = -2; o <= 2; ++o)
+            {
+                const int b = bar + 12 * o;
+                if (b < 0 || b > kTopFret)
+                    continue;
+                const double m = v.meanPitch + b - v.bar;
+                if ((dir > 0 && m <= lastMean_ + 0.5) || (dir < 0 && m >= lastMean_ - 0.5))
+                    continue;
+                if (std::fabs (m - target) < bestD)
+                {
+                    bestD = std::fabs (m - target);
+                    best = b;
+                }
+            }
+            if (best >= 0)
+                bar = best;
+        }
+        // a chord played while the last one still rings (keys let go, Always move): glide out of it, no pick
+        bool carry = false;
+        if (! legato && pickNew && prm_.chordMove >= 2 && chordSlot_ >= 0 && releaseLevel_ > 0 && ! sustainPedal_)
+            for (int s = 0; s < kStrings; ++s)
+                if (sst_[(size_t) s].inChord && str_[(size_t) s].level() > releaseLevel_ * std::pow (10.0, kCarryDb / 10.0))
+                    carry = true;
+        const bool fresh = ! legato && ! carry; // nothing to glide from: a new phrase, picked as played
+        if (carry)
+        {
+            legato = true; // from here on it's a legato change
+            for (int s = 0; s < kStrings; ++s)
+                if (sst_[(size_t) s].inChord)
+                    str_[(size_t) s].setDamp (0.0); // the hand back on the bar: they sustain again
+        }
+        releaseLevel_ = 0;
         int strs[kStrings], ns = std::min ((int) v.strings.size(), kStrings);
         std::copy (v.strings.begin(), v.strings.begin() + ns, strs);
         std::array<double, kStrings> rest = v.rest, up = v.up, down = v.down;
@@ -886,7 +986,9 @@ private:
         {
             const int dir = note >= 0 && chordNote_ >= 0 ? (note > chordNote_) - (note < chordNote_) : 0;
             const auto mv = planMove (sl.rest, v.meanPitch + bar - v.bar, dir);
-            if (mv.cost <= kMoveMaxCost)
+            // with Always move, a detached chord whose strings have died away is picked fresh: there's
+            // nothing left to push (picking the old chord to push it was the loud re-pick)
+            if (mv.cost <= kMoveMaxCost && (legato || prm_.chordMove < 2))
             {
                 moved = true;
                 push = ! legato; // picked where the last chord was, then pushed into this one
@@ -1004,6 +1106,18 @@ private:
         }
         chordSlot_ = slot;
         chordNote_ = note;
+        // where this chord sits, for voicing the next one from it
+        {
+            double m = 0;
+            int c = 0;
+            for (int s = 0; s < kStrings; ++s)
+                if (sst_[(size_t) s].inChord)
+                {
+                    m += kE9Open[(size_t) s] + bar + std::lround (sst_[(size_t) s].rest);
+                    ++c;
+                }
+            lastMean_ = c > 0 ? m / c : 0.0;
+        }
         // slide-in: a soft chord starts below and slides up into place once it's picked
         if (pickNew && ! legato && ! moved && slideIn (vel))
         {
@@ -1030,15 +1144,18 @@ private:
             }
             return;
         }
-        // pick: on a legato move only the strings that aren't already ringing
+        // pick: on a legato change only the strings that aren't already ringing, and softly (a fresh
+        // chord is picked as played)
         double t = (barMoves || barSlideAt_ >= 0) && ! legato && ! push ? kLandSec : 0.0;
+        const double changeVel = prm_.chordMove >= 2 ? kSoftPick : 0.6;
+        (void) fresh;
         for (int k = 0; k < ns; ++k)
         {
             const int s = order[k];
             // a slide carries the strings already ringing in the chord, however quiet: never re-picked
             if (legato && wasIn[s] && str_[(size_t) s].isRinging())
                 continue;
-            schedule (s, t + 0.002 * std::fabs (humanize()), vel * (legato ? 0.6 : 1.0) * (1.0 + 0.06 * humanize()));
+            schedule (s, t + 0.002 * std::fabs (humanize()), vel * (legato ? changeVel : 1.0) * (1.0 + 0.06 * humanize()));
             t += spread;
         }
     }
@@ -1700,6 +1817,9 @@ private:
     std::vector<int> held_; // reserved up front: never reallocates on the audio thread
     int set_ = 0, chordSlot_ = -1, bar_ = 0;
     int64_t releasedAt_ = -1000000000;
+    double releaseLevel_ = 0, lastMean_ = 0;
+    std::array<double, kStrings> melG_ = [] { std::array<double, kStrings> a {}; a.fill (1.0); return a; }(), melTarget_ = melG_;
+    double melCoef_ = 0.002;
     int64_t pickCount_ = 0;
     int lastPickString_ = -1;
     // transport and picking pattern

@@ -124,10 +124,10 @@ int main()
         for (auto* id : { "pedalkeys", "pedalspeed", "modwheel", "aftertouch", "swellbelow", "swelltime", "autovib", "vibdelay",
                           "slidein", "slidefrom", "slidetime", "glidefeel", "barrange", "timing", "mpe", "bendrange" })
             missing += p.apvts.getParameter (id) == nullptr;
-        for (auto* id : { "autobend", "legatoslide", "sweeten", "wheel", "chordmove", "pattern", "patrate", "tempsync", "velcurve" })
+        for (auto* id : { "autobend", "legatoslide", "sweeten", "wheel", "chordmove", "pattern", "patrate", "tempsync", "velcurve", "melody" })
             missing += p.apvts.getParameter (id) == nullptr;
-        const int expected = 18 + 25 + (int) swadv::params().size();
-        CHECK (missing == 0 && p.getParameters().size() == expected, "%d parameters (18 + 25 playing + %d model)", expected, (int) swadv::params().size());
+        const int expected = 18 + 26 + (int) swadv::params().size();
+        CHECK (missing == 0 && p.getParameters().size() == expected, "%d parameters (18 + 26 playing + %d model)", expected, (int) swadv::params().size());
         int offCentre = 0;
         for (const auto& a : swadv::params())
             if (std::fabs (p.apvts.getParameter (a.id)->getValue() - 0.5f) > 1e-3f)

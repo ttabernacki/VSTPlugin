@@ -1088,19 +1088,33 @@ int main()
         const double quick = moveTime (0.1), slow = moveTime (0.8);
         CHECK (slow > 4.0 * quick && slow > 0.4, "Glide sets the move time: %.0f ms at 0.1 s, %.0f ms at 0.8 s", 1000 * quick, 1000 * slow);
         {
-            // a chord played just after the last: picked where the last one was, then pushed into place
+            // a chord played while the last still rings (keys let go): it glides out of it, nothing picked again
             auto rHeap_ = std::make_unique<Rig> (q); // engines on the heap: MSVC gives each local its own stack slot
             Rig& r = *rHeap_;
             r.e.noteOn (60, 0.8);
             r.to (0.5);
             r.e.noteOff (60);
             r.to (0.7);
+            const int64_t picks = r.e.pickCount();
+            const double ringing = r.e.stringLevel (4);
             r.e.noteOn (65, 0.8);
-            r.to (0.72);
-            const double before = r.e.stringSemis (4), lv = r.e.stringLevel (4);
             r.to (1.6);
-            CHECK (r.e.lastChordMoved() && std::fabs (before) < 0.1 && lv > 0 && std::fabs (r.e.stringSemis (4) - 2.0) < 0.05,
-                   "detached: picked on the old chord (%.2f), pushed into the new one (%.2f)", before, r.e.stringSemis (4));
+            CHECK (r.e.lastChordMoved() && r.e.pickCount() == picks && ringing > 0 && std::fabs (r.e.stringSemis (4) - 2.0) < 0.05
+                       && r.e.stringLevel (4) > 0.05 * ringing,
+                   "detached, still ringing: glides into the new chord (%.2f) with no new pick (%d), and keeps ringing (%.1f dB)", r.e.stringSemis (4),
+                   (int) (r.e.pickCount() - picks), 10 * std::log10 (r.e.stringLevel (4) / ringing));
+            // let go and left to die away: the next chord is a fresh one, picked as played
+            auto qHeap_ = std::make_unique<Rig> (q);
+            Rig& r2 = *qHeap_;
+            r2.e.noteOn (60, 0.8);
+            r2.to (0.5);
+            r2.e.noteOff (60);
+            r2.to (8.5);
+            const int64_t p2 = r2.e.pickCount();
+            r2.e.noteOn (65, 0.8);
+            r2.to (8.7);
+            CHECK (r2.e.pickCount() >= p2 + 3 && ! r2.e.lastChordMoved(), "after it has died away, the next chord is picked fresh (%d picks)",
+                   (int) (r2.e.pickCount() - p2));
         }
         {
             // "Legato keys" doesn't move a detached chord; nor does one long after; "Off" never moves
@@ -1149,6 +1163,7 @@ int main()
                             EngineParams k = q;
                             k.keyPc = key;
                             SteelEngine& e = big->e;
+                            e.allNotesOff(); // each pair from scratch
                             EngineParams k0 = k;
                             k0.chordMove = 0; // the first chord in the set's own voicing
                             e.setParams (k0);
@@ -1175,10 +1190,11 @@ int main()
                                 }
                             if ((got & ~want) || ! (got & (1u << root)) || ! (got & (1u << third)))
                                 ++wrong;
-                            // and it stays within an octave of where the set voices the chord
-                            const auto& v = chordSets()[(size_t) set][(size_t) b];
-                            const double home = v.meanPitch + chordBar (set, v, key, 60 + b) - v.bar;
-                            far += std::fabs (mean / std::max (n, 1) - home) > 12.0; // an octave: I -> vi stays an A pedal
+                            // and it lands within an octave of where the keys asked for: the first chord, moved by the
+                            // interval played (the voicing follows the keyboard from chord to chord)
+                            const auto& va = chordSets()[(size_t) set][(size_t) a];
+                            const double asked = va.meanPitch + chordBar (set, va, key, 60 + a) - va.bar + (b - a);
+                            far += std::fabs (mean / std::max (n, 1) - asked) > 12.0;
                             // and it went the way the keys went
                             double mean0 = 0;
                             {
@@ -1188,8 +1204,137 @@ int main()
                             backwards += e.lastChordMoved() && (mean / std::max (n, 1) - mean0) * (b > a ? 1 : -1) < -0.5;
                         }
             CHECK (wrong == 0 && far == 0 && backwards == 0 && moves > total / 2,
-                   "%d legato changes (all sets and keys): %d moved by bend/slide; %d wrong chords, %d far from home, %d against the keys",
+                   "%d legato changes (all sets and keys): %d moved by bend/slide; %d wrong chords, %d an octave off where the keys asked, %d against the keys",
                    total, moves, wrong, far, backwards);
+        }
+    }
+
+    std::printf ("Melody note and register\n");
+    {
+        EngineParams m = p;
+        m.chordMove = 2;
+        m.strumMs = 0;
+        // chords: the top note stands out by the Melody level
+        auto chordAt = [&] (double db) {
+            EngineParams q = m;
+            q.melodyDb = db;
+            Script sc;
+            sc.at (0.05, [] (SteelEngine& e) { e.noteOn (60, 0.8); }); // Classic I in E: G#3 B3 E4 G#4
+            return render (q, 0, sc, 1.2);
+        };
+        auto flat = chordAt (0.0), lead = chordAt (12.0);
+        const double gain = (presence (lead, 68, 0.6) - presence (lead, 59, 0.6)) - (presence (flat, 68, 0.6) - presence (flat, 59, 0.6));
+        {
+            EngineParams q = m;
+            q.melodyDb = 12.0;
+            auto eh = std::make_unique<SteelEngine>();
+            eh->prepare (kFs);
+            eh->setParams (q);
+            eh->setSet (0);
+            eh->noteOn (60, 0.8);
+            std::vector<float> buf (512);
+            for (int i = 0; i < 20; ++i) eh->process (buf.data(), 512);
+            const double rel = 20 * std::log10 (eh->melodyGain (2) / eh->melodyGain (4)); // string 3 (G#4, the top) vs string 5
+            CHECK (std::fabs (rel - 12.0) < 0.1 && gain > 3.0,
+                   "chords: Melody 12 dB puts the top string (G#4) 12 dB over the rest (%.1f); heard through G#3's octave, +%.1f dB", rel, gain);
+        }
+        // smart notes: the highest note held
+        auto smartAt = [&] (double db) {
+            EngineParams q = m;
+            q.melodyDb = db;
+            Script sc;
+            sc.at (0.05, [] (SteelEngine& e) { e.noteOn (60, 0.8); e.noteOn (64, 0.8); e.noteOn (67, 0.8); });
+            return render (q, kSmartSet, sc, 1.2);
+        };
+        auto sflat = smartAt (0.0), slead = smartAt (12.0);
+        const double sgain = (presence (slead, 67, 0.6) - presence (slead, 64, 0.6)) - (presence (sflat, 67, 0.6) - presence (sflat, 64, 0.6));
+        CHECK (sgain > 9.0 && sgain < 15.0, "smart notes: the highest note held (G4) lifted %.1f dB", sgain);
+
+        // the register follows the keyboard: a run of chords down, then up, each voiced past the last
+        auto run = [&] (std::vector<int> keys, double gap, int& wrong, int& wraps, double& span) {
+            auto rh = std::make_unique<SteelEngine>();
+            SteelEngine& e = *rh;
+            e.prepare (kFs);
+            e.setParams (m);
+            e.setSet (0);
+            std::vector<float> buf (512);
+            auto go = [&] (double sec) { for (int i = 0; i < (int) (sec * kFs / 512); ++i) e.process (buf.data(), 512); };
+            wrong = wraps = 0;
+            double prev = -1, lo = 1e9, hi = -1e9;
+            int prevKey = -1;
+            for (int k : keys)
+            {
+                e.noteOn (k, 0.8);
+                go (gap);
+                e.noteOff (k);
+                go (0.05);
+                const double mean = e.chordMean();
+                lo = std::min (lo, mean);
+                hi = std::max (hi, mean);
+                if (prev > 0)
+                {
+                    const double moved = (mean - prev) * (k > prevKey ? 1 : -1);
+                    if (moved < -6.0) ++wraps;   // off the end of the neck: an octave the other way
+                    else if (moved < 0.5) ++wrong;
+                }
+                prev = mean;
+                prevKey = k;
+            }
+            span = hi - lo;
+        };
+        int wrong, wraps;
+        double span;
+        const std::vector<int> down = { 84, 83, 81, 79, 77, 76, 74, 72, 71, 69, 67, 65, 64, 62, 60, 59, 57, 55, 53, 52, 50, 48 };
+        run (down, 0.35, wrong, wraps, span);
+        CHECK (wrong == 0 && wraps <= 2 && span > 18.0, "two and a half octaves of chords down the keyboard: each lower than the last (%d not, %d wraps at the neck's end, %.0f semitones covered)",
+               wrong, wraps, span);
+        std::vector<int> up (down.rbegin(), down.rend());
+        run (up, 0.35, wrong, wraps, span);
+        CHECK (wrong == 0 && wraps <= 2 && span > 18.0, "and up: each higher than the last (%d not, %d wraps, %.0f semitones)", wrong, wraps, span);
+        // played legato (held into each other) too
+        {
+            auto rh = std::make_unique<SteelEngine>();
+            SteelEngine& e = *rh;
+            e.prepare (kFs);
+            e.setParams (m);
+            e.setSet (0);
+            std::vector<float> buf (512);
+            int bad = 0;
+            double prev = -1;
+            int prevKey = -1;
+            for (int k : { 72, 71, 69, 67, 65, 64, 62, 60, 59, 57 })
+            {
+                e.noteOn (k, 0.8);
+                if (prevKey >= 0) e.noteOff (prevKey);
+                for (int i = 0; i < 30; ++i) e.process (buf.data(), 512);
+                const double mean = e.chordMean();
+                if (prev > 0 && mean > prev - 0.5 && mean - prev < 6.0) ++bad;
+                prev = mean;
+                prevKey = k;
+            }
+            CHECK (bad == 0, "legato down the keyboard: each chord lower than the last (%d not)", bad);
+        }
+        // after a pause it's home again: C4 voiced where the set puts it
+        {
+            auto rh = std::make_unique<SteelEngine>();
+            SteelEngine& e = *rh;
+            e.prepare (kFs);
+            e.setParams (m);
+            e.setSet (0);
+            std::vector<float> buf (512);
+            auto go = [&] (double sec) { for (int i = 0; i < (int) (sec * kFs / 512); ++i) e.process (buf.data(), 512); };
+            for (int k : { 60, 59, 57, 55, 53, 52, 50, 48, 47, 45 })
+            {
+                e.noteOn (k, 0.8);
+                go (0.3);
+                e.noteOff (k);
+            }
+            go (3.0);
+            e.noteOn (60, 0.8);
+            go (0.3);
+            const auto& v = chordSets()[0][0];
+            const double home = v.meanPitch + chordBar (0, v, m.keyPc, 60) - v.bar;
+            CHECK (std::fabs (e.chordMean() - home) < 1.0, "after a pause, C4 is voiced at home again (%.1f, home %.1f)", e.chordMean(), home);
         }
     }
 
