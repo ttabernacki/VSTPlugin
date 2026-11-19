@@ -815,6 +815,10 @@ void PumpOrganProcessor::setStateInformation (const void* data, int size)
             userPreset = state.getProperty ("userPreset", "").toString();
             state.removeChild (map, nullptr);
             apvts.replaceState (state);
+            // tell the host every value, changed or not: a switch restored to the state it was already in
+            // sends nothing on its own, and the host can be left showing the in-between value it last sent
+            for (auto* prm : getParameters())
+                prm->sendValueChangedMessageToListeners (prm->getValue());
         }
 }
 
