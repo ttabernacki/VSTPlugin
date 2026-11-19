@@ -117,6 +117,27 @@ struct OrganParams
     double tuningAge = 1.0;     // reeds a little off their marks (0 = perfect)
     double level = 1.0;
 
+    // --- the swell lever: how far the swell lid is open (0 shut .. 1 wide). The mod slider opens it the
+    // rest of the way from here; Forte throws it fully open.
+    double swell = 0.0;
+    int swellCc = 1;            // the mod slider by default; -1 = none
+    // --- auto-pump: the feet working on their own, in time with the host
+    enum class PumpRate { Off, Quarter, Half, Bar, TwoBars };
+    PumpRate pumpRate = PumpRate::Off;
+    double pumpDepth = 0.5;     // how much the wind breathes with each stroke (0..1)
+    // --- drone hold: latch the notes sounding now; they keep sounding (and sagging) until it's let go
+    bool hold = false;
+    // --- couplers: the lowest note an octave down, the highest an octave up, on the same stops
+    bool bassCoupler = false, melodyCoupler = false;
+    // --- where the mic is
+    enum class Mic { Close, Inside, Room };
+    Mic mic = Mic::Close;
+    // --- neglect: 0 as built .. 1 a damp basement: more sticky keys, leakier wind, and ciphers (a key's
+    // reeds whispering on after it's let go)
+    double neglect = 0.0;
+    // --- chiff: a hard key snaps the pallet open with a puff of air; a soft one eases in (0..1)
+    double chiff = 0.3;
+
     // --- playing: MPE and expression ---
     bool mpe = true;            // MPE: each note's channel bends, presses and slides that note alone
     double memberBendRange = 48; // semitones: MPE member channels (Ableton's and the spec's default)
@@ -284,6 +305,23 @@ public:
         hissBp_.bandpass (fs, 3500.0, 0.7);
         thumpLp_.lowpass (fs, 900.0, 0.7);
         pumpLp_.lowpass (fs, 400.0, 0.7);
+        chiffBp_.bandpass (fs, 2400.0, 0.9);
+        puffDecay_ = std::exp (-1.0 / (0.05 * fs));
+        chiffDecay_ = std::exp (-1.0 / (0.025 * fs));
+        swellCoef_ = 1.0 - std::exp (-1.0 / (0.03 * fs));
+        {
+            const double lens[4] = { 0.0297, 0.0371, 0.0411, 0.0437 };
+            for (int l = 0; l < 4; ++l)
+            {
+                const int n = std::max (1, (int) (lens[l] * fs));
+                roomBuf_[(size_t) l].assign ((size_t) n, 0.0);
+                roomPos_[(size_t) l] = 0;
+                roomG_[(size_t) l] = std::pow (10.0, -3.0 * n / (kRoomT60 * fs));
+            }
+            roomDamp_ = 1.0 - std::exp (-2 * kPi * 4500.0 / fs);
+        }
+        for (int k = 0; k < kKeys; ++k)
+            keyCipher_[(size_t) k] = 0.5 + 0.5 * tune.next(); // which keys are prone to cipher
         // down-sampling: a windowed-sinc low-pass at ~21 kHz (Blackman), steep enough that nothing folds
         // back into the audio band
         const int taps = os_ == 1 ? 1 : 34 * os_ + 1;
@@ -313,7 +351,16 @@ public:
         active_.clear();
         held_.fill (false);
         sustained_.fill (false);
-        sustain_ = false;
+        sustain_ = sostenuto_ = false;
+        latched_.fill (false);
+        coupled_.fill (false);
+        openNow_.fill (false);
+        cipher_.fill (false);
+        keyPuff_.fill (0.0);
+        keyVel_.fill (0.8);
+        chiffEnv_ = 0.0;
+        swellOpen_ = swellTarget();
+        clearRoom();
         keyMul_.fill (1.0);
         keyAir_.fill (1.0);
         keyBend_.fill (0.0);
@@ -342,15 +389,22 @@ public:
             mpe_.lowerMasterRange = mpe_.upperMasterRange = mpe_.plainRange = p.masterBendRange;
         mpe_.enabled = p.mpe;
         mpeInit_ = true;
+        const bool oldHold = prm_.hold;
+        const bool micChanged = p.mic != prm_.mic || p.model != prm_.model;
         prm_ = p;
         if (retune)
             applyVoicing();
         for (int k = 0; k < kKeys; ++k)
-            if (held_[(size_t) k])
+            if (openNow_[(size_t) k])
                 for (int r = 0; r < kStops; ++r)
                     if (oldStops[(size_t) r] != prm_.stops[(size_t) r])
-                        setPallet (k, r, prm_.stops[(size_t) r], 0.6);
+                        setPallet (k, r, prm_.stops[(size_t) r] ? 1.0 : 0.0, 0.6);
+        if (prm_.hold != oldHold)
+            latchChanged (oldHold || sostenuto_);
         setupCase();
+        if (micChanged)
+            clearRoom();
+        refresh();
     }
     const OrganParams& params() const { return prm_; }
     const ModelVoice& model() const { return modelVoice (prm_.model); }
@@ -383,8 +437,12 @@ public:
             return;
         if (cc == prm_.pedalCc)
             pedal (value / 127.0);
+        else if (cc == prm_.swellCc)
+            swellLever (value / 127.0);
         else if (cc == 64)
             sustain (value >= 64);
+        else if (cc == 66)
+            sostenuto (value >= 64);
         else if (cc == 120 || cc == 123)
             allNotesOff();
     }
@@ -393,12 +451,29 @@ public:
     {
         sustain_ = on;
         if (! on)
-            for (int k = 0; k < kKeys; ++k)
-                if (sustained_[(size_t) k])
-                {
-                    sustained_[(size_t) k] = false;
-                    release (k);
-                }
+        {
+            sustained_.fill (false);
+            refresh();
+        }
+    }
+    // sostenuto (CC66): the same as Drone hold, from a pedal
+    void sostenuto (bool on)
+    {
+        if (on == sostenuto_)
+            return;
+        const bool was = latching();
+        sostenuto_ = on;
+        latchChanged (was);
+        refresh();
+    }
+    // the swell lever (the mod slider): opens the lid from the Swell setting the rest of the way
+    void swellLever (double v) { swellMod_ = std::clamp (v, 0.0, 1.0); }
+    // the host's transport, for auto-pump: tempo, where it is (in quarter notes), and whether it's playing
+    void setTransport (double bpm, double ppq, bool playing)
+    {
+        bpm_ = std::clamp (bpm > 0 ? bpm : 100.0, 20.0, 400.0);
+        if (playing)
+            pumpPh_ = ppq / pumpBeats() - std::floor (ppq / pumpBeats());
     }
     void noteOn (int note, double vel = 0.8, int ch = 1)
     {
@@ -413,9 +488,14 @@ public:
         keyVibPh_[(size_t) k] = 0.0;
         sustained_[(size_t) k] = false;
         held_[(size_t) k] = true;
-        for (int r = 0; r < kStops; ++r)
-            if (prm_.stops[(size_t) r])
-                setPallet (k, r, true, vel);
+        keyVel_[(size_t) k] = vel;
+        // chiff: a hard key snaps the pallet open and a puff of air hits the reeds before the wind settles
+        const double v2 = vel * vel;
+        keyPuff_[(size_t) k] = prm_.chiff * v2;
+        chiffEnv_ += prm_.chiff * v2;
+        if (openNow_[(size_t) k] && ! cipher_[(size_t) k]) // already sounding (sustained, latched, coupled)
+            return;
+        refresh();
         thump_ += 0.6 * (0.4 + 0.6 * vel); // the pallet and key action
     }
     void noteOff (int note, int ch = -1)
@@ -429,18 +509,18 @@ public:
         poly_[(size_t) k] = 0.0;
         if (sustain_)
             sustained_[(size_t) k] = true;
-        else
-            release (k);
+        refresh();
     }
     void allNotesOff()
     {
         sustain_ = false;
+        held_.fill (false);
+        sustained_.fill (false);
+        latched_.fill (false);
+        refresh();
         for (int k = 0; k < kKeys; ++k)
-            if (held_[(size_t) k] || sustained_[(size_t) k])
-            {
-                held_[(size_t) k] = sustained_[(size_t) k] = false;
-                release (k);
-            }
+            if (cipher_[(size_t) k])
+                endCipher (k);
     }
     // a note's pitch now, from its expression (for tests and display): semitones off its key
     double noteBend (int note) const { return note >= kLowKey && note <= kHighKey ? keyBend_[(size_t) (note - kLowKey)] : 0.0; }
@@ -460,12 +540,24 @@ public:
             const double prev = pedalSmooth_;
             pedalSmooth_ += pedalCoef * (pedalPos_ - pedalSmooth_);
             pedalVel_ += velCoef * ((pedalSmooth_ - prev) / dt - pedalVel_);
-            const double stroke = std::fabs (pedalVel_); // pedal travel per second, either way
+            double stroke = std::fabs (pedalVel_); // pedal travel per second, either way
+            // auto-pump: the feet working on their own, a stroke per beat (or bar)
+            double breathe = 1.0;
+            if (prm_.pumpRate != OrganParams::PumpRate::Off)
+            {
+                pumpPh_ += bpm_ / 60.0 / pumpBeats() * dt;
+                pumpPh_ -= std::floor (pumpPh_);
+                const double d = std::clamp (prm_.pumpDepth, 0.0, 1.0);
+                if (prm_.wind == Wind::Easy) // the wind swells with each stroke and sags between them
+                    breathe = 1.0 - d * 0.6 * (0.5 - 0.5 * std::cos (2 * kPi * pumpPh_));
+                else // virtual strokes, as hard as the pedal says
+                    stroke += d * 2.4 * pedalSmooth_ * std::fabs (std::sin (2 * kPi * pumpPh_)) * kPi / 2.0 * 0.75;
+            }
             // what the open reeds are drawing
             double draw = 0;
             for (int idx : active_)
                 draw += reeds_[(size_t) idx].flowMean;
-            updateWind (stroke, draw, dt);
+            updateWind (stroke, draw, dt, breathe);
             // the chest: the suction the reeds see, sagging under load
             // the wind is never quite steady: a slight flutter from the bellows and valves
             const double flutter = 1.0 + prm_.airNoise * windLp_.process (rng_.next()) * 1.4; // ~0.8 % rms
@@ -481,7 +573,8 @@ public:
                 source *= motor_ * motor_ * wobble;
             }
             // the chest: what the wind can give, less what the open reeds pull; a weak fan settles slowly
-            const double target = source * flutter / (1.0 + mv.loadSag * (draw + mv.leak));
+            const double leak = mv.leak + kNeglectLeak * prm_.neglect;
+            const double target = source * flutter / (1.0 + mv.loadSag * (draw + leak));
             chest_ += (1.0 - std::exp (-dt / mv.sagTau)) * (target - chest_);
             // gusts: the fan's air never comes quite even. Fixed in size, so at a trickle they're a big part of it
             const double gust = mv.gust * prm_.airNoise * prm_.lowWindCutout * gustLp_.process (rng_.next()) * 60.0;
@@ -495,7 +588,7 @@ public:
             wowPh_ -= std::floor (wowPh_);
             const double wow = struggle * mv.wowCents * prm_.lowWindWarble * (0.5 * std::sin (2 * kPi * wowPh_) + 0.9 * wowLp_.process (rng_.next()) * 55.0);
             // droop: as the wind sags under the load (and, less, as it's turned down) the reeds go flat
-            const double loadDrop = source > 1e-6 ? std::clamp (1.0 - chest * (1.0 + mv.loadSag * mv.leak) / (source * flutter), 0.0, 1.0) : 0.0;
+            const double loadDrop = source > 1e-6 ? std::clamp (1.0 - chest * (1.0 + mv.loadSag * leak) / (source * flutter), 0.0, 1.0) : 0.0;
             const double levelDrop = std::clamp (1.0 - suction_, 0.0, 1.0);
             const double pitch = std::exp2 ((wow - mv.droopCents * (loadDrop + 0.3 * levelDrop * levelDrop)) / 1200.0);
             lastStruggle_ = struggle;
@@ -517,7 +610,7 @@ public:
                 for (size_t a = 0; a < active_.size(); ++a)
                 {
                     const int idx = active_[a], k = idx / kStops;
-                    sum += reeds_[(size_t) idx].step (chest * keyAir_[(size_t) k], rng_.next(), breath, pitch * keyMul_[(size_t) k], struggle, mv.sputter * prm_.lowWindCutout);
+                    sum += reeds_[(size_t) idx].step (chest * keyAir_[(size_t) k] * (1.0 + 1.6 * keyPuff_[(size_t) k]), rng_.next(), breath, pitch * keyMul_[(size_t) k], struggle, mv.sputter * prm_.lowWindCutout);
                 }
                 pushFir (sum);
             }
@@ -537,7 +630,17 @@ public:
             // case, swell lid, mic
             for (auto& b : body_)
                 y = b.process (y);
-            y = lowCut_.process (swell_.process (y)) * (prm_.forte ? 1.5 : 1.0);
+            // the swell lid: the lever (and the mod slider) open it, Forte throws it wide
+            swellOpen_ += swellCoef_ * (swellTarget() - swellOpen_);
+            if ((clock_ & 31) == 0)
+                swell_.lowpass (fs_, model().dull * micDull_ * (1.0 + swellOpen_), 0.7);
+            y = lowCut_.process (micPeak_.process (swell_.process (y))) * (1.0 + 0.5 * swellOpen_);
+            // chiff: the puff of air past the reeds as a hard key snaps open
+            if (chiffEnv_ > 1e-5)
+            {
+                y += 0.05 * chiffBp_.process (rng_.next()) * chiffEnv_ * std::sqrt (std::max (chest, 0.0) / std::max (mv.windPower, 1e-3));
+                chiffEnv_ *= chiffDecay_;
+            }
             // noises: air hiss through the open reeds, pallets and keys, the bellows working
             const double nz = prm_.airNoise;
             if (nz > 0)
@@ -546,19 +649,27 @@ public:
                 y += nz * 0.11 * hissBp_.process (rng_.next()) * air;      // hiss of air through the reeds
                 y += nz * 0.09 * rumbleLp_.process (rng_.next()) * air;    // the draught in the chest
                 thump_ *= 0.995;
-                y += nz * 0.05 * thumpLp_.process (rng_.next() * thump_);
-                y += nz * 0.015 * pumpLp_.process (rng_.next()) * std::min (stroke, 4.0);
+                y += nz * 0.05 * micMech_ * thumpLp_.process (rng_.next() * thump_);
+                y += nz * 0.015 * micMech_ * pumpLp_.process (rng_.next()) * std::min (stroke, 4.0);
                 if (mv.fan) // the blower: its whoosh, and a little mains hum from the motor
                 {
-                    y += nz * 0.012 * mv.fanNoise * fanLp_.process (rng_.next()) * motor_;
+                    y += nz * 0.012 * micFan_ * mv.fanNoise * fanLp_.process (rng_.next()) * motor_;
                     humPh_ += 60.0 * dt;
                     humPh_ -= std::floor (humPh_);
-                    y += nz * 0.0012 * mv.fanNoise * motor_ * (std::sin (2 * kPi * humPh_) + 0.6 * std::sin (4 * kPi * humPh_) + 0.3 * std::sin (6 * kPi * humPh_));
+                    y += nz * 0.0012 * micFan_ * mv.fanNoise * motor_ * (std::sin (2 * kPi * humPh_) + 0.6 * std::sin (4 * kPi * humPh_) + 0.3 * std::sin (6 * kPi * humPh_));
                 }
             }
+            if (prm_.mic == OrganParams::Mic::Room)
+                y = room (y);
             out[i] = (float) (y * prm_.level);
             if ((++clock_ & 255) == 0)
+            {
                 prune();
+                // ciphers run out
+                for (int k = 0; k < kKeys; ++k)
+                    if (cipher_[(size_t) k] && (cipherT_[(size_t) k] -= 256.0 / fs_) <= 0)
+                        endCipher (k);
+            }
         }
     }
 
@@ -574,6 +685,30 @@ public:
     double reedFrequency (int note, int stop) const { return freqOf (note - kLowKey, stop, wear()); }
     double chestSuction() const { return chest_; }
     double struggle() const { return lastStruggle_; } // 0 at good wind .. 1 at a trickle
+    double motor() const { return model().fan ? motor_ : 1.0; } // the blower's speed, 0..1
+    double swellOpen() const { return swellOpen_; }              // how far the swell lid is open now
+    double pumpPhase() const { return pumpPh_; }
+    double breathing() const { return pedalSmooth_; }
+    bool holding() const { return latching(); }
+    // a key, for the keyboard display
+    struct KeyState { bool held = false, coupled = false, latched = false, cipher = false; double level = 0; };
+    KeyState keyState (int note) const
+    {
+        KeyState st;
+        const int k = note - kLowKey;
+        if (k < 0 || k >= kKeys)
+            return st;
+        const auto ks = (size_t) k;
+        st.held = held_[ks] || sustained_[ks];
+        st.latched = latched_[ks];
+        st.coupled = coupled_[ks] && ! played (k);
+        st.cipher = cipher_[ks];
+        double e = 0;
+        for (int r = 0; r < kStops; ++r)
+            e = std::max (e, reeds_[ks * kStops + (size_t) r].env);
+        st.level = std::sqrt (2.0 * e);
+        return st;
+    }
 
     // wind constants
     static constexpr double kPumpGain = 0.35;    // Reservoir: fill per unit of pedal travel
@@ -648,7 +783,6 @@ private:
             body_[2].peak (fs_, 1150.0, 2.0, -2.0);
             body_[3].peak (fs_, 2600.0, 1.4, 2.0);
             lowCut_.highpass (fs_, 40.0, 0.7);
-            swell_.lowpass (fs_, prm_.forte ? 7500.0 : 3200.0, 0.6);
         }
         else
         {
@@ -657,8 +791,55 @@ private:
             body_[2].peak (fs_, 1600.0, 1.8, -3.0);
             body_[3].peak (fs_, 2300.0, 2.5, 2.0);
             lowCut_.highpass (fs_, 150.0, 0.8);
-            swell_.lowpass (fs_, prm_.forte ? 2.0 * model().dull : model().dull, 0.7);
         }
+        // the mic. Close: in front of the reed board. Inside the case: boxy and woolly, a thick low-mid
+        // hump, the keys, pallets and fan right there. Across the room: softer, a little of the room's tail.
+        switch (prm_.mic)
+        {
+            case OrganParams::Mic::Close: micPeak_.peak (fs_, 250.0, 1.0, 0.0); micDull_ = 1.0; micMech_ = 1.0; micFan_ = 1.0; break;
+            case OrganParams::Mic::Inside: micPeak_.peak (fs_, 260.0, 1.3, 6.0); micDull_ = 0.65; micMech_ = 2.6; micFan_ = 2.2; break;
+            case OrganParams::Mic::Room: micPeak_.peak (fs_, 2500.0, 0.8, -3.0); micDull_ = 0.85; micMech_ = 0.6; micFan_ = 0.5; break;
+        }
+        swell_.lowpass (fs_, model().dull * micDull_ * (1.0 + swellOpen_), 0.7);
+    }
+    double swellTarget() const { return prm_.forte ? 1.0 : std::clamp (prm_.swell + swellMod_ * (1.0 - prm_.swell), 0.0, 1.0); }
+    double pumpBeats() const
+    {
+        switch (prm_.pumpRate)
+        {
+            case OrganParams::PumpRate::Quarter: return 1.0;
+            case OrganParams::PumpRate::Half: return 2.0;
+            case OrganParams::PumpRate::Bar: return 4.0;
+            case OrganParams::PumpRate::TwoBars: return 8.0;
+            default: return 4.0;
+        }
+    }
+    // across the room: a small feedback delay network (4 lines, Householder mixing, ~1.2 s, darkening)
+    double room (double x)
+    {
+        double outs[4], sum = 0;
+        for (int l = 0; l < 4; ++l)
+        {
+            auto& b = roomBuf_[(size_t) l];
+            outs[l] = b[(size_t) roomPos_[(size_t) l]];
+            sum += outs[l];
+        }
+        const double mix = 0.5 * sum, in = 0.3 * x;
+        for (int l = 0; l < 4; ++l)
+        {
+            auto& b = roomBuf_[(size_t) l];
+            double v = (outs[l] - mix) * roomG_[(size_t) l];
+            roomLp_[(size_t) l] += roomDamp_ * (v - roomLp_[(size_t) l]);
+            b[(size_t) roomPos_[(size_t) l]] = roomLp_[(size_t) l] + in;
+            roomPos_[(size_t) l] = (roomPos_[(size_t) l] + 1) % (int) b.size();
+        }
+        return 0.62 * x + 0.55 * (outs[0] - outs[1] + outs[2] - outs[3]);
+    }
+    void clearRoom()
+    {
+        for (auto& b : roomBuf_)
+            std::fill (b.begin(), b.end(), 0.0);
+        roomLp_.fill (0.0);
     }
     // --- expression ------------------------------------------------------------------------------
     double targetSemis (int k) const
@@ -695,29 +876,118 @@ private:
             vib = prm_.vibDepth * keyPress_[ks] * std::sin (2 * kPi * keyVibPh_[ks]);
         }
         keyAir_[ks] += (1.0 - std::exp (-dt / 0.01)) * (targetAir (k) - keyAir_[ks]);
+        // chiff: the puff from a hard key, gone in ~50 ms
+        keyPuff_[ks] *= puffDecay_;
         keyMul_[ks] = std::exp2 ((keyBend_[ks] + vib) / 12.0);
+    }
+    // --- which keys' pallets are open ----------------------------------------------------------
+    // A key sounds while it's held, sustained, latched (Drone hold / sostenuto) or coupled from a played
+    // note. Everything that changes any of those calls refresh(), which opens and closes the difference.
+    bool played (int k) const { return held_[(size_t) k] || sustained_[(size_t) k] || latched_[(size_t) k]; }
+    void refresh()
+    {
+        // couplers: the lowest note played an octave down, the highest an octave up
+        int lo = -1, hi = -1;
+        for (int k = 0; k < kKeys; ++k)
+            if (played (k))
+            {
+                if (lo < 0)
+                    lo = k;
+                hi = k;
+            }
+        std::array<bool, kKeys> want {};
+        for (int k = 0; k < kKeys; ++k)
+            want[(size_t) k] = played (k);
+        coupled_.fill (false);
+        auto couple = [&] (int from, int to) {
+            if (from < 0 || to < 0 || to >= kKeys)
+                return;
+            coupled_[(size_t) to] = true;
+            if (! want[(size_t) to])
+            {
+                // it follows the note it comes from: its channel (bend, pressure, slide) and its touch
+                keyCh_[(size_t) to] = keyCh_[(size_t) from];
+                keyVel_[(size_t) to] = keyVel_[(size_t) from];
+                keyBend_[(size_t) to] = keyBend_[(size_t) from];
+                want[(size_t) to] = true;
+            }
+        };
+        if (prm_.bassCoupler)
+            couple (lo, lo - 12);
+        if (prm_.melodyCoupler)
+            couple (hi, hi + 12);
+        for (int k = 0; k < kKeys; ++k)
+        {
+            const auto ks = (size_t) k;
+            if (want[ks] == openNow_[ks])
+                continue;
+            openNow_[ks] = want[ks];
+            if (want[ks])
+            {
+                cipher_[ks] = false;
+                for (int r = 0; r < kStops; ++r)
+                    if (prm_.stops[(size_t) r])
+                        setPallet (k, r, 1.0, keyVel_[ks]);
+            }
+            else
+                release (k);
+        }
+    }
+    bool latching() const { return prm_.hold || sostenuto_; }
+    // Drone hold / sostenuto went on or off: on, it latches what's sounding now; off, it lets go
+    void latchChanged (bool was)
+    {
+        const bool now = latching();
+        if (now == was)
+            return;
+        for (int k = 0; k < kKeys; ++k)
+            latched_[(size_t) k] = now && (held_[(size_t) k] || sustained_[(size_t) k]);
     }
     void release (int k)
     {
-        for (int r = 0; r < kStops; ++r)
-            setPallet (k, r, false, 0.5);
+        // a cipher: on a neglected organ some keys don't quite close, and their reeds whisper on a while
+        const auto ks = (size_t) k;
+        const double u = 0.5 + 0.5 * rng_.next();
+        if (prm_.neglect > 0 && keyCipher_[ks] < 0.45 * prm_.neglect && u < 0.4 + 0.5 * prm_.neglect)
+        {
+            cipher_[ks] = true;
+            cipherT_[ks] = 0.6 + 3.0 * (0.5 + 0.5 * rng_.next());
+            for (int r = 0; r < kStops; ++r)
+                setPallet (k, r, kCipherOpen, 0.5);
+        }
+        else
+            for (int r = 0; r < kStops; ++r)
+                setPallet (k, r, 0.0, 0.5);
         thump_ += 0.25;
     }
+    void endCipher (int k)
+    {
+        cipher_[(size_t) k] = false;
+        if (! openNow_[(size_t) k])
+            for (int r = 0; r < kStops; ++r)
+                setPallet (k, r, 0.0, 0.5);
+    }
+    static constexpr double kCipherOpen = 0.32; // how far a ciphering pallet hangs open
 
-    void setPallet (int k, int r, bool open, double vel)
+    void setPallet (int k, int r, double open, double vel)
     {
         const auto& rv = rankVoices()[(size_t) r];
         const int note = kLowKey + k;
-        if (open && (note < rv.lowKey || note > rv.highKey))
+        if (open > 0 && (note < rv.lowKey || note > rv.highKey))
             return;
         auto& rd = reed (k, r);
-        rd.palletTarget = open ? 1.0 : 0.0;
-        // a pallet opens in ~4-12 ms (faster for a firm key), closes in ~6 ms
-        // a sticky key's pallet hangs on a moment after the key is let go
-        const bool sticky = keySticky_[(size_t) k] > model().stickyKeys;
-        const double ms = open ? 12.0 - 8.0 * std::clamp (vel, 0.0, 1.0) : sticky ? 160.0 : 6.0;
+        if (open == 0 && ! rd.active)
+            return;
+        rd.palletTarget = open;
+        // a pallet opens in ~4-12 ms (faster for a firm key; with chiff, a soft key eases in slower still),
+        // closes in ~6 ms. A sticky key's pallet hangs on a moment after the key is let go.
+        const double v = std::clamp (vel, 0.0, 1.0);
+        const bool sticky = keySticky_[(size_t) k] > std::min (model().stickyKeys, 1.0 - 1.4 * prm_.neglect);
+        const double ms = open >= 1.0 ? 12.0 - 8.0 * v + 40.0 * prm_.chiff * (1.0 - v) * (1.0 - v)
+                        : open > 0 ? 40.0
+                        : sticky ? 160.0 : 6.0;
         rd.palletRate = 1.0 - std::exp (-1.0 / (ms * 1e-3 * fsi_));
-        if (open && ! rd.active)
+        if (open > 0 && ! rd.active)
         {
             rd.active = true;
             active_.push_back (k * kStops + r);
@@ -738,14 +1008,14 @@ private:
                 ++a;
         }
     }
-    void updateWind (double stroke, double draw, double dt)
+    void updateWind (double stroke, double draw, double dt, double breathe)
     {
         double target = 0;
         switch (prm_.wind)
         {
             case Wind::Easy:
                 // the pedal is the wind: heel = none, toe = full (a gentle curve, like a swell pedal)
-                target = std::pow (pedalSmooth_, 1.4);
+                target = std::pow (pedalSmooth_, 1.4) * breathe;
                 suction_ += (1.0 - std::exp (-dt / 0.03)) * (target - suction_);
                 break;
             case Wind::Reservoir:
@@ -798,13 +1068,24 @@ private:
     std::array<double, kKeys> keyBend_ {}, keyPress_ {}, keyAir_ {}, keyMul_ {}, keyVibPh_ {}, keyVibRate_ {}, keyMaxSemis_ {}, poly_ {};
     std::array<uint32_t, kKeys> keyStamp_ {};
     uint32_t stamp_ = 0;
-    std::array<bool, kKeys> held_ {};
+    std::array<bool, kKeys> held_ {}, latched_ {}, coupled_ {}, openNow_ {}, cipher_ {};
+    std::array<double, kKeys> keyVel_ {}, keyPuff_ {}, cipherT_ {}, keyCipher_ {};
+    bool sostenuto_ = false;
+    double swellMod_ = 0, swellOpen_ = 0, swellCoef_ = 0.001, chiffEnv_ = 0, puffDecay_ = 0.999, chiffDecay_ = 0.999;
+    double bpm_ = 100.0, pumpPh_ = 0.0;
+    double micDull_ = 1.0, micMech_ = 1.0, micFan_ = 1.0;
+    std::array<std::vector<double>, 4> roomBuf_;
+    std::array<int, 4> roomPos_ {};
+    std::array<double, 4> roomG_ {}, roomLp_ {};
+    double roomDamp_ = 0.5;
+    static constexpr double kRoomT60 = 1.2;
+    static constexpr double kNeglectLeak = 0.06;
     double suction_ = 0, reservoir_ = 0, pedalPos_ = 0, pedalSmooth_ = 0, pedalVel_ = 0;
     double chest_ = 0, motor_ = 0, motorPh_ = 0, humPh_ = 0, wowPh_ = 0, lastStruggle_ = 0;
     bool valve_ = false;
     double dcX_ = 0, dcY_ = 0, voxPh_ = 0, thump_ = 0;
     std::array<Biquad, 4> body_;
-    Biquad swell_, lowCut_, hissBp_, thumpLp_, pumpLp_, windLp_, rumbleLp_, motorLp_, fanLp_, gustLp_, wowLp_;
+    Biquad swell_, lowCut_, micPeak_, chiffBp_, hissBp_, thumpLp_, pumpLp_, windLp_, rumbleLp_, motorLp_, fanLp_, gustLp_, wowLp_;
     std::vector<double> fir_, firBuf_;
     int firPos_ = 0, os_ = 4;
     int64_t clock_ = 0;

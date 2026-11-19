@@ -538,6 +538,174 @@ int main()
             CHECK (finite, "15 notes on 15 channels, bent a whole range up or down and pressed: finite");
         }
     }
+    std::printf ("Playing aids\n");
+    {
+        auto db = [] (double a, double b) { return 20.0 * std::log10 (std::max (a, 1e-12) / std::max (b, 1e-12)); };
+        // the swell lever: the mod slider opens the lid: louder and brighter; Forte throws it wide
+        auto swellRun = [] (int mod, bool forte) {
+            auto p = only (Diapason);
+            p.forte = forte;
+            auto r = std::make_unique<Rig> (p);
+            r->o->pedal (0.7);
+            uint8_t cc[3] = { 0xb0, 1, (uint8_t) mod };
+            r->o->midi (cc, 3);
+            r->o->noteOn (72);
+            r->run (1.5);
+            return std::make_pair (r->rms (1.0, 1.5), r->brightness (midiHz (72), 1.0, 0.5));
+        };
+        const auto shut = swellRun (0, false), open = swellRun (127, false), forte = swellRun (0, true);
+        CHECK (db (open.first, shut.first) > 2.5 && open.second > shut.second * 1.15,
+               "swell lever on the mod slider: open is %+.1f dB and brighter (%.3f vs %.3f)", db (open.first, shut.first), open.second, shut.second);
+        CHECK (std::fabs (db (forte.first, open.first)) < 0.5, "Forte opens the lid fully, the same as the lever full (%+.2f dB)", db (forte.first, open.first));
+
+        // auto-pump: the wind breathes in time (120 bpm, a stroke a beat: every 0.5 s)
+        auto pumpSwing = [&] (OrganParams::PumpRate rate, Wind w, double pedal) {
+            auto p = only (Diapason, w);
+            p.pumpRate = rate;
+            p.pumpDepth = 1.0;
+            auto r = std::make_unique<Rig> (p);
+            r->o->setTransport (120.0, 0.0, true);
+            r->o->pedal (pedal);
+            r->run (0.5);
+            r->o->noteOn (60);
+            r->o->noteOn (64);
+            r->run (4.0);
+            double lo = 1e9, hi = 0;
+            for (double t = 2.0; t < 4.4; t += 0.05)
+            {
+                const double v = r->rms (t, t + 0.05);
+                lo = std::min (lo, v);
+                hi = std::max (hi, v);
+            }
+            return std::make_pair (db (hi, lo), r->rms (2.0, 4.5));
+        };
+        const auto off = pumpSwing (OrganParams::PumpRate::Off, Wind::Easy, 0.8), beat = pumpSwing (OrganParams::PumpRate::Quarter, Wind::Easy, 0.8);
+        CHECK (beat.first > 3.0 && off.first < 1.0, "auto-pump breathes the wind in time: %.1f dB swing (off: %.1f)", beat.first, off.first);
+        const auto exprOff = pumpSwing (OrganParams::PumpRate::Off, Wind::Expression, 0.8), exprOn = pumpSwing (OrganParams::PumpRate::Half, Wind::Expression, 0.8);
+        CHECK (exprOn.second > 20 * std::max (exprOff.second, 1e-6) && exprOn.first > 3.0,
+               "in Expression mode it pumps by itself, as hard as the pedal says (%.1f dB over still feet; %.1f dB swing)", db (exprOn.second, exprOff.second), exprOn.first);
+
+        // drone hold: latch what's sounding; let go, and it stops
+        {
+            auto r = std::make_unique<Rig> (only (Diapason));
+            r->o->pedal (0.7);
+            r->o->noteOn (48);
+            r->run (1.0);
+            auto p = only (Diapason);
+            p.hold = true;
+            r->o->setParams (p);
+            r->o->noteOff (48);
+            r->o->noteOn (67); // played over the drone: it comes and goes as usual
+            r->run (0.5);
+            r->o->noteOff (67);
+            r->run (1.0);
+            const double held = r->o->reedAmplitude (48, Diapason), over = r->o->reedAmplitude (67, Diapason);
+            p.hold = false;
+            r->o->setParams (p);
+            r->run (1.0);
+            CHECK (held > 0.1 && over < 0.01 && r->o->reedAmplitude (48, Diapason) < 0.1 * held,
+                   "drone hold latches C3 (%.2f after letting go); a note over it ends as usual; off, it stops", held);
+            uint8_t sost[3] = { 0xb0, 66, 127 };
+            r->o->noteOn (55);
+            r->o->midi (sost, 3);
+            r->o->noteOff (55);
+            r->run (1.0);
+            const double s1 = r->o->reedAmplitude (55, Diapason);
+            sost[2] = 0;
+            r->o->midi (sost, 3);
+            r->run (0.8);
+            CHECK (s1 > 0.1 && r->o->reedAmplitude (55, Diapason) < 0.1 * s1, "sostenuto (CC66) does the same");
+        }
+
+        // couplers: the lowest note an octave down, the highest an octave up
+        {
+            auto p = only (Diapason);
+            p.bassCoupler = p.melodyCoupler = true;
+            auto r = std::make_unique<Rig> (p);
+            r->o->pedal (0.8);
+            for (int n : { 60, 64, 67 })
+                r->o->noteOn (n);
+            r->run (1.5);
+            const double bass = r->o->reedAmplitude (48, Diapason), mel = r->o->reedAmplitude (79, Diapason), mid = r->o->reedAmplitude (76, Diapason);
+            const bool shown = r->o->keyState (79).coupled && r->o->keyState (48).coupled && ! r->o->keyState (60).coupled;
+            r->o->noteOn (72); // a new top note: the melody coupler moves up with it
+            r->run (1.0);
+            CHECK (bass > 0.1 && mel > 0.1 && mid < 0.01 && shown,
+                   "couplers: C4-E4-G4 sounds C3 below (%.2f) and G5 above (%.2f), nothing else", bass, mel);
+            CHECK (r->o->reedAmplitude (84, Diapason) > 0.1 && r->o->reedAmplitude (79, Diapason) < 0.1 * mel, "the melody coupler follows the top note (C5 adds C6, lets G5 go)");
+        }
+
+        // the mic
+        auto micRun = [] (OrganParams::Mic m) {
+            auto p = only (Diapason);
+            p.mic = m;
+            auto r = std::make_unique<Rig> (p);
+            r->o->pedal (0.7);
+            r->o->noteOn (60);
+            r->run (1.5);
+            r->o->noteOff (60);
+            r->run (0.6);
+            return std::make_tuple (r->rms (1.0, 1.5), r->brightness (midiHz (60), 1.0, 0.5), r->rms (1.65, 1.9));
+        };
+        const auto close = micRun (OrganParams::Mic::Close), inside = micRun (OrganParams::Mic::Inside), room = micRun (OrganParams::Mic::Room);
+        CHECK (std::get<1> (inside) < 0.8 * std::get<1> (close), "inside the case: darker (%.3f vs close %.3f)", std::get<1> (inside), std::get<1> (close));
+        CHECK (std::get<2> (room) > 10 * std::get<2> (close) && db (std::get<2> (room), std::get<0> (room)) < -12.0,
+               "across the room: a tail after the note (%.1f dB under the note; close: %.1f)", db (std::get<2> (room), std::get<0> (room)), db (std::get<2> (close), std::get<0> (close)));
+        CHECK (std::fabs (db (std::get<0> (inside), std::get<0> (close))) < 6 && std::fabs (db (std::get<0> (room), std::get<0> (close))) < 6,
+               "levels stay close (inside %+.1f dB, room %+.1f dB)", db (std::get<0> (inside), std::get<0> (close)), db (std::get<0> (room), std::get<0> (close)));
+
+        // neglect: ciphers, a key's reeds whispering on after it's let go
+        auto ciphers = [] (double neglect) {
+            OrganParams p; // the chord organ
+            p.neglect = neglect;
+            auto r = std::make_unique<Rig> (p);
+            r->o->pedal (1.0);
+            r->run (2.0);
+            int n = 0;
+            double lvl = 0;
+            for (int note = 48; note <= 84; ++note)
+            {
+                r->o->noteOn (note);
+                r->run (0.25);
+                r->o->noteOff (note);
+                r->run (0.3);
+                if (r->o->keyState (note).cipher && r->o->keyState (note).level > 1e-3)
+                {
+                    ++n;
+                    lvl = std::max (lvl, r->o->keyState (note).level);
+                }
+            }
+            r->run (4.0);
+            int left = 0;
+            for (int note = 48; note <= 84; ++note)
+                left += r->o->keyState (note).cipher ? 1 : 0;
+            return std::make_tuple (n, lvl, left);
+        };
+        const auto none = ciphers (0.0), some = ciphers (0.5), lots = ciphers (1.0);
+        CHECK (std::get<0> (none) == 0 && std::get<0> (some) >= 2 && std::get<0> (lots) > std::get<0> (some) && std::get<2> (lots) == 0,
+               "neglect: ciphers on %d / %d / %d of 37 keys at 0 / 0.5 / 1, whispering (up to %.2f), all gone in a few seconds",
+               std::get<0> (none), std::get<0> (some), std::get<0> (lots), std::get<1> (lots));
+
+        // chiff: a hard key puffs; a soft key eases in
+        auto chiffRun = [] (double chiff, double vel) {
+            auto p = only (Diapason);
+            p.chiff = chiff;
+            auto r = std::make_unique<Rig> (p);
+            r->o->pedal (0.7);
+            r->run (0.3);
+            r->o->noteOn (72, vel);
+            r->run (1.0);
+            double t50 = 0;
+            const double full = r->rms (1.0, 1.3);
+            for (double t = 0.3; t < 1.3; t += 0.002)
+                if (r->rms (t, t + 0.004) > 0.5 * full) { t50 = t - 0.3; break; }
+            return std::make_pair (r->rms (0.3, 0.36) / full, t50);
+        };
+        const auto hard0 = chiffRun (0.0, 1.0), hard1 = chiffRun (1.0, 1.0), soft0 = chiffRun (0.0, 0.2), soft1 = chiffRun (1.0, 0.2);
+        CHECK (hard1.first > 1.3 * hard0.first, "chiff: a hard key's first 60 ms %.2f of the held level (none: %.2f)", hard1.first, hard0.first);
+        CHECK (soft1.second > soft0.second + 0.008, "chiff: a soft key eases in (half level at %.0f ms, none: %.0f ms)", soft1.second * 1e3, soft0.second * 1e3);
+    }
+
     std::printf ("Robustness\n");
     {
         auto p = only (Diapason);
