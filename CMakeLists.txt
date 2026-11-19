@@ -102,3 +102,6 @@ add_subdirectory(steelwave)
 
 # Pump organ (DSP core and demo for now)
 add_subdirectory(pumporgan)
+
+# Scrape Cello (bowed string for texture)
+add_subdirectory(scrapecello)

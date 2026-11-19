@@ -4,9 +4,10 @@ name: build
 # runs (Actions tab > build > Run workflow) build with it, for release.
 #
 # Only the plug-ins a push touches are built, tested and uploaded: a change under steelwave/ builds
-# Steelwave, under pumporgan/ the Pump Organ, and so on. A change to what they share (the root
-# CMakeLists.txt, this workflow, tools/check_dll_imports.py) builds everything; bass-common/ builds the
-# plug-ins that use it. Manual runs and tags always build everything.
+# Steelwave, under pumporgan/ the Pump Organ, and so on; bass-common/ and shared/ build the plug-ins that
+# use them. A change to the root CMakeLists.txt (other than adding a project) or tools/check_dll_imports.py
+# builds everything. Changes to this workflow alone don't: run it by hand (Actions tab > build > Run
+# workflow) to build everything. Manual runs and tags always build everything.
 
 on:
   push:
@@ -52,7 +53,13 @@ jobs:
             fi
           fi
           echo "Changed files:"; echo "$changed"
-          shared='^(CMakeLists\.txt|\.github/|tools/check_dll_imports\.py)'
+          shared='^(tools/check_dll_imports\.py)'
+          # the root CMakeLists.txt is shared, unless all that changed is a project added (an add_subdirectory)
+          if echo "$changed" | grep -qx 'CMakeLists.txt'; then
+            if git diff "$from" HEAD -- CMakeLists.txt | grep -E '^[+-][^+-]' | grep -vE 'add_subdirectory|^[+-][[:space:]]*(#.*)?$' | grep -q .; then
+              shared='^(CMakeLists\.txt|tools/check_dll_imports\.py)'
+            fi
+          fi
           pick () { # name, pattern
             if [ "$all" = true ] || echo "$changed" | grep -qE "$shared|$2"; then echo "$1=true" >> "$GITHUB_OUTPUT"; echo "build: $1"; else echo "$1=false" >> "$GITHUB_OUTPUT"; fi
           }
@@ -60,7 +67,8 @@ jobs:
           pick bassleveler '^(bass-leveler|bass-common)/'
           pick notespace '^(notespace|bass-common)/'
           pick steelwave '^(steelwave|bass-common)/'
-          pick pumporgan '^pumporgan/'
+          pick pumporgan '^(pumporgan|shared)/'
+          pick scrapecello '^(scrapecello|shared)/'
 
       # JUCE source, downloaded once and reused
       - name: Cache JUCE
@@ -96,6 +104,7 @@ jobs:
           NOTESPACE: ${{ steps.what.outputs.notespace }}
           STEELWAVE: ${{ steps.what.outputs.steelwave }}
           PUMPORGAN: ${{ steps.what.outputs.pumporgan }}
+          SCRAPECELLO: ${{ steps.what.outputs.scrapecello }}
         run: |
           TARGETS=""; TESTS=""
           [ "$ORBITPAN" = true ] && TARGETS="$TARGETS dsp_tests render_demo PluginTests OrbitPan_VST3" && TESTS="$TESTS|dsp|plugin"
@@ -103,6 +112,7 @@ jobs:
           [ "$NOTESPACE" = true ] && TARGETS="$TARGETS notespace_tests NoteSpacePluginTests NoteSpace_VST3" && TESTS="$TESTS|notespace_core|note_space_plugin"
           [ "$STEELWAVE" = true ] && TARGETS="$TARGETS steelwave_tests steelwave_engine_tests SteelwavePluginTests Steelwave_VST3 Steelwave_Standalone" && TESTS="$TESTS|steelwave_core|steelwave_engine|steelwave_plugin"
           [ "$PUMPORGAN" = true ] && TARGETS="$TARGETS pumporgan_tests PumpOrganPluginTests PumpOrgan_VST3 PumpOrgan_Standalone" && TESTS="$TESTS|pumporgan_core|pumporgan_plugin"
+          [ "$SCRAPECELLO" = true ] && TARGETS="$TARGETS scrapecello_tests ScrapeCelloPluginTests ScrapeCello_VST3 ScrapeCello_Standalone" && TESTS="$TESTS|scrapecello_core|scrapecello_plugin"
           echo "Building:$TARGETS"
           echo "CTEST_REGEX=^(${TESTS#|})\$" >> "$GITHUB_ENV"
           cmake --build build --config Release --parallel 4 --target $TARGETS
@@ -116,7 +126,7 @@ jobs:
         if: contains(steps.what.outputs.*, 'true')
         shell: bash
         run: |
-          mkdir -p dist/orbitpan dist/bassleveler dist/notespace dist/steelwave dist/pumporgan
+          mkdir -p dist/orbitpan dist/bassleveler dist/notespace dist/steelwave dist/pumporgan dist/scrapecello
           find build -type d -name "OrbitPan.vst3" -prune -exec cp -R {} dist/orbitpan/ \;
           find build -type d -name "Bass Note Leveler.vst3" -prune -exec cp -R {} dist/bassleveler/ \;
           find build -type d -name "Note Space.vst3" -prune -exec cp -R {} dist/notespace/ \;
@@ -124,6 +134,8 @@ jobs:
           find build -path "*Steelwave_artefacts*Standalone*" -name "Steelwave.exe" -exec cp {} dist/steelwave/ \;
           find build -type d -name "Pump Organ.vst3" -prune -exec cp -R {} dist/pumporgan/ \;
           find build -path "*PumpOrgan_artefacts*Standalone*" -name "Pump Organ.exe" -exec cp {} dist/pumporgan/ \;
+          find build -type d -name "Scrape Cello.vst3" -prune -exec cp -R {} dist/scrapecello/ \;
+          find build -path "*ScrapeCello_artefacts*Standalone*" -name "Scrape Cello.exe" -exec cp {} dist/scrapecello/ \;
           ls -R dist | head -40
 
       - name: DLLs must not need the VC++ redistributable
@@ -203,6 +215,12 @@ jobs:
         with:
           name: PumpOrgan-windows
           path: dist/pumporgan
+
+      - uses: actions/upload-artifact@v4
+        if: steps.what.outputs.scrapecello == 'true'
+        with:
+          name: ScrapeCello-windows
+          path: dist/scrapecello
 
       # Setup .exe: installs the VST3 to Common Files\VST3 and the standalone app to Program Files
       - name: Steelwave installer (Inno Setup)

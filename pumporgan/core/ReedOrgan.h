@@ -20,7 +20,7 @@
 // Case:   reed cells (per stop), the wooden case's resonances, the swell lid (Forte), the Vox Humana fan,
 //         a close mic in front of the reed board; air hiss and pallet and bellows noise.
 
-#include "Mpe.h"
+#include "../../shared/Mpe.h"
 
 #include <algorithm>
 #include <array>
