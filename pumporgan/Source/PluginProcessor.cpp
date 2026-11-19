@@ -26,6 +26,8 @@ APVTS::ParameterLayout PumpOrganProcessor::createLayout()
                                                       Attr().withStringFromValueFunction (pct).withValueFromStringFunction (pctIn)));
     };
 
+    // switches are Off / On choices (they restore cleanly through VST3 hosts)
+    const StringArray offOn { "Off", "On" };
     // the instrument and its wind
     l.add (std::make_unique<AudioParameterChoice> (ParameterID { "model", 1 }, "Instrument", StringArray { "Chord organ", "Parlour organ" }, 0));
     addPct ("wind", "Wind", 0.8f);
@@ -33,12 +35,12 @@ APVTS::ParameterLayout PumpOrganProcessor::createLayout()
                                                    StringArray { "Easy (pedal = wind)", "Reservoir (pump it)", "Expression (strokes = wind)" }, 0));
     // the stops
     for (int s = 0; s < ro::kStops; ++s)
-        l.add (std::make_unique<AudioParameterBool> (ParameterID { "stop" + String (s), 1 }, ro::rankVoices()[(size_t) s].name, s == ro::Diapason));
-    l.add (std::make_unique<AudioParameterBool> (ParameterID { "vox", 1 }, "Vox Humana", false));
-    l.add (std::make_unique<AudioParameterBool> (ParameterID { "forte", 1 }, "Forte", false));
-    l.add (std::make_unique<AudioParameterBool> (ParameterID { "bass", 1 }, "Bass coupler", false));
-    l.add (std::make_unique<AudioParameterBool> (ParameterID { "melody", 1 }, "Melody coupler", false));
-    l.add (std::make_unique<AudioParameterBool> (ParameterID { "hold", 1 }, "Drone hold", false));
+        l.add (std::make_unique<AudioParameterChoice> (ParameterID { "stop" + String (s), 1 }, ro::rankVoices()[(size_t) s].name, offOn, s == ro::Diapason ? 1 : 0));
+    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "vox", 1 }, "Vox Humana", offOn, 0));
+    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "forte", 1 }, "Forte", offOn, 0));
+    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "bass", 1 }, "Bass coupler", offOn, 0));
+    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "melody", 1 }, "Melody coupler", offOn, 0));
+    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "hold", 1 }, "Drone hold", offOn, 0));
     // the swell lever (the mod slider opens it the rest of the way), the key action, the mic
     addPct ("swell", "Swell", 0.0f);
     addPct ("chiff", "Chiff", 0.3f);
@@ -815,10 +817,6 @@ void PumpOrganProcessor::setStateInformation (const void* data, int size)
             userPreset = state.getProperty ("userPreset", "").toString();
             state.removeChild (map, nullptr);
             apvts.replaceState (state);
-            // tell the host every value, changed or not: a switch restored to the state it was already in
-            // sends nothing on its own, and the host can be left showing the in-between value it last sent
-            for (auto* prm : getParameters())
-                prm->sendValueChangedMessageToListeners (prm->getValue());
         }
 }
 
