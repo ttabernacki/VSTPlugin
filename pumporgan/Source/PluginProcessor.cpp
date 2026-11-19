@@ -28,10 +28,6 @@ APVTS::ParameterLayout PumpOrganProcessor::createLayout()
         l.add (std::make_unique<AudioParameterBool> (ParameterID { "stop" + String (s), 1 }, ro::rankVoices()[(size_t) s].name, s == ro::Diapason));
     l.add (std::make_unique<AudioParameterBool> (ParameterID { "vox", 1 }, "Vox Humana", false));
     l.add (std::make_unique<AudioParameterBool> (ParameterID { "forte", 1 }, "Forte", false));
-    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "age", 1 }, "Tuning age", Range (0.0f, 2.0f), 1.0f,
-                                                  Attr().withStringFromValueFunction (pct).withValueFromStringFunction (pctIn)));
-    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "air", 1 }, "Air noise", Range (0.0f, 2.0f), 1.0f,
-                                                  Attr().withStringFromValueFunction (pct).withValueFromStringFunction (pctIn)));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "level", 1 }, "Level", Range (-24.0f, 12.0f), 0.0f,
                                                   Attr().withStringFromValueFunction ([] (float v, int) { return String (v, 1) + " dB"; })
                                                       .withValueFromStringFunction (num)));
@@ -50,6 +46,21 @@ APVTS::ParameterLayout PumpOrganProcessor::createLayout()
                                                   Attr().withStringFromValueFunction ([] (float v, int) { return String (v, 1) + " Hz"; })
                                                       .withValueFromStringFunction (num)));
     l.add (std::make_unique<AudioParameterChoice> (ParameterID { "slide", 1 }, "MPE slide", StringArray { "Off", "Note's air" }, 1));
+
+    // Advanced: the instrument's character
+    auto adv = std::make_unique<AudioProcessorParameterGroup> ("advanced", "Advanced", "|");
+    adv->addChild (std::make_unique<AudioParameterFloat> (ParameterID { "age", 1 }, "Tuning age", Range (0.0f, 2.0f), 1.0f,
+                                                          Attr().withStringFromValueFunction (pct).withValueFromStringFunction (pctIn)));
+    adv->addChild (std::make_unique<AudioParameterFloat> (ParameterID { "air", 1 }, "Air noise", Range (0.0f, 2.0f), 1.0f,
+                                                          Attr().withStringFromValueFunction (pct).withValueFromStringFunction (pctIn)));
+    auto amount = [] (float v, int) {
+        return v < 0.02f ? String ("None") : String (roundToInt (v * 100.0f)) + " %" + (std::abs (v - 1.0f) < 0.02f ? " (as built)" : "");
+    };
+    adv->addChild (std::make_unique<AudioParameterFloat> (ParameterID { "cutout", 1 }, "Low-wind cut-out", Range (0.0f, 2.0f), 1.0f,
+                                                          Attr().withStringFromValueFunction (amount).withValueFromStringFunction (pctIn)));
+    adv->addChild (std::make_unique<AudioParameterFloat> (ParameterID { "warble", 1 }, "Low-wind warble", Range (0.0f, 2.0f), 1.0f,
+                                                          Attr().withStringFromValueFunction (amount).withValueFromStringFunction (pctIn)));
+    l.add (std::move (adv));
     return l;
 }
 
@@ -77,6 +88,8 @@ ro::OrganParams PumpOrganProcessor::readParams() const
     p.forte = raw ("forte") > 0.5f;
     p.tuningAge = raw ("age");
     p.airNoise = raw ("air");
+    p.lowWindCutout = raw ("cutout");
+    p.lowWindWarble = raw ("warble");
     p.level = std::pow (10.0, raw ("level") / 20.0);
     p.mpe = (int) raw ("mpe") == 1;
     p.memberBendRange = kMemberRanges[juce::jlimit (0, 3, (int) raw ("memberrange"))];

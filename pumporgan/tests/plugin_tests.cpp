@@ -63,9 +63,16 @@ int main()
         PumpOrganProcessor p;
         int missing = 0;
         for (auto* id : { "model", "wind", "windmode", "stop0", "stop5", "vox", "forte", "age", "air", "level", "pedalcc", "mpe", "memberrange",
-                          "masterrange", "pressure", "vibdepth", "vibrate", "slide" })
+                          "masterrange", "pressure", "vibdepth", "vibrate", "slide", "cutout", "warble" })
             missing += p.apvts.getParameter (id) == nullptr;
         CHECK (missing == 0, "every parameter is there");
+        int inAdvanced = 0;
+        for (auto* g : p.getParameterTree().getSubgroups (false))
+            if (g->getID() == "advanced")
+                for (auto* prm : g->getParameters (false))
+                    if (auto* w = dynamic_cast<juce::AudioProcessorParameterWithID*> (prm))
+                        inAdvanced += w->paramID == "cutout" || w->paramID == "warble" || w->paramID == "age" || w->paramID == "air";
+        CHECK (inAdvanced == 4, "Tuning age, Air noise, Low-wind cut-out and warble sit in the Advanced group");
         auto v = [&] (const char* id) { return p.apvts.getParameter (id)->getCurrentValueAsText(); };
         CHECK (v ("model") == "Chord organ" && v ("mpe") == "On" && v ("pressure") == "Vibrato" && v ("memberrange") == "48 st" && v ("masterrange") == "2 st",
                "defaults: chord organ, MPE on, pressure = vibrato, note bend range 48 (Ableton's), pitch wheel 2");

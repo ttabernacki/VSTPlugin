@@ -373,6 +373,30 @@ int main()
             CHECK (pLow > 1.6 * pHigh && pLow > 6.0, "and warbles: the pitch wanders %.1f cents at 40%% pedal, %.1f at full", pLow, pHigh);
             CHECK (lLow > 1.5 * lHigh && lLow > 3.0, "and sputters: the level wavers %.1f dB at 40%% pedal, %.1f dB at full", lLow, lHigh);
         }
+        // Low-wind cut-out: from none (on a trickle the note just fades, steady) to a lot (it flutters in and out)
+        {
+            auto waver = [&] (double cutout) {
+                OrganParams p = co ({ Diapason });
+                p.airNoise = 1.0;
+                p.lowWindCutout = cutout;
+                Rig r (p);
+                r.o->pedal (0.55);
+                r.run (2.5);
+                r.o->noteOn (64);
+                r.run (8.0);
+                double lo = 1e9, hi = 0;
+                for (double t = 4.0; t < 10.5; t += 0.25)
+                {
+                    const double l = r.rms (t, t + 0.25);
+                    lo = std::min (lo, l);
+                    hi = std::max (hi, l);
+                }
+                return 20 * std::log10 (hi / std::max (lo, 1e-9));
+            };
+            const double none = waver (0.0), normal = waver (1.0), lots = waver (2.0);
+            CHECK (none < 1.5 && normal > 2.0 * none && lots > 2.0 * normal,
+                   "Low-wind cut-out at 55%% pedal: the level wavers %.1f dB at 0, %.1f dB at 1, %.1f dB at 2", none, normal, lots);
+        }
         // more worn: keys well out
         {
             OrganParams p = co ({ Diapason });

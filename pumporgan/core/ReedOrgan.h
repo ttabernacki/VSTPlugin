@@ -112,6 +112,8 @@ struct OrganParams
     double voxRate = 5.2;       // Hz
     bool forte = false;         // swell lid open: louder, brighter
     double airNoise = 1.0;      // hiss, pallets and bellows (0..2)
+    double lowWindCutout = 1.0; // on little wind: how much notes flutter and cut out (0 none: they just fade .. 2 a lot)
+    double lowWindWarble = 1.0; // on little wind: how much the pitch warbles (0 none .. 2 a lot)
     double tuningAge = 1.0;     // reeds a little off their marks (0 = perfect)
     double level = 1.0;
 
@@ -482,15 +484,16 @@ public:
             const double target = source * flutter / (1.0 + mv.loadSag * (draw + mv.leak));
             chest_ += (1.0 - std::exp (-dt / mv.sagTau)) * (target - chest_);
             // gusts: the fan's air never comes quite even. Fixed in size, so at a trickle they're a big part of it
-            const double gust = mv.gust * prm_.airNoise * gustLp_.process (rng_.next()) * 60.0;
+            const double gust = mv.gust * prm_.airNoise * prm_.lowWindCutout * gustLp_.process (rng_.next()) * 60.0;
             const double chest = std::max (0.0, chest_ + gust * std::min (1.0, chest_ * 20.0));
             // labouring: below part of its full wind the organ struggles, more the less it gets
-            const double ref = mv.labourBelow * mv.windPower * (mv.fan ? motor_ * motor_ : 1.0);
+            // (more cut-out also makes it labour sooner: at 2, from about 80% of its wind instead of 60%)
+            const double ref = mv.labourBelow * (0.7 + 0.3 * std::clamp (prm_.lowWindCutout, 0.0, 2.0)) * mv.windPower * (mv.fan ? motor_ * motor_ : 1.0);
             const double struggle = ref > 1e-6 ? std::clamp ((ref - chest) / ref, 0.0, 1.0) : 0.0;
             // the wow: a slow, uneven warble in everything's pitch as it labours
             wowPh_ += 0.55 * dt;
             wowPh_ -= std::floor (wowPh_);
-            const double wow = struggle * mv.wowCents * (0.5 * std::sin (2 * kPi * wowPh_) + 0.9 * wowLp_.process (rng_.next()) * 55.0);
+            const double wow = struggle * mv.wowCents * prm_.lowWindWarble * (0.5 * std::sin (2 * kPi * wowPh_) + 0.9 * wowLp_.process (rng_.next()) * 55.0);
             // droop: as the wind sags under the load (and, less, as it's turned down) the reeds go flat
             const double loadDrop = source > 1e-6 ? std::clamp (1.0 - chest * (1.0 + mv.loadSag * mv.leak) / (source * flutter), 0.0, 1.0) : 0.0;
             const double levelDrop = std::clamp (1.0 - suction_, 0.0, 1.0);
@@ -514,7 +517,7 @@ public:
                 for (size_t a = 0; a < active_.size(); ++a)
                 {
                     const int idx = active_[a], k = idx / kStops;
-                    sum += reeds_[(size_t) idx].step (chest * keyAir_[(size_t) k], rng_.next(), breath, pitch * keyMul_[(size_t) k], struggle, mv.sputter);
+                    sum += reeds_[(size_t) idx].step (chest * keyAir_[(size_t) k], rng_.next(), breath, pitch * keyMul_[(size_t) k], struggle, mv.sputter * prm_.lowWindCutout);
                 }
                 pushFir (sum);
             }

@@ -78,6 +78,13 @@ real interface comes later. Every setting below is a parameter you can automate.
   Wind knob. Until a pedal is moved, the organ sounds at the Wind knob's setting, so it plays with no
   pedal at all.
 - **Sustain** (CC64) holds notes.
+- **Advanced** (a group of its own in the settings panel):
+  - **Tuning age** and **Air noise**.
+  - **Low-wind cut-out:** how much notes flutter and cut out on little wind. At 0 they simply fade as
+    the wind drops, steady. At 1 (as built) the chord organ flutters from about 60% of its wind down. At
+    2 it starts sooner (about 80%) and drops in and out hard. At 55% pedal a held note wavers 0.3 dB, 3.5
+    dB and 35 dB at 0, 1 and 2.
+  - **Low-wind warble:** how much the pitch warbles on little wind, from none to twice as built.
 
 ### MPE
 On by default. Each note plays on its own MIDI channel, so each can be bent, pressed and slid on its
