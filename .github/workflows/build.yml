@@ -162,7 +162,7 @@ jobs:
       #   WINDOWS_CERT_PFX: the .pfx certificate, base64-encoded    WINDOWS_CERT_PASSWORD: its password
       - name: Code signing certificate
         id: cert
-        if: steps.what.outputs.steelwave == 'true' || steps.what.outputs.scrapecello == 'true'
+        if: steps.what.outputs.steelwave == 'true' || steps.what.outputs.scrapecello == 'true' || steps.what.outputs.pumporgan == 'true'
         shell: pwsh
         env:
           CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
@@ -284,6 +284,41 @@ jobs:
         with:
           name: ScrapeCello-windows-installer
           path: scrapecello/installer/Output/*.exe
+
+      # Pump Organ: signed (with a certificate), then its installer
+      - name: Sign Pump Organ plug-in and app
+        if: steps.cert.outputs.present == 'true' && steps.what.outputs.pumporgan == 'true'
+        shell: pwsh
+        env:
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          & $signtool sign /f "$env:RUNNER_TEMP\cert.pfx" /p $env:CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+            "dist\pumporgan\Pump Organ.vst3\Contents\x86_64-win\Pump Organ.vst3" "dist\pumporgan\Pump Organ.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Pump Organ installer (Inno Setup)
+        if: steps.what.outputs.pumporgan == 'true'
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          & $iscc "/DAppVersion=1.0.0" "/DSrc=$PWD\dist\pumporgan" "pumporgan\installer\PumpOrgan.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (Test-Path "$env:RUNNER_TEMP\cert.pfx") {
+            $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1).FullName
+            Get-ChildItem pumporgan\installer\Output\*.exe | ForEach-Object {
+              & $signtool sign /f "$env:RUNNER_TEMP\cert.pfx" /p $env:CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $_.FullName
+            }
+          }
+        env:
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+
+      - uses: actions/upload-artifact@v4
+        if: steps.what.outputs.pumporgan == 'true'
+        with:
+          name: PumpOrgan-windows-installer
+          path: pumporgan/installer/Output/*.exe
 
       - name: Remove the signing certificate
         if: always()
