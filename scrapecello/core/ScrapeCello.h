@@ -257,6 +257,7 @@ public:
                 const double fmax = 2.0 * nominal * v.bowForce / (v.betaS * (BowedString::kMuS - BowedString::kMuD)) + 1e-6;
                 const double edge = 0.7 * std::clamp (0.55 + 6.0 * v.betaS, 0.5, 2.0);
                 const double rel = 0.05 + 2.6 * std::pow (p, 2.2); // 1 = the edge (at about two thirds)
+                v.relS += ctlK * (rel * v.bowForce - v.relS);
                 const double force = fmax * edge * rel;
                 s.setBow (vb, force);
                 // grain: always a little, more as it nears the edge, a lot past it
@@ -272,7 +273,9 @@ public:
                 const double fc = std::min (0.45 * fs_, hz * 2.5 / v.betaS);
                 const double ck = 1.0 - std::exp (-2 * kPi * fc / fs_);
                 v.corner += ck * (s.process (rng_.next()) - v.corner);
-                sum += v.corner * v.gain / (1.0 + 0.8 * over);
+                const double outV = v.corner * v.gain / (1.0 + 0.8 * over);
+                v.levelS += 0.0005 * (outV * outV - v.levelS);
+                sum += outV;
                 if (! v.held && ! v.sustained && s.level() < 1e-10 && v.bowForce < 1e-4)
                     v.note = -1;
             }
@@ -304,6 +307,31 @@ public:
     }
     bool voiceStuck (int note) const { for (auto& v : voices_) if (v.note == note) return v.str->stuck(); return false; }
     const mpe::Input& mpeInput() const { return mpe_; }
+    // each bow as it is now, for the display
+    struct VoiceView
+    {
+        bool on = false, held = false;
+        double pitch = 0;    // MIDI, with bends and vibrato's glide
+        double position = 0; // 0 at the fingerboard end of the bowing range .. 1 at the bridge
+        double pressure = 0; // relative to this note's edge: 1 = the edge, past it a grind
+        double level = 0;    // mean square
+        double dir = 1;      // the bow's direction
+    };
+    VoiceView view (int i) const
+    {
+        VoiceView w;
+        const auto& v = voices_[(size_t) std::clamp (i, 0, kVoices - 1)];
+        if (v.note < 0)
+            return w;
+        w.on = true;
+        w.held = v.held || v.sustained;
+        w.pitch = v.pitchS;
+        w.position = std::clamp (std::log (v.betaS / 0.22) / std::log (0.12), 0.0, 1.0);
+        w.pressure = v.relS;
+        w.level = v.levelS;
+        w.dir = v.dir;
+        return w;
+    }
 
 private:
     struct Voice
@@ -312,7 +340,7 @@ private:
         int note = -1, ch = 1;
         bool held = false, sustained = false;
         double vel = 0.8, dir = 1, pitchS = 60, betaS = 0.1, bowForce = 0, bowTarget = 0, bowRate = 0.001, gain = 1;
-        double vibPh = 0, vibRate = 1, corner = 0;
+        double vibPh = 0, vibRate = 1, corner = 0, relS = 0, levelS = 0;
         int64_t onAt = 0, releaseAt = 0, age = 0;
     };
     void start (Voice& v, int note, double vel, int ch)

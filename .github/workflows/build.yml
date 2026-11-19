@@ -68,7 +68,7 @@ jobs:
           pick notespace '^(notespace|bass-common)/'
           pick steelwave '^(steelwave|bass-common)/'
           pick pumporgan '^(pumporgan|shared)/'
-          pick scrapecello '^(scrapecello|shared)/'
+          pick scrapecello '^(scrapecello|shared|bass-common)/'
 
       # JUCE source, downloaded once and reused
       - name: Cache JUCE
@@ -162,7 +162,7 @@ jobs:
       #   WINDOWS_CERT_PFX: the .pfx certificate, base64-encoded    WINDOWS_CERT_PASSWORD: its password
       - name: Code signing certificate
         id: cert
-        if: steps.what.outputs.steelwave == 'true'
+        if: steps.what.outputs.steelwave == 'true' || steps.what.outputs.scrapecello == 'true'
         shell: pwsh
         env:
           CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
@@ -176,7 +176,7 @@ jobs:
           }
 
       - name: Sign Steelwave plug-in and app
-        if: steps.cert.outputs.present == 'true'
+        if: steps.cert.outputs.present == 'true' && steps.what.outputs.steelwave == 'true'
         shell: pwsh
         env:
           CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
@@ -233,7 +233,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Sign Steelwave installer
-        if: steps.cert.outputs.present == 'true'
+        if: steps.cert.outputs.present == 'true' && steps.what.outputs.steelwave == 'true'
         shell: pwsh
         env:
           CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
@@ -243,10 +243,49 @@ jobs:
             & $signtool sign /f "$env:RUNNER_TEMP\cert.pfx" /p $env:CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $_.FullName
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
-          Remove-Item "$env:RUNNER_TEMP\cert.pfx"
 
       - uses: actions/upload-artifact@v4
         if: steps.what.outputs.steelwave == 'true'
         with:
           name: Steelwave-windows-installer
           path: steelwave/installer/Output/*.exe
+
+      # Scrape Cello: signed (with a certificate), then its installer
+      - name: Sign Scrape Cello plug-in and app
+        if: steps.cert.outputs.present == 'true' && steps.what.outputs.scrapecello == 'true'
+        shell: pwsh
+        env:
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          & $signtool sign /f "$env:RUNNER_TEMP\cert.pfx" /p $env:CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+            "dist\scrapecello\Scrape Cello.vst3\Contents\x86_64-win\Scrape Cello.vst3" "dist\scrapecello\Scrape Cello.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Scrape Cello installer (Inno Setup)
+        if: steps.what.outputs.scrapecello == 'true'
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          & $iscc "/DAppVersion=1.0.0" "/DSrc=$PWD\dist\scrapecello" "scrapecello\installer\ScrapeCello.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (Test-Path "$env:RUNNER_TEMP\cert.pfx") {
+            $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1).FullName
+            Get-ChildItem scrapecello\installer\Output\*.exe | ForEach-Object {
+              & $signtool sign /f "$env:RUNNER_TEMP\cert.pfx" /p $env:CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $_.FullName
+            }
+          }
+        env:
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+
+      - uses: actions/upload-artifact@v4
+        if: steps.what.outputs.scrapecello == 'true'
+        with:
+          name: ScrapeCello-windows-installer
+          path: scrapecello/installer/Output/*.exe
+
+      - name: Remove the signing certificate
+        if: always()
+        shell: pwsh
+        run: if (Test-Path "$env:RUNNER_TEMP\cert.pfx") { Remove-Item "$env:RUNNER_TEMP\cert.pfx" }
